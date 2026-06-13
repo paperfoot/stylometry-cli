@@ -1,0 +1,8 @@
+target/
+.DS_Store
+
+# Validation data: copyrighted corpora (Adams), public-domain downloads, and
+# built profiles are reproducible via eval/fetch_corpora.sh — never committed.
+/eval/corpora/
+/eval/holdout/
+/eval/data/

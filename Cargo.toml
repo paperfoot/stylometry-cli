@@ -1,0 +1,36 @@
+[package]
+name = "stylometry"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Forensic-grade stylometry CLI: build author profiles and verify authorship with calibrated Burrows/Cosine Delta. Local, agent-friendly, single binary."
+license = "MIT"
+repository = "https://github.com/paperfoot/stylometry-cli"
+
+[[bin]]
+name = "stylometry"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive", "env"] }
+comfy-table = "7"
+owo-colors = "4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+self_update = { version = "0.42", features = ["archive-tar", "compression-flate2"] }
+figment = { version = "0.10", features = ["toml", "env"] }
+directories = "6"
+unicode-segmentation = "1"
+walkdir = "2"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
+
+[profile.release]
+lto = true
+strip = true
+opt-level = 3
+codegen-units = 1
