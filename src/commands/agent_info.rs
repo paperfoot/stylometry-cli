@@ -49,7 +49,8 @@ pub fn run() {
                 ],
                 "data_fields": [
                     "profile", "cosine_delta", "classic_delta", "nearest_profile",
-                    "nearest_cosine_delta", "gi_score", "p_same_author", "verdict", "ranking"
+                    "nearest_cosine_delta", "background_rank", "p_same_author",
+                    "calibration_stale", "verdict", "ranking"
                 ]
             },
             "calibrate": {

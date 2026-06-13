@@ -84,6 +84,7 @@ pub fn run(ctx: Ctx, name: String) -> Result<(), AppError> {
         auc,
         c_at_1: accuracy,
         imposters: imposters.len(),
+        ref_signature: model::reference_signature(&all, DEFAULT_MFW, DEFAULT_TRIGRAMS),
     });
     store::save(&updated)?;
 

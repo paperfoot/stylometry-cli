@@ -29,6 +29,10 @@ pub struct Calibration {
     pub c_at_1: f64,
     /// How many imposter profiles were used as negatives.
     pub imposters: usize,
+    /// Signature of the reference set this calibration was fit against. If the
+    /// loaded profile set no longer matches, the calibrated verdict is stale.
+    #[serde(default)]
+    pub ref_signature: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,14 +89,16 @@ impl Profile {
             let ttot = features::total(&tc);
             n_tokens += wtot;
 
+            // Store ALL feature relative frequencies (no per-chunk pruning):
+            // the chunk extractor must match the query extractor in model.rs
+            // exactly, or training/calibration and compare disagree on rare
+            // features. Vocab selection (top-N) happens later in the model.
             let wf: HashMap<String, f64> = wc
                 .iter()
                 .map(|(k, &v)| (k.clone(), features::rel_freq(v, wtot)))
                 .collect();
-            // Prune hapax trigrams per chunk to bound stored size.
             let tf: HashMap<String, f64> = tc
                 .iter()
-                .filter(|&(_, &v)| v >= 2)
                 .map(|(k, &v)| (k.clone(), features::rel_freq(v, ttot)))
                 .collect();
 

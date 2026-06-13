@@ -201,3 +201,15 @@ pub fn mean_vec(vectors: &[Vec<f64>], dim: usize) -> Vec<f64> {
     }
     m
 }
+
+/// A stable signature of the reference set + feature settings. A calibration is
+/// only valid against the exact reference it was fit on; `compare` recomputes
+/// this and flags the calibration stale if the profile set has changed.
+pub fn reference_signature(profiles: &[Profile], n_words: usize, n_trigrams: usize) -> String {
+    let mut parts: Vec<String> = profiles
+        .iter()
+        .map(|p| format!("{}:{}:{}", p.name, p.n_chunks, p.n_tokens))
+        .collect();
+    parts.sort();
+    format!("mfw={n_words};tri={n_trigrams};{}", parts.join("|"))
+}

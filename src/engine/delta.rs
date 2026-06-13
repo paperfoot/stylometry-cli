@@ -30,3 +30,30 @@ pub fn classic_delta(a: &[f64], b: &[f64]) -> f64 {
     let s: f64 = (0..n).map(|i| (a[i] - b[i]).abs()).sum();
     s / n as f64
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cosine_identical_is_zero() {
+        let v = [1.0, 2.0, -3.0, 0.5];
+        assert!(cosine_delta(&v, &v).abs() < 1e-12);
+    }
+
+    #[test]
+    fn cosine_opposite_is_two() {
+        assert!((cosine_delta(&[1.0, 0.0], &[-1.0, 0.0]) - 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn cosine_orthogonal_is_one() {
+        assert!((cosine_delta(&[1.0, 0.0], &[0.0, 1.0]) - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn classic_delta_is_mean_abs_zdiff() {
+        // |0-1| + |0-2| + |0-3| = 6, / 3 = 2.0
+        assert!((classic_delta(&[0.0, 0.0, 0.0], &[1.0, 2.0, 3.0]) - 2.0).abs() < 1e-12);
+    }
+}

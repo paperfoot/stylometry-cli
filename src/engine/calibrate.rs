@@ -74,9 +74,12 @@ pub fn fit_logistic(samples: &[(f64, bool)]) -> (f64, f64) {
         .map(|(d, same)| ((d - mu) / sigma, if *same { 1.0 } else { 0.0 }))
         .collect();
 
-    // GD on standardized x.
+    // GD on standardized x, with L2 on the slope. The labelled deltas are often
+    // linearly separable, which drives an unregularized slope to infinity and
+    // yields fake 0/1 "probabilities"; the penalty keeps P(same) sane.
     let (mut w0, mut w1) = (0.0f64, 0.0f64);
     let lr = 0.3;
+    let lambda = 0.5;
     for _ in 0..4000 {
         let (mut g0, mut g1) = (0.0f64, 0.0f64);
         for &(x, y) in &xs {
@@ -86,7 +89,7 @@ pub fn fit_logistic(samples: &[(f64, bool)]) -> (f64, f64) {
             g1 += err * x;
         }
         w0 -= lr * g0 / n;
-        w1 -= lr * g1 / n;
+        w1 -= lr * (g1 / n + lambda * w1);
     }
     // Map back: w0 + w1 * (d - mu)/sigma = (w0 - w1*mu/sigma) + (w1/sigma) * d
     let slope = w1 / sigma;
@@ -97,4 +100,49 @@ pub fn fit_logistic(samples: &[(f64, bool)]) -> (f64, f64) {
 #[inline]
 pub fn probability(delta: f64, slope: f64, intercept: f64) -> f64 {
     sigmoid(intercept + slope * delta)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sigmoid_zero_is_half() {
+        assert!((sigmoid(0.0) - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn auc_perfect_separation_is_one() {
+        // smaller delta = same author (positive)
+        assert!((auc(&[0.1, 0.2, 0.3], &[0.8, 0.9, 1.0]) - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn auc_reversed_is_zero() {
+        assert!(auc(&[0.8, 0.9], &[0.1, 0.2]).abs() < 1e-12);
+    }
+
+    #[test]
+    fn best_threshold_separates_cleanly() {
+        let (t, acc) = best_threshold(&[0.1, 0.2, 0.3], &[0.7, 0.8, 0.9]);
+        assert!((0.3..0.7).contains(&t));
+        assert!((acc - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn logistic_decreases_with_delta() {
+        let mut s: Vec<(f64, bool)> = Vec::new();
+        for d in [0.10, 0.15, 0.20, 0.25] {
+            s.push((d, true));
+        }
+        for d in [0.70, 0.80, 0.90, 1.00] {
+            s.push((d, false));
+        }
+        let (slope, intercept) = fit_logistic(&s);
+        assert!(slope < 0.0, "bigger delta must mean lower P(same)");
+        let p_small = probability(0.1, slope, intercept);
+        let p_big = probability(1.0, slope, intercept);
+        assert!(p_small > p_big);
+        assert!(p_small > 0.5 && p_big < 0.5);
+    }
 }

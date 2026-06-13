@@ -44,9 +44,15 @@ StyloMetrix; classic stylometry survives LLM impersonation — arXiv 2603.29454)
   `stylo` R package (Würzburg + General Imposters) and `faststylometry` (Classic
   Delta + calibration) on a shared toy corpus, asserting max-abs deviation. These
   stay dev/CI dependencies, never runtime.
-- **Negative-author corpora.** Expand beyond three near-neighbours; document
-  public-domain vs licensed sourcing; add a content-confound baseline so we know
-  separation isn't topic leakage.
+- **Honest generalization eval** (from the Codex + Gemini reviews). Leave-one-
+  WORK-out (positives only across *different* books by the same author); texts
+  normalized to 500–1000 words (the forensic range); a same-topic control (e.g.
+  Federalist Papers or same-event news) to prove we aren't classifying topic;
+  an open-set imposter pool (100+ authors) instead of the current closed set of
+  three; and a train/test split so the threshold is never chosen on the test
+  set. Register must match the target: the v0.1 LOWO showed Adams's non-fiction
+  is rejected by a fiction-built profile, so the writer-judge profile must be
+  built from Adams non-fiction.
 - Publish to crates.io + a Homebrew formula in `paperfoot/homebrew-tap`.
 
 ## Open question

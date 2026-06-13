@@ -1,15 +1,19 @@
 //! `compare`: score a text against a target profile and return a verdict.
 //!
 //! Reports Cosine Delta and Classic Burrows Delta to the target, the nearest
-//! profile overall, a General-Imposters score (how much closer the text is to
-//! the target than to the other profiles), and — when the target is calibrated
-//! — a P(same author) and a same/different verdict.
+//! profile overall, a background-rank score (how much closer the text is to the
+//! target than to the other profiles — a simple rank fraction, NOT full
+//! Koppel-Winter General Imposters), and — when the target has a calibration
+//! that still matches the current profile set — a P(same author) and verdict.
 
 use std::path::PathBuf;
 
 use serde::Serialize;
 
-use crate::engine::{DEFAULT_MFW, DEFAULT_TRIGRAMS, calibrate, delta, model::ReferenceModel, store};
+use crate::engine::{
+    DEFAULT_MFW, DEFAULT_TRIGRAMS, calibrate, delta, model,
+    model::ReferenceModel, store,
+};
 use crate::error::AppError;
 use crate::output::{self, Ctx};
 
@@ -26,8 +30,13 @@ struct CompareResult {
     classic_delta: f64,
     nearest_profile: String,
     nearest_cosine_delta: f64,
-    gi_score: Option<f64>,
+    /// Fraction of imposter profiles farther from the text than the target is.
+    /// Simple rank fraction, not full General Imposters.
+    background_rank: Option<f64>,
     p_same_author: Option<f64>,
+    /// True if the target has a calibration but the profile set changed since it
+    /// was fit, so the calibrated probability/threshold can't be trusted.
+    calibration_stale: bool,
     verdict: String,
     ranking: Vec<Ranked>,
 }
@@ -63,7 +72,6 @@ pub fn run(
 
     let qz = model.zscore(&model.vectorize_text(&query_text));
 
-    // Delta to every profile centroid.
     let mut ranking: Vec<Ranked> = Vec::new();
     let mut target_cosine = f64::INFINITY;
     let mut target_classic = f64::INFINITY;
@@ -86,31 +94,38 @@ pub fn run(
     let nearest = ranking[0].profile.clone();
     let nearest_delta = ranking[0].cosine_delta;
 
-    let gi_score = if imposter_deltas.is_empty() {
+    let background_rank = if imposter_deltas.is_empty() {
         None
     } else {
         let farther = imposter_deltas.iter().filter(|&&d| d > target_cosine).count();
         Some(farther as f64 / imposter_deltas.len() as f64)
     };
 
-    let (p_same, verdict) = match &target.calibration {
-        Some(cal) => {
-            let p = calibrate::probability(target_cosine, cal.slope, cal.intercept);
-            let v = if target_cosine <= cal.threshold {
-                "same_author"
-            } else {
-                "different_author"
-            };
-            (Some(p), v.to_string())
-        }
-        None => {
-            let v = match gi_score {
-                Some(g) if g >= 0.5 && nearest == target.name => "same_author_uncalibrated",
-                Some(_) => "different_author_uncalibrated",
-                None => "insufficient_background",
-            };
-            (None, v.to_string())
-        }
+    // A calibration is only valid against the reference set it was fit on.
+    let current_sig = model::reference_signature(&all, DEFAULT_MFW, DEFAULT_TRIGRAMS);
+    let calibrated_fresh = target
+        .calibration
+        .as_ref()
+        .map(|c| c.ref_signature == current_sig)
+        .unwrap_or(false);
+    let calibration_stale = target.calibration.is_some() && !calibrated_fresh;
+
+    let (p_same, verdict) = if calibrated_fresh {
+        let cal = target.calibration.as_ref().unwrap();
+        let p = calibrate::probability(target_cosine, cal.slope, cal.intercept);
+        let v = if target_cosine <= cal.threshold {
+            "same_author"
+        } else {
+            "different_author"
+        };
+        (Some(p), v.to_string())
+    } else {
+        let v = match background_rank {
+            Some(g) if g >= 0.5 && nearest == target.name => "same_author_uncalibrated",
+            Some(_) => "different_author_uncalibrated",
+            None => "insufficient_background",
+        };
+        (None, v.to_string())
     };
 
     let data = CompareResult {
@@ -119,8 +134,9 @@ pub fn run(
         classic_delta: target_classic,
         nearest_profile: nearest,
         nearest_cosine_delta: nearest_delta,
-        gi_score,
+        background_rank,
         p_same_author: p_same,
+        calibration_stale,
         verdict,
         ranking,
     };
@@ -139,8 +155,14 @@ pub fn run(
         if let Some(p) = d.p_same_author {
             println!("  P(same author) = {:.3}", p);
         }
-        if let Some(g) = d.gi_score {
-            println!("  GI score = {:.2} (closer to target than {:.0}% of imposters)", g, g * 100.0);
+        if let Some(g) = d.background_rank {
+            println!("  background rank = {:.2} (closer to target than {:.0}% of imposters)", g, g * 100.0);
+        }
+        if d.calibration_stale {
+            println!(
+                "  {}",
+                "calibration is stale (profile set changed) — re-run calibrate".yellow()
+            );
         }
     });
     Ok(())

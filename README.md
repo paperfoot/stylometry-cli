@@ -43,9 +43,9 @@ stylometry profile list
 ```
 
 `compare` returns Cosine Delta, Classic Burrows Delta, the nearest profile, a
-General-Imposters score, and (once calibrated) `P(same author)` with a
-same/different verdict. Every command takes `--json`; run `stylometry agent-info`
-for the full manifest.
+background-rank score (a simple rank fraction, not full General Imposters), and
+(once calibrated) `P(same author)` with a same/different verdict. Every command
+takes `--json`; run `stylometry agent-info` for the full manifest.
 
 ## How it works
 
@@ -60,35 +60,46 @@ for the full manifest.
 4. **Calibrate + verify.** Fit a logistic `delta → P(same author)` using the
    author's own held-out chunks (leave-one-out) as positives and the other
    profiles as imposters; report AUC and the decision threshold. A
-   General-Imposters score says how much closer the text is to the target than
-   to any other profile.
+   background-rank score (a simple rank fraction, not full Koppel-Winter General
+   Imposters) says how much closer the text is to the target than to any other
+   profile. Calibration is bound to its reference set: change the profiles and
+   `compare` flags the calibration stale rather than trusting a wrong threshold.
 
 ## Validation
 
-On a labelled set of Adams vs three near-neighbour British comic authors
-(Jerome, Wodehouse, Chesterton):
+Adams vs three near-neighbour British comic authors (Jerome, Wodehouse,
+Chesterton), with two deliberately adversarial checks:
 
 | Check | Result |
 |---|---|
-| Author-separation AUC | 0.9999 |
-| Accuracy at threshold | 0.996 |
-| Held-out Adams book (unseen) | same_author, P ≈ 1.0 |
-| Same-source control (Gutenberg-only, identical formatting) | author AUC 1.0 |
+| Same-source control (3 Gutenberg authors, identical formatting) | author-separation AUC 1.0 |
+| Leave-one-work-out: hold out each whole Adams book, verify it | 5/6 works → same_author |
+| Cross-author negative (Jerome) vs Adams | different_author, attributed to jerome |
 
-The same-source control matters: separating three authors whose texts share an
-identical plain-text source shows the signal is **authorial style, not a
-formatting or provenance artifact**.
+Two things keep these honest rather than flattering:
 
-Read these numbers honestly: this is an *easy* benchmark. Each author is
-represented by a single long book, so author, book, and topic are confounded,
-and within-book chunks are self-similar. The AUC therefore establishes that the
-method works and is not an artifact, but it is **optimistic and not a real-world
-accuracy estimate**. A topic-controlled evaluation (short texts, same-topic
-different-authors, a content-confound baseline) is the v0.2 eval; see
-[ROADMAP.md](ROADMAP.md).
+- **Same-source control.** Separating three authors whose texts share an
+  identical plain-text source shows the signal is authorial style, not a
+  formatting or provenance artifact.
+- **Leave-one-work-out.** Holding out an entire *book* (different topic, never
+  trained) and still verifying it is a real generalization test, unlike
+  leave-one-chunk-out within a single book. 5 of 6 Adams works pass.
 
-Reproduce: `eval/fetch_corpora.sh` then `eval/validate.sh` (exits 0 only if the
-verifier holds). The build is ritalin-gated.
+The one LOWO miss is the useful part: *The Salmon of Doubt* — Adams's
+**non-fiction** collection — is rejected by a fiction-built profile and
+attributed to Chesterton (another essayist). **A profile only recognizes the
+register it was built from**, so build it from the kind of writing you intend to
+verify.
+
+Caveat: each author here is one long book, so author/book/topic are partly
+confounded and chunk-level AUC is optimistic. A topic-controlled evaluation
+(short texts, same-topic different-authors, open-set imposters) is v0.2 work;
+see [ROADMAP.md](ROADMAP.md). The method and math were independently reviewed by
+GPT-5.5 (Codex) and Gemini; their findings drove the calibration-binding,
+train/query feature-parity, and logistic-regularization fixes in this version.
+
+Reproduce: `eval/fetch_corpora.sh`, then `eval/validate.sh` (smoke test) and
+`eval/lowo.sh` (the honest cross-work test). The build is ritalin-gated.
 
 ## Roadmap
 

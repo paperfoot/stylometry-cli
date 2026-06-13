@@ -24,7 +24,13 @@ pub fn read_corpus(path: &Path) -> Result<String, AppError> {
     if path.is_dir() {
         let mut buf = String::new();
         let mut files = 0usize;
-        for entry in WalkDir::new(path).into_iter().filter_map(Result::ok) {
+        // Sorted traversal so multi-file profile chunk boundaries are
+        // reproducible regardless of filesystem iteration order.
+        for entry in WalkDir::new(path)
+            .sort_by_file_name()
+            .into_iter()
+            .filter_map(Result::ok)
+        {
             if !entry.file_type().is_file() {
                 continue;
             }
