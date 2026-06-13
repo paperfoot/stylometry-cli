@@ -68,12 +68,24 @@ for the full manifest.
 On a labelled set of Adams vs three near-neighbour British comic authors
 (Jerome, Wodehouse, Chesterton):
 
-| Metric | Result |
+| Check | Result |
 |---|---|
-| Author-separation AUC | **0.9999** |
-| Accuracy at threshold | **0.996** |
-| Held-out Adams book (unseen) | **same_author**, P ≈ 1.0 |
-| Jerome vs Adams | **different_author**, correctly attributed to jerome |
+| Author-separation AUC | 0.9999 |
+| Accuracy at threshold | 0.996 |
+| Held-out Adams book (unseen) | same_author, P ≈ 1.0 |
+| Same-source control (Gutenberg-only, identical formatting) | author AUC 1.0 |
+
+The same-source control matters: separating three authors whose texts share an
+identical plain-text source shows the signal is **authorial style, not a
+formatting or provenance artifact**.
+
+Read these numbers honestly: this is an *easy* benchmark. Each author is
+represented by a single long book, so author, book, and topic are confounded,
+and within-book chunks are self-similar. The AUC therefore establishes that the
+method works and is not an artifact, but it is **optimistic and not a real-world
+accuracy estimate**. A topic-controlled evaluation (short texts, same-topic
+different-authors, a content-confound baseline) is the v0.2 eval; see
+[ROADMAP.md](ROADMAP.md).
 
 Reproduce: `eval/fetch_corpora.sh` then `eval/validate.sh` (exits 0 only if the
 verifier holds). The build is ritalin-gated.
