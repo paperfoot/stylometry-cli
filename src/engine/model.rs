@@ -204,11 +204,29 @@ pub fn mean_vec(vectors: &[Vec<f64>], dim: usize) -> Vec<f64> {
 
 /// A stable signature of the reference set + feature settings. A calibration is
 /// only valid against the exact reference it was fit on; `compare` recomputes
-/// this and flags the calibration stale if the profile set has changed.
+/// this and flags the calibration stale if the profile set OR its content
+/// changed. Includes a content hash per profile so swapping in a different
+/// profile with identical chunk/token counts is still detected.
 pub fn reference_signature(profiles: &[Profile], n_words: usize, n_trigrams: usize) -> String {
+    use std::hash::{Hash, Hasher};
     let mut parts: Vec<String> = profiles
         .iter()
-        .map(|p| format!("{}:{}:{}", p.name, p.n_chunks, p.n_tokens))
+        .map(|p| {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            let mut wc: Vec<(&String, &u64)> = p.word_counts.iter().collect();
+            wc.sort();
+            let mut tc: Vec<(&String, &u64)> = p.trigram_counts.iter().collect();
+            tc.sort();
+            for (k, v) in wc {
+                k.hash(&mut h);
+                v.hash(&mut h);
+            }
+            for (k, v) in tc {
+                k.hash(&mut h);
+                v.hash(&mut h);
+            }
+            format!("{}:{}:{}:{:x}", p.name, p.n_chunks, p.n_tokens, h.finish())
+        })
         .collect();
     parts.sort();
     format!("mfw={n_words};tri={n_trigrams};{}", parts.join("|"))

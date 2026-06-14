@@ -50,9 +50,16 @@ StyloMetrix; classic stylometry survives LLM impersonation — arXiv 2603.29454)
   Federalist Papers or same-event news) to prove we aren't classifying topic;
   an open-set imposter pool (100+ authors) instead of the current closed set of
   three; and a train/test split so the threshold is never chosen on the test
-  set. Register must match the target: the v0.1 LOWO showed Adams's non-fiction
-  is rejected by a fiction-built profile, so the writer-judge profile must be
-  built from Adams non-fiction.
+  set. Cleanliness/register: the v0.1 LOWO miss (*The Salmon of Doubt*) turned
+  out to be a contaminated multi-author collection, so cross-register
+  sensitivity was NOT cleanly demonstrated — a proper cross-genre test (clean
+  Adams non-fiction vs clean Adams fiction) is still owed. Regardless, build the
+  writer-judge profile from clean Adams non-fiction.
+
+- **Strengthen calibration binding.** The reference signature must be content-
+  based (hash of vocab/mean/sd), not just `name:n_chunks:n_tokens` — Codex showed
+  a same-counts profile swap evades staleness detection. (Partially addressed:
+  the signature now includes a content hash of each profile's counts.)
 - Publish to crates.io + a Homebrew formula in `paperfoot/homebrew-tap`.
 
 ## Open question

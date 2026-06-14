@@ -1,8 +1,10 @@
 # stylometry
 
-**Forensic-grade authorship verification from the terminal.** Build a per-author
-profile by fingerprinting their writing, then ask of any text: *was this written
-by that author?* — and get a calibrated probability, not a vibe.
+**Authorship verification from the terminal.** Build a per-author profile by
+fingerprinting their writing, then ask of any text: *was this written by that
+author?* — and get a calibrated probability, not a vibe. It implements the
+*method* forensic and academic stylometry use (Burrows/Cosine Delta); it is a
+lean v0.1, not a court-grade instrument (see [Validation](#validation)).
 
 Pure Rust, single static binary, no model and no network required. Built on the
 [agent-cli-framework](https://github.com/paperfoot/agent-cli-framework): JSON
@@ -85,11 +87,14 @@ Two things keep these honest rather than flattering:
   trained) and still verifying it is a real generalization test, unlike
   leave-one-chunk-out within a single book. 5 of 6 Adams works pass.
 
-The one LOWO miss is the useful part: *The Salmon of Doubt* — Adams's
-**non-fiction** collection — is rejected by a fiction-built profile and
-attributed to Chesterton (another essayist). **A profile only recognizes the
-register it was built from**, so build it from the kind of writing you intend to
-verify.
+The one LOWO miss is instructive but **confounded**: *The Salmon of Doubt* is a
+posthumous, editor-assembled collection — its own contents list three
+introductions, an editor's note, and an unfinished *novel* — so it is not clean
+single-author non-fiction. Its rejection is most likely contamination and
+heterogeneity, **not** proof that the profile is register-bound; topic-invariance
+otherwise held (the four Hitchhiker novels have different plots yet all verified).
+Practical takeaway, for the softer reason: build a profile from clean text of the
+kind you intend to verify.
 
 Caveat: each author here is one long book, so author/book/topic are partly
 confounded and chunk-level AUC is optimistic. A topic-controlled evaluation

@@ -3,7 +3,7 @@ name = "stylometry"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
-description = "Forensic-grade stylometry CLI: build author profiles and verify authorship with calibrated Burrows/Cosine Delta. Local, agent-friendly, single binary."
+description = "Authorship-verification stylometry CLI: build author profiles and verify authorship with calibrated Burrows/Cosine Delta. Local, agent-friendly, single binary."
 license = "MIT"
 repository = "https://github.com/paperfoot/stylometry-cli"
 
