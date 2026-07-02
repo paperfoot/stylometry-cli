@@ -7,6 +7,13 @@ rust-version = "1.85"
 description = "Authorship-verification stylometry CLI: build author profiles and verify authorship with calibrated Burrows/Cosine Delta. Local, agent-friendly, single binary."
 license = "MIT"
 repository = "https://github.com/paperfoot/stylometry-cli"
+readme = "README.md"
+keywords = ["stylometry", "authorship", "forensics", "nlp", "cli"]
+categories = ["command-line-utilities", "text-processing"]
+# The eval corpora/profile fixtures (tens of MiB) and internal dirs are for
+# development and the eval suite only -- they don't belong in the published
+# crate. Keep the package to source + docs.
+exclude = ["eval/", ".ritalin/", ".claude/", ".github/"]
 
 [[bin]]
 name = "stylometry"
