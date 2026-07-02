@@ -8,7 +8,7 @@ use crate::engine;
 #[command(
     name = "stylometry",
     version,
-    about = "Forensic-grade stylometry: author profiles + calibrated authorship verification"
+    about = "Stylometry: author profiles + calibrated authorship verification"
 )]
 pub struct Cli {
     /// Force JSON output even in a terminal
