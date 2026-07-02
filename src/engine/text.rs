@@ -96,6 +96,13 @@ pub fn word_tokens(text: &str) -> Vec<String> {
     text.unicode_words().map(|w| w.to_lowercase()).collect()
 }
 
+/// Word count under the same Unicode segmentation the features use. This is
+/// the single definition of "word" for chunk sizing, length gates, and length
+/// warnings — do not mix with `split_whitespace` counts.
+pub fn count_words(text: &str) -> usize {
+    text.unicode_words().count()
+}
+
 /// Character trigrams over a normalized stream: lowercased, runs of whitespace
 /// collapsed to a single space. Punctuation is retained -- it carries style.
 pub fn char_trigrams(text: &str) -> Vec<String> {
@@ -122,31 +129,75 @@ pub fn char_trigrams(text: &str) -> Vec<String> {
     chars.windows(3).map(|w| w.iter().collect()).collect()
 }
 
-/// Split a text into chunks of approximately `chunk_words` words each.
-/// The trailing remainder is merged into the previous chunk if it is shorter
-/// than half a chunk, so we never produce a tiny, high-variance final sample.
+/// Split a text into chunks of approximately `chunk_words` words each, where
+/// "word" means a Unicode word (same segmentation as the features), not a
+/// whitespace token — punctuation-only tokens don't count toward chunk size.
+/// Chunk boundaries fall on whitespace so the raw text (punctuation included)
+/// is preserved for trigram extraction. The trailing remainder is merged into
+/// the previous chunk if it is shorter than half a chunk, so we never produce
+/// a tiny, high-variance final sample.
 pub fn chunk_by_words(text: &str, chunk_words: usize) -> Vec<String> {
-    let words: Vec<&str> = text.split_whitespace().collect();
-    if words.is_empty() {
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    if tokens.is_empty() {
         return Vec::new();
     }
     let chunk_words = chunk_words.max(50);
     let mut chunks: Vec<String> = Vec::new();
-    let mut i = 0;
-    while i < words.len() {
-        let end = (i + chunk_words).min(words.len());
-        chunks.push(words[i..end].join(" "));
-        i = end;
+    let mut cur: Vec<&str> = Vec::new();
+    let mut cur_words = 0usize;
+    for tok in tokens {
+        cur.push(tok);
+        cur_words += tok.unicode_words().count();
+        if cur_words >= chunk_words {
+            chunks.push(cur.join(" "));
+            cur.clear();
+            cur_words = 0;
+        }
     }
-    // Merge a too-small trailing chunk into its predecessor.
-    if chunks.len() >= 2 {
-        let last_len = chunks.last().unwrap().split_whitespace().count();
-        if last_len < chunk_words / 2 {
-            let last = chunks.pop().unwrap();
+    if !cur.is_empty() {
+        if !chunks.is_empty() && cur_words < chunk_words / 2 {
             let prev = chunks.last_mut().unwrap();
             prev.push(' ');
-            prev.push_str(&last);
+            prev.push_str(&cur.join(" "));
+        } else {
+            chunks.push(cur.join(" "));
         }
     }
     chunks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chunking_counts_unicode_words_not_whitespace_tokens() {
+        // 120 words + 120 punctuation-only tokens. With whitespace counting
+        // this would split at token 100; with word counting the first chunk
+        // must contain >= 100 actual words.
+        let text = "word — ".repeat(120);
+        let chunks = chunk_by_words(&text, 100);
+        assert!(!chunks.is_empty());
+        assert!(
+            count_words(&chunks[0]) >= 100,
+            "first chunk has {} words, expected >= 100",
+            count_words(&chunks[0])
+        );
+    }
+
+    #[test]
+    fn tiny_trailing_chunk_merges_into_predecessor() {
+        let text = "alpha beta ".repeat(130); // 260 words at chunk 100 -> 2 full + 60 tail
+        let chunks = chunk_by_words(&text, 100);
+        assert_eq!(chunks.len(), 3); // 60 >= 100/2, kept separate
+        let text = "alpha beta ".repeat(110); // 220 words -> 20-word tail merges
+        let chunks = chunk_by_words(&text, 100);
+        assert_eq!(chunks.len(), 2);
+        assert!(count_words(chunks.last().unwrap()) >= 100);
+    }
+
+    #[test]
+    fn count_words_ignores_punctuation_tokens() {
+        assert_eq!(count_words("hello — world ... !"), 2);
+    }
 }
