@@ -25,14 +25,33 @@ pub struct Calibration {
     pub threshold: f64,
     /// Area under ROC on the held-out same/different set.
     pub auc: f64,
-    /// Accuracy at the chosen threshold (PAN c@1 with no abstention).
+    /// PAN c@1 on the holdout split: accuracy with the abstention band counted
+    /// per the c@1 formula (legacy calibrations: accuracy with no abstention).
     pub c_at_1: f64,
     /// How many imposter profiles were used as negatives.
     pub imposters: usize,
-    /// Signature of the reference set this calibration was fit against. If the
-    /// loaded profile set no longer matches, the calibrated verdict is stale.
+    /// Signature of the reference set this calibration was fit against. With a
+    /// frozen reference the calibrated verdict stays valid when profiles
+    /// change; a mismatch now only means the imposter pool has drifted since
+    /// calibration (re-calibrate to account for it).
     #[serde(default)]
     pub ref_signature: String,
+    /// Accuracy of the train-selected threshold on a held-out tail split —
+    /// the honest generalization number (the threshold never saw these).
+    #[serde(default)]
+    pub holdout_accuracy: Option<f64>,
+    /// Brier score of the train-fit logistic on the holdout split (lower is
+    /// better; 0.25 = uninformative). Guards against fake 0/1 confidence.
+    #[serde(default)]
+    pub holdout_brier: Option<f64>,
+    /// Words per chunk the calibration was fit on. Texts much shorter or
+    /// longer than this get a length-mismatch warning at compare time.
+    #[serde(default)]
+    pub chunk_words: Option<usize>,
+    /// The exact reference model (vocab + mean/sd) this calibration was fit
+    /// on, frozen so scoring never re-fits as the profile set changes.
+    #[serde(default)]
+    pub frozen_reference: Option<crate::engine::model::ReferenceModel>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

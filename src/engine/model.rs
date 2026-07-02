@@ -7,12 +7,14 @@
 
 use std::collections::HashMap;
 
+use serde::{Deserialize, Serialize};
+
 use crate::engine::features;
 use crate::engine::profile::Profile;
 
 /// Ordered feature names: `words` first, then `trigrams`. Vector layout is
 /// `[word rel-freqs .. ; trigram rel-freqs ..]`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Vocab {
     pub words: Vec<String>,
     pub trigrams: Vec<String>,
@@ -24,7 +26,10 @@ impl Vocab {
     }
 }
 
-#[derive(Debug, Clone)]
+/// Serializable so `calibrate` can freeze the exact reference (vocab +
+/// mean/sd) into the calibration artifact: scoring against a calibrated
+/// profile then never silently re-fits as profiles are added or removed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReferenceModel {
     pub vocab: Vocab,
     pub mean: Vec<f64>,
