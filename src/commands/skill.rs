@@ -8,15 +8,15 @@ use crate::output::{self, Ctx};
 // Built from the binary name. No hardcoded app name.
 
 fn skill_content() -> String {
-    let name = env!("CARGO_PKG_NAME");
+    let name = env!("CARGO_BIN_NAME");
     format!(
         r#"---
 name: {name}
 description: >
-  Forensic-grade stylometry. Build per-author profiles from their writing, then
-  verify whether a text was written by that author (calibrated Burrows/Cosine
-  Delta -> P(same author)). Local, no model needed. Run `{name} agent-info` for
-  full capabilities, flags, and exit codes.
+  Authorship verification stylometry. Build per-author profiles from their
+  writing, then verify whether a text was written by that author (calibrated
+  Burrows/Cosine Delta -> P(same author)). Local, no model needed. Run
+  `{name} agent-info` for full capabilities, flags, and exit codes.
 ---
 
 ## {name}
@@ -54,7 +54,7 @@ fn home() -> PathBuf {
 
 fn skill_targets() -> Vec<SkillTarget> {
     let h = home();
-    let app = env!("CARGO_PKG_NAME");
+    let app = env!("CARGO_BIN_NAME");
     vec![
         SkillTarget {
             name: "Claude Code",

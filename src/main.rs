@@ -1,4 +1,4 @@
-//! stylometry -- forensic-grade authorship analysis CLI.
+//! stylometry -- authorship verification CLI.
 //!
 //! Build per-author profiles by fingerprinting their writing, then verify new
 //! text against them with calibrated Burrows/Cosine Delta. Local, single

@@ -56,8 +56,10 @@ impl Default for UpdateConfig {
             install_source: "auto".into(),
             owner: "paperfoot".into(),
             repo: "stylometry-cli".into(),
+            // The crates.io package is `stylometry-cli` (the bare name was
+            // taken); the installed binary and formula stay `stylometry`.
             crate_name: env!("CARGO_PKG_NAME").into(),
-            formula: env!("CARGO_PKG_NAME").into(),
+            formula: env!("CARGO_BIN_NAME").into(),
             tap: "paperfoot/tap".into(),
         }
     }
@@ -66,7 +68,7 @@ impl Default for UpdateConfig {
 // ── Paths ──────────────────────────────────────────────────────────────────
 
 pub fn config_path() -> PathBuf {
-    directories::ProjectDirs::from("", "", env!("CARGO_PKG_NAME"))
+    directories::ProjectDirs::from("", "", env!("CARGO_BIN_NAME"))
         .map(|d| d.config_dir().to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."))
         .join("config.toml")
@@ -78,7 +80,7 @@ pub fn load() -> Result<AppConfig, AppError> {
     use figment::Figment;
     use figment::providers::{Env, Format as _, Serialized, Toml};
 
-    let prefix = format!("{}_", env!("CARGO_PKG_NAME").to_uppercase());
+    let prefix = format!("{}_", env!("CARGO_BIN_NAME").to_uppercase());
 
     Figment::from(Serialized::defaults(AppConfig::default()))
         .merge(Toml::file(config_path()))

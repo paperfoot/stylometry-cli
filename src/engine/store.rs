@@ -12,7 +12,7 @@ pub fn profiles_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("STYLOMETRY_DATA_DIR") {
         return PathBuf::from(dir).join("profiles");
     }
-    directories::ProjectDirs::from("", "", env!("CARGO_PKG_NAME"))
+    directories::ProjectDirs::from("", "", env!("CARGO_BIN_NAME"))
         .map(|d| d.data_dir().to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."))
         .join("profiles")
@@ -51,7 +51,7 @@ pub fn load(name: &str) -> Result<Profile, AppError> {
     if !path.exists() {
         return Err(AppError::InvalidInput(format!(
             "no profile named '{name}'. List with: {} profile list",
-            env!("CARGO_PKG_NAME")
+            env!("CARGO_BIN_NAME")
         )));
     }
     let raw = std::fs::read_to_string(&path)?;

@@ -1,6 +1,7 @@
 [package]
-name = "stylometry"
-version = "0.1.0"
+# crates.io package name; the installed binary is `stylometry` (see [[bin]]).
+name = "stylometry-cli"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Authorship-verification stylometry CLI: build author profiles and verify authorship with calibrated Burrows/Cosine Delta. Local, agent-friendly, single binary."

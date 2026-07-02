@@ -198,7 +198,7 @@ fn managed_result(
 
 pub fn run(ctx: Ctx, check: bool, config: &AppConfig) -> Result<(), AppError> {
     let current = env!("CARGO_PKG_VERSION");
-    let name = env!("CARGO_PKG_NAME");
+    let name = env!("CARGO_BIN_NAME");
     let source = detect_install_source(config)?;
 
     if !config.update.enabled {

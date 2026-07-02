@@ -139,7 +139,7 @@ pub fn print_clap_error(format: Format, err: &clap::Error) {
                 "error": {
                     "code": "invalid_input",
                     "message": err.to_string(),
-                    "suggestion": format!("Check arguments with: {} --help", env!("CARGO_PKG_NAME")),
+                    "suggestion": format!("Check arguments with: {} --help", env!("CARGO_BIN_NAME")),
                 },
             });
             eprintln!("{}", safe_json_string(&envelope));
