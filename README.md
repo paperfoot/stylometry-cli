@@ -25,6 +25,8 @@ on purpose, run only on held-out text, never optimized against.
 ## Install
 
 ```bash
+brew install paperfoot/tap/stylometry                             # Homebrew
+cargo install stylometry-cli                                      # crates.io (binary: stylometry)
 cargo install --git https://github.com/paperfoot/stylometry-cli   # from source
 ```
 
@@ -46,8 +48,11 @@ stylometry profile list
 
 `compare` returns Cosine Delta, Classic Burrows Delta, the nearest profile, a
 background-rank score (a simple rank fraction, not full General Imposters), and
-(once calibrated) `P(same author)` with a same/different verdict. Every command
-takes `--json`; run `stylometry agent-info` for the full manifest.
+(once calibrated) `P(same author)` with a **same / different / inconclusive**
+verdict — probabilities in the 0.35–0.65 band abstain rather than force a call.
+It reads a file, `-`/piped stdin, or `--text`, and warns when the text's length
+is far from the length the calibration was fit on. Every command takes
+`--json`; run `stylometry agent-info` for the full manifest.
 
 ## How it works
 
@@ -61,11 +66,19 @@ takes `--json`; run `stylometry agent-info` for the full manifest.
    z-space centroid; Classic Burrows Delta reported alongside.
 4. **Calibrate + verify.** Fit a logistic `delta → P(same author)` using the
    author's own held-out chunks (leave-one-out) as positives and the other
-   profiles as imposters; report AUC and the decision threshold. A
-   background-rank score (a simple rank fraction, not full Koppel-Winter General
-   Imposters) says how much closer the text is to the target than to any other
-   profile. Calibration is bound to its reference set: change the profiles and
-   `compare` flags the calibration stale rather than trusting a wrong threshold.
+   profiles as imposters. The logistic's L2 strength is selected by 3-fold
+   cross-validated Brier score, not hard-coded; the decision threshold is
+   selected on a train split and its accuracy reported on a held-out tail split
+   it never saw (`holdout_accuracy`), alongside AUC, holdout Brier, and PAN c@1
+   with abstention. A background-rank score (a simple rank fraction, not full
+   Koppel-Winter General Imposters) says how much closer the text is to the
+   target than to any other profile.
+5. **Frozen reference.** `calibrate` freezes the exact reference model (vocab +
+   mean/SD) into the calibration, so a calibrated profile's verdicts never
+   silently shift when profiles are added or removed later. If the profile set
+   drifts, `compare` keeps the (still valid) frozen verdict and warns that the
+   imposter pool changed. Calibrating against fewer than 3 imposters also
+   warns: the probabilities would be overconfident.
 
 ## Validation
 

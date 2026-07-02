@@ -1,12 +1,43 @@
 # Roadmap
 
-v0.1 is the lean, pure-Rust 80/20: z-scored MFW + char-trigram Cosine/Classic
+v0.1 was the lean, pure-Rust 80/20: z-scored MFW + char-trigram Cosine/Classic
 Delta, logistic calibration, General-Imposters scoring, profiles, and the
 agent-cli-framework contract. Validated (AUC 0.9999 on Adams vs near-neighbours).
-Items below were scoped out deliberately to keep v0.1 small; they come from the
-design fleet and the LLM-detection research pass.
 
-## v0.2 — rigor and the second axis
+## Done in v0.2 (hardening)
+
+- **Frozen reference.** `calibrate` freezes the exact reference model (vocab +
+  mean/sd) into the calibration artifact; `compare` scores calibrated profiles
+  in that frozen z-space, so verdicts never silently shift as profiles are
+  added or removed. Uncalibrated profiles still use the live reference. A
+  profile-set drift after calibration downgrades to a warning (imposter pool
+  changed) instead of invalidating the verdict.
+- **Honest threshold selection.** The decision threshold is selected on a train
+  split and its accuracy reported on a contiguous held-out tail split it never
+  saw (`holdout_accuracy`); the shipped threshold/logistic then refit on all
+  data. Contiguous — not interleaved — so adjacent-chunk topic doesn't leak
+  into the holdout.
+- **Data-selected regularization.** The logistic's L2 strength is picked by
+  3-fold cross-validated Brier score over a grid (weak lambdas only allowed
+  with enough samples), replacing the hard-coded λ=0.5 that compressed all
+  probabilities toward 0.5.
+- **Abstention band (partial PAN suite).** P(same) in [0.35, 0.65] returns
+  `inconclusive` instead of a forced call; `calibrate` reports c@1 (with
+  abstention) and holdout Brier alongside AUC and accuracy. Still owed from
+  the full suite: F0.5u and ECE.
+- **Length-mismatch guard.** Calibrations record the chunk length they were fit
+  on; `compare` warns when the query text is <0.5x or >2x that length, where
+  P(same author) is not calibrated.
+- **Minimum-imposter warning.** Calibrating against fewer than 3 imposter
+  profiles warns that probabilities will be overconfident.
+- **One definition of "word".** Chunk sizing, the short-text gate, and length
+  warnings all use Unicode word segmentation — the same tokenizer the features
+  use — instead of mixing in whitespace-token counts.
+- **stdin input.** `compare -` or piped stdin work alongside a file path and
+  `--text`.
+- **Name.** Shipping as `stylometry` (decided; `voiceprint` rejected).
+
+## v0.2+ — rigor and the second axis
 
 - **Neural style axis (separate, never fused).** Add a content-independent style
   embedding via one pinned Python sidecar (uv venv, CPU torch + sentence-
@@ -14,19 +45,19 @@ design fleet and the LLM-detection research pass.
   `AnnaWegmann/Style-Embedding`. Report its cosine as a *third* calibrated number
   alongside Delta and GI; an "indistinguishable" verdict requires all three to
   agree. Keep the Rust core dependency-free; the sidecar is opt-in via `doctor`.
-- **Frozen reference.** `profile build` should freeze `mean/sd` + the MFW list +
-  provenance hashes into the artifact, so scoring never silently re-fits as
-  profiles are added. v0.1 recomputes the reference from all loaded profiles
-  (simpler, but reference-dependent).
 - **Leakage firewall for the rewriter.** Emit a SHA-256 chunk manifest so a
   fine-tuning tool can exclude the judge's exact held-out text from training.
-- **Full PAN metric suite.** Add c@1 (with a grey-zone abstention band), F0.5u,
-  and Brier/ECE reliability alongside AUC and accuracy.
+- **Finish the PAN metric suite.** F0.5u and ECE reliability (c@1 and Brier
+  landed in v0.2).
 - **General Imposters, proper.** Koppel–Winter bootstrap (N≈100, feature/imposter
   subsampling, Ruzicka/minmax distance) with a p1<p2 abstain zone, parallelized
-  with rayon — replacing v0.1's single-shot GI fraction.
+  with rayon — replacing the single-shot GI fraction.
+- **Length-banded calibration.** The v0.2 length-mismatch warning tells you when
+  P(same) is unreliable; the real fix is calibrating per length band (e.g.
+  150/500/1500 words) so short texts get an honest probability instead of a
+  warning. Prerequisite for chat/short-message use cases.
 
-## v0.2 — "reads as human vs LLM" axis (pure-text, no model)
+## v0.2+ — "reads as human vs LLM" axis (pure-text, no model)
 
 From the detection literature (DetectGPT/Binoculars family, SpecDetect,
 StyloMetrix; classic stylometry survives LLM impersonation — arXiv 2603.29454):
@@ -49,20 +80,11 @@ StyloMetrix; classic stylometry survives LLM impersonation — arXiv 2603.29454)
   normalized to 500–1000 words (the forensic range); a same-topic control (e.g.
   Federalist Papers or same-event news) to prove we aren't classifying topic;
   an open-set imposter pool (100+ authors) instead of the current closed set of
-  three; and a train/test split so the threshold is never chosen on the test
-  set. Cleanliness/register: the v0.1 LOWO miss (*The Salmon of Doubt*) turned
-  out to be a contaminated multi-author collection, so cross-register
-  sensitivity was NOT cleanly demonstrated — a proper cross-genre test (clean
-  Adams non-fiction vs clean Adams fiction) is still owed. Regardless, build the
-  writer-judge profile from clean Adams non-fiction.
-
-- **Strengthen calibration binding.** The reference signature must be content-
-  based (hash of vocab/mean/sd), not just `name:n_chunks:n_tokens` — Codex showed
-  a same-counts profile swap evades staleness detection. (Partially addressed:
-  the signature now includes a content hash of each profile's counts.)
+  three. (The chunk-level train/test split landed in v0.2; the work-level and
+  open-set evals are still owed.) Cleanliness/register: the v0.1 LOWO miss
+  (*The Salmon of Doubt*) turned out to be a contaminated multi-author
+  collection, so cross-register sensitivity was NOT cleanly demonstrated — a
+  proper cross-genre test (clean Adams non-fiction vs clean Adams fiction) is
+  still owed. Regardless, build the writer-judge profile from clean Adams
+  non-fiction.
 - Publish to crates.io + a Homebrew formula in `paperfoot/homebrew-tap`.
-
-## Open question
-
-- **Name.** Shipping as `stylometry`. The design fleet preferred `voiceprint`
-  (evocative, avoids the `stylo`/CRAN collision). Decide before first publish.
