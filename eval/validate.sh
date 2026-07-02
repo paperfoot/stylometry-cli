@@ -5,11 +5,12 @@
 #
 # Prereq: eval/corpora/{adams,jerome,wodehouse,chesterton} and
 # eval/holdout/adams_mostly_harmless.md exist (see eval/fetch_corpora.sh),
-# and `cargo build` has produced target/debug/stylometry.
+# and `cargo build --release` (or `cargo build`) has produced the binary.
+# Override BIN to point at a debug build if you haven't done a release build.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BIN="$ROOT/target/debug/stylometry"
+BIN="${BIN:-$ROOT/target/release/stylometry}"
 export STYLOMETRY_DATA_DIR="$ROOT/eval/data"
 C="$ROOT/eval/corpora"
 H="$ROOT/eval/holdout"
