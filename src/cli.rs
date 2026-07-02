@@ -35,7 +35,7 @@ pub enum Commands {
         /// Profile to compare against
         #[arg(long)]
         profile: String,
-        /// Path to a text file to score
+        /// Path to a text file to score ('-' or piped stdin also work)
         file: Option<PathBuf>,
         /// Inline text instead of a file
         #[arg(long, conflicts_with = "file")]

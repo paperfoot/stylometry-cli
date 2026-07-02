@@ -3,7 +3,7 @@
 /// agent-info is always JSON -- the whole point is machine readability.
 /// An agent calling agent-info is bootstrapping the tool's full capability set.
 pub fn run() {
-    let name = env!("CARGO_PKG_NAME");
+    let name = env!("CARGO_BIN_NAME");
     let config_path = crate::config::config_path();
 
     let info = serde_json::json!({
@@ -41,7 +41,7 @@ pub fn run() {
             "compare": {
                 "description": "Compare a text against a profile and return a verdict",
                 "args": [
-                    { "name": "file", "kind": "positional", "type": "path", "required": false, "description": "Text file to score (or use --text)" }
+                    { "name": "file", "kind": "positional", "type": "path", "required": false, "description": "Text file to score, '-' or piped stdin, or use --text" }
                 ],
                 "options": [
                     { "name": "--profile", "type": "string", "required": true, "description": "Profile to compare against" },
@@ -50,14 +50,23 @@ pub fn run() {
                 "data_fields": [
                     "profile", "cosine_delta", "classic_delta", "nearest_profile",
                     "nearest_cosine_delta", "background_rank", "p_same_author",
-                    "calibration_stale", "verdict", "ranking"
+                    "calibration_stale", "query_words", "length_mismatch",
+                    "verdict", "ranking", "warning"
+                ],
+                "verdicts": [
+                    "same_author", "different_author", "inconclusive",
+                    "same_author_uncalibrated", "different_author_uncalibrated",
+                    "insufficient_background"
                 ]
             },
             "calibrate": {
                 "description": "Calibrate a profile's verifier against the other profiles (imposters)",
                 "args": [ { "name": "name", "kind": "positional", "type": "string", "required": true, "description": "Profile to calibrate" } ],
                 "options": [],
-                "data_fields": ["profile", "auc", "accuracy", "threshold", "positives", "negatives", "imposters"]
+                "data_fields": [
+                    "profile", "auc", "accuracy", "holdout", "holdout_brier", "c_at_1",
+                    "threshold", "positives", "negatives", "imposters", "warning"
+                ]
             },
             "agent-info": { "description": "This manifest", "aliases": ["info"], "args": [], "options": [] },
             "skill install": { "description": "Install skill file to agent platforms", "args": [], "options": [] },
