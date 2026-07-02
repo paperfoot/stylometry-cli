@@ -1,26 +1,50 @@
+<div align="center">
+
 # stylometry
 
-**Authorship verification from the terminal.** Build a per-author profile by
-fingerprinting their writing, then ask of any text: *was this written by that
-author?* — and get a calibrated probability, not a vibe. It implements the
-*method* forensic and academic stylometry use (Burrows/Cosine Delta); it is a
-lean v0.1, not a court-grade instrument (see [Validation](#validation)).
+**Authorship verification from the terminal — a calibrated probability, not a vibe.**
 
-Pure Rust, single static binary, no model and no network required. Built on the
-[agent-cli-framework](https://github.com/paperfoot/agent-cli-framework): JSON
-envelopes, semantic exit codes, and a machine-readable `agent-info` manifest, so
-agents and humans use it the same way.
+<br />
+
+[![Star this repo](https://img.shields.io/github/stars/paperfoot/stylometry-cli?style=for-the-badge&logo=github&label=%E2%AD%90%20Star%20this%20repo&color=yellow)](https://github.com/paperfoot/stylometry-cli/stargazers)
+&nbsp;&nbsp;
+[![Follow @longevityboris](https://img.shields.io/badge/Follow_%40longevityboris-000000?style=for-the-badge&logo=x&logoColor=white)](https://x.com/longevityboris)
+
+<br />
+
+[![crates.io](https://img.shields.io/crates/v/stylometry-cli?style=for-the-badge&logo=rust&color=orange)](https://crates.io/crates/stylometry-cli)
+&nbsp;
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)](LICENSE)
+&nbsp;
+[![Pure Rust](https://img.shields.io/badge/Pure_Rust-no_model,_no_network-9cf?style=for-the-badge&logo=rust&logoColor=white)](#how-it-works)
+
+---
+
+Build a per-author profile by fingerprinting their writing, then ask of any
+text: *was this written by that author?* It implements the method forensic and
+academic stylometry actually use (Burrows/Cosine Delta) — lean and local, not a
+court-grade instrument (see [Validation](#validation)).
+
+[Install](#install) | [Quick start](#quick-start) | [How it works](#how-it-works) | [Validation](#validation) | [Roadmap](#roadmap)
+
+</div>
 
 ## Why
 
 LLM-era writing tools need a *trustworthy ruler*. A hand-weighted similarity
 score with no standardization and no calibration can't tell you whether text is
 "in an author's voice" — optimizing against it just games the metric. This tool
-implements the method forensic and academic stylometry actually use, and reports
-a calibrated verdict you can defend.
+reports a calibrated verdict you can defend: `P(same author)`, an honest
+holdout accuracy, and an **inconclusive** verdict where the evidence is thin,
+instead of a forced guess.
 
 It is also the independent **judge** for a sibling rewriting tool: kept separate
 on purpose, run only on held-out text, never optimized against.
+
+Pure Rust, single static binary, no model and no network required. Built on the
+[agent-cli-framework](https://github.com/paperfoot/agent-cli-framework): JSON
+envelopes, semantic exit codes, and a machine-readable `agent-info` manifest, so
+agents and humans use it the same way.
 
 ## Install
 
@@ -43,6 +67,7 @@ stylometry calibrate adams
 
 # Verdict on a new text
 stylometry compare suspect.txt --profile adams
+cat draft.md | stylometry compare --profile adams             # stdin works too
 stylometry profile list
 ```
 
@@ -103,29 +128,55 @@ Two things keep these honest rather than flattering:
 The one LOWO miss is instructive but **confounded**: *The Salmon of Doubt* is a
 posthumous, editor-assembled collection — its own contents list three
 introductions, an editor's note, and an unfinished *novel* — so it is not clean
-single-author non-fiction. Its rejection is most likely contamination and
-heterogeneity, **not** proof that the profile is register-bound; topic-invariance
-otherwise held (the four Hitchhiker novels have different plots yet all verified).
-Practical takeaway, for the softer reason: build a profile from clean text of the
-kind you intend to verify.
+single-author non-fiction. As of v0.2 the verifier **abstains** on it
+(`inconclusive`, P=0.399) rather than confidently rejecting it — the abstention
+band doing exactly its job on contaminated input. Topic-invariance otherwise
+held (the four Hitchhiker novels have different plots yet all verified).
+Practical takeaway: build a profile from clean text of the kind you intend to
+verify.
 
 Caveat: each author here is one long book, so author/book/topic are partly
 confounded and chunk-level AUC is optimistic. A topic-controlled evaluation
-(short texts, same-topic different-authors, open-set imposters) is v0.2 work;
+(short texts, same-topic different-authors, open-set imposters) is still owed;
 see [ROADMAP.md](ROADMAP.md). The method and math were independently reviewed by
 GPT-5.5 (Codex) and Gemini; their findings drove the calibration-binding,
-train/query feature-parity, and logistic-regularization fixes in this version.
+train/query feature-parity, and logistic-regularization fixes.
 
 Reproduce: `eval/fetch_corpora.sh`, then `eval/validate.sh` (smoke test) and
 `eval/lowo.sh` (the honest cross-work test). The build is ritalin-gated.
 
 ## Roadmap
 
-See [ROADMAP.md](ROADMAP.md). v0.2 adds a content-independent neural style
-embedding (StyleDistance) as a second, separately-calibrated axis, a frozen
-reference + chunk manifest so a fine-tuning tool can exclude the judge's text,
-the full PAN metric suite, and a pure-text "reads-as-LLM" axis.
+See [ROADMAP.md](ROADMAP.md). v0.2 shipped the hardening pass: frozen reference
+model, holdout-split threshold accuracy, CV-selected regularization, the
+abstention band, length-mismatch and imposter-count warnings, and stdin input.
+Next up: a content-independent neural style embedding (StyleDistance) as a
+second, separately-calibrated axis, proper Koppel–Winter General Imposters,
+length-banded calibration for short texts (chat, email), and a pure-text
+"reads-as-LLM" axis.
+
+## Contributing
+
+Issues and PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Good first
+contributions: corpora for non-English validation, eval scripts for new
+domains, and anything in the roadmap marked "still owed".
 
 ## License
 
-MIT.
+[MIT](LICENSE).
+
+---
+
+<div align="center">
+
+Built by [Boris Djordjevic](https://github.com/longevityboris) at [Paperfoot AI](https://paperfoot.com)
+
+<br />
+
+**If this is useful to you:**
+
+[![Star this repo](https://img.shields.io/github/stars/paperfoot/stylometry-cli?style=for-the-badge&logo=github&label=%E2%AD%90%20Star%20this%20repo&color=yellow)](https://github.com/paperfoot/stylometry-cli/stargazers)
+&nbsp;&nbsp;
+[![Follow @longevityboris](https://img.shields.io/badge/Follow_%40longevityboris-000000?style=for-the-badge&logo=x&logoColor=white)](https://x.com/longevityboris)
+
+</div>
