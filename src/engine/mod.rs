@@ -13,6 +13,7 @@ pub mod score;
 pub mod store;
 pub mod style;
 pub mod text;
+pub mod voice;
 
 pub const DEFAULT_MFW: usize = 300;
 pub const DEFAULT_TRIGRAMS: usize = 500;
