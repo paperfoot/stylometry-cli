@@ -1109,7 +1109,7 @@ pub fn window_rows(p: &Profile, words: usize, fw: &[String], overlap: bool) -> V
 }
 
 /// Share of the author's sources whose text contains each markup key.
-fn markup_presence(p: &Profile) -> HashMap<&'static str, f64> {
+pub fn markup_presence(p: &Profile) -> HashMap<&'static str, f64> {
     let n_src = p.sources.len().max(1);
     let mut has: HashMap<&'static str, std::collections::HashSet<u32>> = HashMap::new();
     for c in &p.chunks {
@@ -1766,7 +1766,7 @@ pub fn measure_item(t: &str, lower_vocab: &std::collections::HashSet<String>) ->
         .iter()
         .filter(|w| !is_mention(w) && !is_link(w))
         .flat_map(|w| w.chars())
-        .find(|c| c.is_alphabetic());
+        .find(|c| c.is_alphanumeric()); // "22,000 new papers" starts with a digit, not lowercase
     let lowercase_start = first_letter.is_some_and(char::is_lowercase);
     let capital_start = first_letter.is_some_and(char::is_uppercase);
     let ending = item_ending(&toks);
@@ -1834,6 +1834,18 @@ pub fn measure_item(t: &str, lower_vocab: &std::collections::HashSet<String>) ->
     }
 }
 
+/// A reply without the run of @handles X puts in front of it: those are
+/// addressing, not writing, and would make every reply "start with a
+/// mention" and skew its casing and hook length.
+pub fn strip_leading_handles(t: &str) -> &str {
+    let mut rest = t.trim_start();
+    while rest.starts_with('@') {
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        rest = rest[end..].trim_start();
+    }
+    if rest.is_empty() { t } else { rest }
+}
+
 /// The author's items of `kind`, measured, with their weights. Falls back
 /// to every item when fewer than 20 are of that kind (third value).
 pub fn author_items(p: &Profile, kind: crate::engine::profile::ItemKind) -> (Vec<ItemMeasure>, Vec<f64>, bool) {
@@ -1846,7 +1858,14 @@ pub fn author_items(p: &Profile, kind: crate::engine::profile::ItemKind) -> (Vec
     } else {
         ((0..p.chunks.len()).collect(), true)
     };
-    let measured = idx.iter().map(|&i| measure_item(&p.chunks[i].text(), &vocab)).collect();
+    let measured = idx
+        .iter()
+        .map(|&i| {
+            let t = p.chunks[i].text();
+            let reply = p.chunks[i].meta.as_ref().is_some_and(|m| m.kind == crate::engine::profile::ItemKind::Reply);
+            measure_item(if reply { strip_leading_handles(&t) } else { &t }, &vocab)
+        })
+        .collect();
     let weights = idx.iter().map(|&i| p.chunks[i].weight as f64).collect();
     (measured, weights, fallback)
 }
@@ -1855,6 +1874,7 @@ pub fn author_items(p: &Profile, kind: crate::engine::profile::ItemKind) -> (Vec
 /// (every item when fewer than 20 are of that kind). Flags (shares) get the
 /// author's share as low = median = high. Long-form profiles have no items:
 /// empty bands.
+#[allow(dead_code)] // cross-lane contract: the brief and `examples` read it
 pub fn item_ranges(p: &Profile, kind: crate::engine::profile::ItemKind) -> Ranges {
     if !p.register.is_short_form() {
         return Ranges { window_words: 0, passages_per_window: 1, windows: 0, directional: true, bands: Vec::new(), defs: Vec::new() };
@@ -2027,7 +2047,9 @@ pub fn habits_of(items: &[ItemMeasure], weights: &[f64]) -> ItemHabits {
 }
 
 /// Habits of the author's items of `kind` (every item when fewer than 20
-/// are of that kind). Long-form profiles have none.
+/// are of that kind). Long-form profiles have none. Cross-lane contract:
+/// the brief reads it (check uses `habits_of` on items it already measured).
+#[allow(dead_code)]
 pub fn item_habits(p: &Profile, kind: crate::engine::profile::ItemKind) -> ItemHabits {
     if !p.register.is_short_form() {
         return ItemHabits::default();
@@ -2119,6 +2141,13 @@ impl ItemModel {
 
     pub fn bins(&self, m: &ItemMeasure) -> Vec<usize> {
         let c = |key: &str, cap: usize| (m.get(key).max(0.0) as usize).min(cap);
+        // Marks other than the final one: the ending feature already holds
+        // a closing "!" or "?", and counting it twice would make one
+        // exclamation cost a post twice.
+        let interior = |key: &str, mark: &str, cap: usize| {
+            let n = m.get(key).max(0.0) as usize;
+            n.saturating_sub(usize::from(m.ending == mark)).min(cap)
+        };
         let mut b = vec![
             bin_of(m.get("item_words"), &self.word_edges),
             bin_of(m.get("first_line_words"), &self.line_edges),
@@ -2127,8 +2156,8 @@ impl ItemModel {
             c("hashtags_per_item", 3),
             c("mentions_per_item", 3),
             c("links_per_item", 2),
-            c("exclaims_per_item", 3),
-            c("questions_per_item", 2),
+            interior("exclaims_per_item", "!", 3),
+            interior("questions_per_item", "?", 2),
             c("all_caps_words_per_item", 2),
             c("lowercase_start_share", 1),
             ENDINGS.iter().position(|e| *e == m.ending).unwrap_or(0),
