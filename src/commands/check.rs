@@ -289,8 +289,11 @@ fn print_texture(t: &Texture) {
         return;
     }
     let verdict = if t.pass == Some(true) { "reads like the author".green().to_string() } else { "outside the author's range".yellow().to_string() };
-    let unit = t.unit.map_or("passage(s)", |u| u.plural());
-    let usage = t.usage.map(|u| format!("{} {unit}, {} request(s), ${:.4}", u.passages, u.requests, u.cost_usd)).unwrap_or_default();
+    let unit = |n: usize| t.unit.map_or(if n == 1 { "passage" } else { "passages" }, |u| u.plural(n));
+    let usage = t
+        .usage
+        .map(|u| format!("{} {}, {} request{}, ${:.4}", u.passages, unit(u.passages), u.requests, if u.requests == 1 { "" } else { "s" }, u.cost_usd))
+        .unwrap_or_default();
     println!("texture (JEV, advice only): {verdict} · {usage}");
     if let Some(m) = t.author_measured {
         println!("{}", format!("  measured {} of the author's passages first ({} requests, ${:.4}); saved for next time", m.passages, m.requests, m.cost_usd).dimmed());

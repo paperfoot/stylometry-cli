@@ -1380,6 +1380,11 @@ fn capitalize(s: &str) -> String {
     c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
 }
 
+/// "line 7" or "lines 7, 9".
+fn lines_word(lines: &[usize]) -> String {
+    format!("line{} {}", if lines.len() == 1 { "" } else { "s" }, join_lines(lines))
+}
+
 fn pct(v: f64) -> String {
     format!("{:.0}%", v * 100.0)
 }
@@ -2281,12 +2286,17 @@ pub fn add_texture(c: &mut Checked, t: &texture::Texture, draft_text: &str) {
         (texture::Unit::Batch, k) => format!("for {k}-batch stretches of their own posts"),
         (texture::Unit::Passage, k) => format!("for {k}-passage stretches of their own text"),
     };
-    let unit = unit.plural();
+    let unit = unit.plural(n);
     let mut findings = Vec::new();
     for row in &off {
         let Some(def) = texture::key(row.key) else { continue };
         let too_much = row.off_side == Some(texture::Side::High);
-        let (more, which) = if too_much { ("too much", "above") } else { ("too little", "below") };
+        let (more, which) = if too_much { ("More", "above") } else { ("Fewer", "below") };
+        // "More polish than the author" reads; the scale goes after the value.
+        let (noun, scale) = match row.label.split_once(" (") {
+            Some((n, s)) => (n, format!(" on a scale of {}", s.trim_end_matches(')'))),
+            None => (row.label, String::new()),
+        };
         if row.key == "hedge" {
             // Counted, and only too many acts: the exact lines, one excerpt
             // per line with its hedges.
@@ -2306,7 +2316,7 @@ pub fn add_texture(c: &mut Checked, t: &texture::Texture, draft_text: &str) {
                 lines: by_line.iter().map(|l| l.0).collect(),
                 excerpts: by_line.iter().take(MAX_EXCERPTS).map(|l| format!("L{}: {} in {}", l.0, l.1.join(", "), excerpt(l.2, &first(l)))).collect(),
                 message: format!(
-                    "too many {}: {} in this draft, {which} the author's {}–{} (median {}) at this length",
+                    "More {} than the author: {} in this draft, {which} the author's {}–{} (median {}) at this length",
                     row.label,
                     t2(row.draft),
                     t2(row.low),
@@ -2341,9 +2351,10 @@ pub fn add_texture(c: &mut Checked, t: &texture::Texture, draft_text: &str) {
             (cited.iter().map(|s| s.line).collect(), cited.iter().take(MAX_EXCERPTS).map(|s| format!("L{}: {}", s.line, s.text)).collect())
         };
         let at = if cited.is_empty() {
-            format!("worst at lines {}", ranges.join(", "))
+            format!("worst at line{} {}", if ranges.len() == 1 { "" } else { "s" }, ranges.join(", "))
         } else {
-            format!("{} sentence(s) at lines {}", cited.len(), join_lines(&cited.iter().map(|s| s.line).collect::<Vec<_>>()))
+            let s = if cited.len() == 1 { "sentence" } else { "sentences" };
+            format!("{} {s} at {}", cited.len(), lines_word(&cited.iter().map(|s| s.line).collect::<Vec<_>>()))
         };
         findings.push(Finding {
             kind: "texture",
@@ -2352,8 +2363,7 @@ pub fn add_texture(c: &mut Checked, t: &texture::Texture, draft_text: &str) {
             lines: lines_of,
             excerpts,
             message: format!(
-                "{more} {}: {} over the draft's {n} {unit}, {which} the author's {}–{} (median {}) {against}; {at}",
-                row.label,
+                "{more} {noun} than the author: {}{scale} over the draft's {n} {unit}, {which} the author's {}–{} (median {}) {against}; {at}",
                 t2(row.draft),
                 t2(row.low),
                 t2(row.high),
@@ -2379,11 +2389,18 @@ pub fn add_texture(c: &mut Checked, t: &texture::Texture, draft_text: &str) {
         .iter()
         .take(4)
         .map(|(_, p)| {
-            let why: Vec<&str> = p.flags.iter().filter(|f| is_off(f)).filter_map(|f| texture::key(f)).map(|d| d.label).collect();
+            let why: Vec<&str> = p
+                .flags
+                .iter()
+                .filter(|f| is_off(f))
+                .filter_map(|f| texture::key(f))
+                .map(|d| d.label.split(" (").next().unwrap_or(d.label))
+                .collect();
             format!("lines {}–{} ({})", p.lines[0], p.lines[1], why.join(", "))
         })
         .collect();
-    let mut action = format!("Rework the texture: {}", advice.join("; "));
+    let advice: Vec<String> = advice.iter().map(|a| capitalize(a)).collect();
+    let mut action = format!("Make the prose read like the author's own. {}", advice.join(". "));
     if !named.is_empty() {
         action.push_str(&format!(". Start with {}", named.join("; ")));
     }

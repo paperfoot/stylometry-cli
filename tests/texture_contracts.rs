@@ -300,7 +300,7 @@ fn a_smooth_draft_gets_texture_findings_and_a_plan_step_but_never_a_different_pa
         assert!(!f["excerpts"].as_array().unwrap().is_empty(), "{f}");
     }
     let rough = tex.iter().find(|f| f["key"] == "rough").unwrap();
-    assert!(rough["suggestion"].as_str().unwrap().contains("no filler, hedges, padding or repeated nouns"), "{rough}");
+    assert!(rough["suggestion"].as_str().unwrap().contains("adding filler, hedges or repeated nouns to fake it reads as imitation"), "{rough}");
     // Flagged passages are drilled into sentence by sentence: the figure
     // and crafted-line findings cite the marker sentences' own lines.
     let drilled: usize = t["passages"].as_array().unwrap().iter().map(|p| p["sentences"].as_array().map_or(0, Vec::len)).sum();
@@ -317,9 +317,9 @@ fn a_smooth_draft_gets_texture_findings_and_a_plan_step_but_never_a_different_pa
         }
     }
     assert_eq!(d["counts"]["texture"].as_u64().unwrap() as usize, tex.len());
-    let step = d["plan"].as_array().unwrap().iter().find(|s| s["action"].as_str().unwrap().contains("texture")).expect("a texture plan step");
+    let step = d["plan"].as_array().unwrap().iter().find(|s| s["action"].as_str().unwrap().contains("read like the author's own")).expect("a texture plan step");
     let action = step["action"].as_str().unwrap();
-    assert!(action.starts_with("Rework the texture"), "{action}");
+    assert!(action.starts_with("Make the prose read like the author's own"), "{action}");
     for insert in ["spell out", "repeat the key noun", "run on", "a little more fully"] {
         assert!(!action.contains(insert), "the plan never asks to add {insert:?}: {action}");
         assert!(!tex.iter().any(|f| f["suggestion"].as_str().unwrap().contains(insert)), "{insert:?} in a suggestion");

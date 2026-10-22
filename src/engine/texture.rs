@@ -65,7 +65,7 @@ pub struct TextureKey {
 /// tic". Too little of a kind is a diagnostic row with a `note`.
 pub const KEYS: [TextureKey; 9] = [
     TextureKey { key: "rough", label: "rough edges", side: Side::Low, gate: true, jev: true,
-        advice: "write it less tidied, as the author does: fewer smoothed, balanced sentences, and no filler, hedges, padding or repeated nouns to rough it up",
+        advice: "leave sentences as plain and uneven as the author does instead of smoothing and balancing each one (adding filler, hedges or repeated nouns to fake it reads as imitation too)",
         note: "" },
     TextureKey { key: "polish", label: "polish (0 plain to 3 highly crafted)", side: Side::High, gate: true, jev: true,
         advice: "write plainer: say what happens and what is thought, directly", note: "" },
@@ -73,7 +73,7 @@ pub const KEYS: [TextureKey; 9] = [
         advice: "end passages on ordinary sentences, not kickers, reveals or callbacks", note: "" },
     TextureKey { key: "figurative", label: "fresh figures of speech", side: Side::High, gate: true, jev: true,
         advice: "cut inventive metaphors and similes", note: "" },
-    TextureKey { key: "hedge", label: "filler hedges per 1,000 words (counted)", side: Side::Both, gate: true, jev: false,
+    TextureKey { key: "hedge", label: "filler hedges per 1,000 words", side: Side::Both, gate: true, jev: false,
         advice: "cut filler hedges (I guess, kind of) back to the author's rate: piling them on reads as imitation",
         note: "the author uses more filler hedges than this draft" },
     TextureKey { key: "overexplain", label: "over-explaining", side: Side::Low, gate: false, jev: true,
@@ -82,7 +82,7 @@ pub const KEYS: [TextureKey; 9] = [
         advice: "", note: "the author repeats a noun where a pronoun would do more often than this draft does" },
     TextureKey { key: "splice", label: "loosely joined, run-on sentences", side: Side::Low, gate: false, jev: true,
         advice: "", note: "the author's sentences run on and join loosely more often than this draft's" },
-    TextureKey { key: "oneliner", label: "one-sentence paragraphs (counted)", side: Side::High, gate: false, jev: false,
+    TextureKey { key: "oneliner", label: "one-sentence paragraphs", side: Side::High, gate: false, jev: false,
         advice: "fold some standalone beats back into their paragraphs", note: "" },
 ];
 
@@ -152,11 +152,15 @@ pub enum Unit {
 }
 
 impl Unit {
-    pub fn plural(self) -> &'static str {
-        match self {
-            Unit::Passage => "passage(s)",
-            Unit::Batch => "batch(es) of posts",
-            Unit::Post => "post(s)",
+    /// The unit's name for `n` of them.
+    pub fn plural(self, n: usize) -> &'static str {
+        match (self, n == 1) {
+            (Unit::Passage, true) => "passage",
+            (Unit::Passage, false) => "passages",
+            (Unit::Batch, true) => "batch of posts",
+            (Unit::Batch, false) => "batches of posts",
+            (Unit::Post, true) => "post",
+            (Unit::Post, false) => "posts",
         }
     }
 }
@@ -1191,7 +1195,7 @@ pub fn assess_with(jev: &Jev, p: &Profile, draft: &str) -> Texture {
         return Texture::unavailable(format!(
             "JEV did not answer for any of the draft's {} {} ({}); the rest of the check is unchanged",
             ps.len(),
-            unit.plural(),
+            unit.plural(ps.len()),
             jev.halted().unwrap_or_else(|| "network, timeout or a bad response".into())
         ));
     }
@@ -1203,7 +1207,7 @@ pub fn assess_with(jev: &Jev, p: &Profile, draft: &str) -> Texture {
             "{}: judged {answered} of the draft's {} {} before it stopped; the rest of the check is unchanged",
             jev.halted().unwrap_or_else(|| "JEV stopped".into()),
             ps.len(),
-            unit.plural()
+            unit.plural(ps.len())
         ));
     }
     let sent = jev.usage().requests - before.requests;
@@ -1227,7 +1231,7 @@ pub fn assess_with(jev: &Jev, p: &Profile, draft: &str) -> Texture {
         return Texture::unavailable(format!(
             "the author's {} judged {} are too few for texture bands",
             author_units.len(),
-            unit.plural()
+            unit.plural(author_units.len())
         ));
     };
     let mut keys: Vec<KeyRow> = jev_keys()
