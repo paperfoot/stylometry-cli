@@ -173,6 +173,7 @@ fn annotations() -> Value {
         },
         "check": {
             "effect": "read",
+            "effect_detail": "With JEV on, sends the draft's passages to api.typesafe.ai and saves the author's texture bands beside the profile (profiles/<name>.texture.json)",
             "examples": [
                 ["check", "chapter-3.md", "--profile", "ada"],
                 ["check", "chapter-3.md", "--profile", "ada", "--avoid", "banned.txt", "--strict"]
@@ -226,14 +227,14 @@ fn annotations() -> Value {
 fn workflow() -> Value {
     json!([
         format!(
-            "{BIN} profile build <name> --corpus <path>  (once per voice: .md/.txt books/essays/blog posts, an X archive or xmaster JSON, JSON/CSV exports, .eml; --register fiction|nonfiction|blog|social|email|message when detection is wrong; blend voices with profile blend)"
+            "{BIN} profile build <name> --corpus <path>  (once per voice: .md/.txt, an X archive or xmaster JSON, JSON/CSV exports, .eml; --register when detection is wrong; blend voices with profile blend)"
         ),
         format!("{BIN} analyze <name>  (signature/avoided words, word choices, rhythm targets; per-item habits for posts)"),
         format!("{BIN} guide <name> --about \"<what you're writing>\" [--as post|reply|thread]  (the brief: targets, word choices, ban list, matched examples)"),
-        format!("{BIN} examples <name> --about \"<topic>\"  (more of the author's own pieces like the one you're writing; imitate, never copy)"),
+        format!("{BIN} examples <name> --about \"<topic>\"  (more of the author's pieces like yours; imitate, never copy)"),
         "write the draft (separate several posts with --- lines)".to_string(),
         format!(
-            "{BIN} check draft.md --profile <name> [--as post|reply|thread]  (follow `plan`, fix hard findings first, re-check until pass; add --verify on the final pass, --strict in a gate)"
+            "{BIN} check draft.md --profile <name> [--as post|reply|thread]  (follow `plan`, fix hard findings first, re-check until pass; add --verify on the final pass, --strict in a gate; `texture`: JEV advice, on with TYPESAFE_API_KEY, off with STYLOMETRY_JEV__ENABLED=false)"
         ),
         format!(
             "authorship: {BIN} background fetch (once; books), {BIN} calibrate <name>, {BIN} compare text.txt --profile <name>; posts verify only as a --- batch of 10+ against 3+ other posters built with --background"

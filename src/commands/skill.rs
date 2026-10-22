@@ -50,6 +50,9 @@ Exemplars are the author's text: imitate the mechanisms, never copy lines.
 Set type exactly as the brief's Typography section says (quotes, apostrophes,
 dashes, ellipses, scene breaks), and skip the tidy moves it lists under "What
 gives imitations away": those, not the topic, are what readers catch.
+`check` also judges prose texture with JEV (on when TYPESAFE_API_KEY is set;
+`STYLOMETRY_JEV__ENABLED=false` stays local): `texture` is advice, never `pass`;
+loosen in the author's own ways, never with filler hedges or padding.
 
 For authorship of books, run `{name} background fetch` once, then
 `{name} calibrate ada` and `{name} compare text.txt --profile ada`. Piped
