@@ -104,7 +104,10 @@ fn manifest_stays_compact() {
         .unwrap()
         .stdout;
     // One line per command keeps discovery cheap; v0.2 was 6.4 KB for 12 commands.
-    assert!(full.len() < 5_000, "manifest grew to {} bytes", full.len());
+    // The data dir is the machine's path, not ours, so it does not count.
+    let path = tmp.path().display().to_string().len();
+    let own = full.len() - path;
+    assert!(own < 5_000, "manifest grew to {own} bytes");
     assert!(
         check.len() < 2_500,
         "check entry grew to {} bytes",
