@@ -35,6 +35,20 @@ const PARENT_FIELDS: [&str; 6] = [
     "in_reply_to",
 ];
 
+/// Fields only X-shaped exports have (archive rows, xmaster, X API, X
+/// analytics CSV). A file of them is social however long its posts are.
+const X_FIELDS: [&str; 9] = [
+    "full_text",
+    "favorite_count",
+    "retweet_count",
+    "retweets",
+    "in_reply_to_status_id_str",
+    "in_reply_to_screen_name",
+    "public_metrics",
+    "conversation_id",
+    "quoted_status_id_str",
+];
+
 /// Items shorter than this (counted with links and handles as one word
 /// each) carry no measurable voice.
 const MIN_ITEM_WORDS: usize = 3;
@@ -269,6 +283,7 @@ pub fn read_corpus_as(path: &Path, register: Option<Register>) -> Result<Corpus,
                         name,
                         items: p.items,
                         register: reg,
+                        x_shaped: p.x_shaped,
                     });
                 }
             }
@@ -375,6 +390,9 @@ struct Parsed {
     retweets: usize,
     /// Records seen, with or without text.
     objects: usize,
+    /// X-shaped rows (archive, xmaster envelope, X columns): social however
+    /// long the posts, so never relabelled blog by length.
+    x_shaped: bool,
 }
 
 /// A structured file after parsing, before the cross-file filters.
@@ -382,6 +400,7 @@ struct Export {
     name: String,
     items: Vec<Raw>,
     register: Register,
+    x_shaped: bool,
 }
 
 /// One parsed item plus what is needed to filter it across files.
@@ -419,7 +438,7 @@ fn finish_structured(out: &mut Corpus, structured: Vec<Export>, account: Option<
         .collect();
 
     let mut seen: HashSet<String> = HashSet::new();
-    for Export { name, items, register: reg } in structured {
+    for Export { name, items, register: reg, x_shaped } in structured {
         let mut kept: Vec<Item> = Vec::with_capacity(items.len());
         for Raw { mut item, author } in items {
             if let (Some(a), Some(o)) = (&author, &owner) {
@@ -454,9 +473,9 @@ fn finish_structured(out: &mut Corpus, structured: Vec<Export>, account: Option<
             (None, Some(_)) => std::cmp::Ordering::Greater,
             (None, None) => std::cmp::Ordering::Equal,
         });
-        // JSON/CSV exports of long items (newsletters, blog posts) are not social.
-        let is_archive = name.ends_with(".js");
-        let reg = if reg == Register::Social && !is_archive && median_words(&kept) > 60 {
+        // JSON/CSV exports of long items (newsletters, blog posts) are not
+        // social; X exports are, however long (Premium allows long posts).
+        let reg = if reg == Register::Social && !x_shaped && median_words(&kept) > 60 {
             Register::Blog
         } else {
             reg
@@ -1128,6 +1147,7 @@ fn x_archive(raw: &str, account: Option<&Account>, notes: &mut NotePool) -> Resu
         items,
         retweets,
         objects,
+        x_shaped: true,
         ..Parsed::default()
     })
 }
@@ -1211,6 +1231,7 @@ fn x_direct_messages(raw: &str, account: Option<&Account>) -> Result<(Parsed, us
     let parsed = Parsed {
         items,
         objects,
+        x_shaped: true,
         ..Parsed::default()
     };
     Ok((parsed, others))
@@ -1277,12 +1298,14 @@ fn item_of(o: &Value) -> Result<Raw, bool> {
     })
 }
 
-/// Parse one file's objects.
+/// Parse one file's objects; rows with X columns mark the file as X-shaped.
 fn items_of(objs: &[Value]) -> Parsed {
     let unwrap = |o: &'_ Value| -> Value { o.get("tweet").filter(|t| t.is_object()).unwrap_or(o).clone() };
     let rows: Vec<Value> = objs.iter().map(unwrap).collect();
+    let x_rows = rows.iter().filter(|o| X_FIELDS.iter().any(|k| o.get(*k).is_some())).count();
     let mut p = Parsed {
         objects: rows.iter().filter(|o| o.is_object()).count(),
+        x_shaped: (!rows.is_empty() && x_rows * 2 >= rows.len()) || objs.iter().any(|o| o.get("tweet").is_some_and(Value::is_object)),
         ..Parsed::default()
     };
     for o in &rows {
@@ -1314,7 +1337,10 @@ fn json_items(raw: &str) -> Result<Parsed, AppError> {
             _ => None,
         }
     }
-    Ok(find_array(&v).map(|a| items_of(a)).unwrap_or_default())
+    let mut p = find_array(&v).map(|a| items_of(a)).unwrap_or_default();
+    // xmaster's envelope: an X export, whatever its rows hold.
+    p.x_shaped |= v.get("data").and_then(|d| d.get("tweets")).is_some_and(Value::is_array);
+    Ok(p)
 }
 
 fn jsonl_items(raw: &str) -> Parsed {
@@ -1775,5 +1801,22 @@ mod tests {
         assert_eq!(c.report.also_read, ["tweets-part1.js", "tweets-part2.js"]);
         assert_eq!(c.docs.len(), 1, "the parts are one source");
         assert!(c.docs[0].items[0].meta.date.as_deref().unwrap().starts_with("2016"), "time order across parts");
+    }
+
+    #[test]
+    fn x_shaped_exports_stay_social_however_long() {
+        let long = (0..70).map(|i| format!("word{i}")).collect::<Vec<_>>().join(" ");
+        let rows: Vec<(usize, &str, &str)> = (1..5).map(|i| (i, "@longposter", long.as_str())).collect();
+        let tmp = tempfile::tempdir().unwrap();
+        let c = read_corpus(&write(tmp.path(), "xm.json", &xm(&rows))).unwrap();
+        assert_eq!(c.format_register, Some(Register::Social));
+        // A generic export of long items is still a blog.
+        let generic: Vec<Value> = (0..4).map(|i| serde_json::json!({"id": i, "title": "t", "body": long})).collect();
+        let c = read_corpus(&write(tmp.path(), "posts.json", &Value::Array(generic).to_string())).unwrap();
+        assert_eq!(c.format_register, Some(Register::Blog));
+        // X columns without the envelope (an X API or analytics export).
+        let api: Vec<Value> = (0..4).map(|i| serde_json::json!({"id": i, "text": long, "public_metrics": {"like_count": 1}})).collect();
+        let c = read_corpus(&write(tmp.path(), "api.json", &Value::Array(api).to_string())).unwrap();
+        assert_eq!(c.format_register, Some(Register::Social));
     }
 }

@@ -472,3 +472,23 @@ fn lone_tweets_js_reads_the_archives_other_parts() {
     let sources: Vec<&str> = p["sources"].as_array().unwrap().iter().map(|s| s["name"].as_str().unwrap()).collect();
     assert_eq!(sources, ["2016-Q4", "2019-Q4", "2024-Q4"]);
 }
+
+#[test]
+fn long_xmaster_posts_stay_social_with_their_meta() {
+    let tmp = tempfile::tempdir().unwrap();
+    let body: String = (0..55).map(|j| format!("word{j}")).collect::<Vec<_>>().join(" ");
+    let rows: Vec<Value> = (1..41)
+        .map(|i| {
+            let pre = if i % 3 == 0 { "@pal @friend " } else { "" };
+            xm_row(i, "@longposter", &format!("{pre}{body} and this is long post number {i} with more words at the end of it."), 100)
+        })
+        .collect();
+    let f = tmp.path().join("xm.json");
+    std::fs::write(&f, json!({"status": "success", "data": {"tweets": rows}}).to_string()).unwrap();
+    let p = build(&tmp.path().join("store"), &f, "lp", &[]);
+    assert_eq!(p["register"], "social");
+    let it = items(&p);
+    assert_eq!(it.len(), 40);
+    assert_eq!(count(&it, "reply"), 13);
+    assert!(it.iter().all(|i| i.2.get("date").is_some()), "items keep their meta");
+}
