@@ -15,30 +15,43 @@ fn skill_content() -> String {
         r#"---
 name: {name}
 description: >
-  Capture a writer's voice from their own text and write or edit in it: their
-  signature words, the synonyms they pick and avoid, rhythm and punctuation,
-  plus a style brief for drafting and a line-by-line check of drafts (off-voice
-  words with the author's own alternative, LLM tells, rhythm drift). Also
-  authorship verification (P(same author)). Use for "write like X", "in my
-  voice", "match the style", "check the voice", "does this sound like X",
-  "who wrote this", style briefs, voice profiles and blended voices.
+  Capture a writer's voice from their own text and write or edit in it, for
+  novels, non-fiction, blogs, X posts, emails and messages: signature words,
+  the synonyms they pick and avoid, rhythm, punctuation, post habits (length,
+  layout, emoji, hashtags, openers), a style brief with matched examples, and
+  a scored line-by-line check of drafts with a revision plan. Also authorship
+  verification. Use for "write like X", "in my voice", "post like me", "match
+  the style", "check the voice", "does this sound like X", "who wrote this",
+  style briefs, voice profiles and blended voices.
 ---
 
 ## {name}
 
-The loop: build a profile once, brief the writer, draft, check, revise.
+The loop: build a profile once, brief the writer, draft, check, revise. It
+works for novels, non-fiction, blogs, X posts, emails and messages: the
+profile's register decides the unit (passages or posts), the targets and the
+brief.
 
 ```bash
-{name} profile build ada --corpus ./ada-books/      # .md/.txt; each file is one work
-{name} analyze ada                                  # habits and target ranges
-{name} guide ada -o ada-brief.md                    # give this brief to the writer
-{name} check draft.md --profile ada --strict        # exit 5 = failed; revise, check again
+{name} profile build ada --corpus ./ada-books/          # .md/.txt; each file is one work
+{name} profile build ada-x --corpus tweets.js           # X archive / xmaster JSON / JSON / CSV
+{name} guide ada --about "chapter 4: the argument"      # brief + the author's most similar passages
+{name} examples ada-x --about "launch post" --as post   # more matched examples
+{name} check draft.md --profile ada                     # score, plan, findings with line numbers
+{name} check posts.md --profile ada-x --as post         # posts separated by --- lines
 ```
 
-For authorship, run `{name} background fetch` once, then `{name} calibrate ada`
-and `{name} compare text.txt --profile ada`. Piped output is JSON; follow
-`metadata.next` and each error's `suggestion`. Inspect a command's flags with
-`{name} agent-info --command check`; `{name} agent-info` lists them all.
+`check` returns `score` (0-100: how typical of the author at this length),
+`pass`, a `plan` of the highest-value revisions with quantities, and grouped
+`findings` (copied runs and banned words are hard failures). Revise in that
+order and re-check; add `--verify` on the final pass for authorship, `--strict`
+in a gate (exit 5 on failure). Blend authors with `{name} profile blend`.
+Exemplars are the author's text: imitate the mechanisms, never copy lines.
+
+For authorship of books, run `{name} background fetch` once, then
+`{name} calibrate ada` and `{name} compare text.txt --profile ada`. Piped
+output is JSON; follow `metadata.next` and each error's `suggestion`. Inspect a
+command with `{name} agent-info --command check`.
 "#
     )
 }

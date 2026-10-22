@@ -126,11 +126,12 @@ fn workflow_names_the_loop_in_order() {
         .iter()
         .map(|s| s.as_str().unwrap())
         .collect();
-    assert_eq!(steps.len(), 6);
+    assert_eq!(steps.len(), 7);
     let order = [
         "profile build",
         "analyze",
         "guide",
+        "examples",
         "write",
         "check",
         "calibrate",
