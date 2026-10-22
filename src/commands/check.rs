@@ -128,7 +128,11 @@ pub fn run(ctx: Ctx, args: CheckArgs) -> Result<(), AppError> {
     let mut checked = checks::check(&target, &guard_refs, &avoid, &draft, args.as_kind);
     // Decided before texture is added: texture is advice and never moves it.
     let pass = checked.pass();
-    let texture = texture::assess(&target, &draft);
+    let mut texture = texture::assess(&target, &draft);
+    // One-sentence paragraphs are counted, not judged: the check's own metric.
+    if let Some(r) = checked.rows.iter().find(|r| r.key == "one_sentence_paragraph_share" && r.status != Status::Unmeasured) {
+        texture.add_counted("oneliner", r.value, [r.low, r.median, r.high]);
+    }
     checks::add_texture(&mut checked, &texture, &draft);
     let mut warnings = checked.warnings.clone();
     let voice_match = if !args.verify {

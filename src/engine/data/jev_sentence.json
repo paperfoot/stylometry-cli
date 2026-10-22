@@ -1,0 +1,34 @@
+{
+ "figure": {
+  "type": "noul",
+  "instructions": {
+   "question": "Does `sentence` use a fresh figure of speech: an inventive metaphor, simile or personification chosen for effect? `before` is the sentence before it, for context only.",
+   "focus": "Judge only `sentence`, how it is made, not its topic or punctuation."
+  },
+  "criteria": {
+   "true": {
+    "what": "An inventive image a plain writer would not reach for",
+    "examples": ["The house held its breath.", "Her laugh was a door slamming somewhere far away."]
+   },
+   "false": {
+    "what": "Plain literal language, or only everyday idioms and dead metaphors (\"fell in love\", \"a lot on my mind\")"
+   }
+  }
+ },
+ "crafted": {
+  "type": "noul",
+  "instructions": {
+   "question": "Is `sentence` a crafted, quotable line placed for effect: a kicker, punchline, reveal, callback or aphorism, rather than ordinary narration, argument or report? `before` is the sentence before it, for context only.",
+   "focus": "Judge only `sentence`, how it is made, not its topic or punctuation."
+  },
+  "criteria": {
+   "true": {
+    "what": "A polished button, twist, maxim or slogan meant to land",
+    "examples": ["She never called again.", "Some doors stay shut.", "Speed is a feature until it isn't."]
+   },
+   "false": {
+    "what": "An ordinary sentence that carries on the narration, argument or post, even if blunt or emotional"
+   }
+  }
+ }
+}

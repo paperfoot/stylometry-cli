@@ -1,0 +1,18 @@
+# Filler hedges and softeners, counted per 1,000 words and held to the
+# author's own rate (texture `hedge`). One per line, lowercase; "kind of"
+# and "sort of" don't count after a determiner ("what kind of car").
+i guess
+i suppose
+kind of
+sort of
+kinda
+sorta
+pretty much
+more or less
+or whatever
+or something
+i don't know
+i dunno
+in a way
+somewhat
+basically

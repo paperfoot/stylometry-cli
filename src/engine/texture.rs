@@ -30,41 +30,83 @@ pub enum Side {
     Low,
     /// The draft has too much of it (above the band).
     High,
+    /// Either way is off; only too much fails the gate.
+    Both,
 }
 
 pub struct TextureKey {
-    /// Question id in `data/jev_texture.json`.
+    /// Question id in `data/jev_texture.json`, or a counted measure.
     pub key: &'static str,
     pub label: &'static str,
     pub side: Side,
     /// Gate keys decide `texture.pass`; the rest are advice.
     pub gate: bool,
+    /// Judged by JEV per passage; otherwise counted in code. What code can
+    /// count never goes to JEV.
+    pub jev: bool,
     /// What to do when the draft is off on this side.
     pub advice: &'static str,
 }
 
-/// The measured keys, gate keys first. Gate: the five that separated
-/// genuine from imitation and resisted gaming in rounds 3-4.
+/// The measured keys, gate keys first. Gate: the ones that separated
+/// genuine from imitation and resisted gaming in rounds 3-4. JEV judges
+/// only what code cannot; filler hedges are a word list and one-sentence
+/// paragraphs a count, both held to the author's own rates.
 pub const KEYS: [TextureKey; 9] = [
-    TextureKey { key: "rough", label: "rough edges", side: Side::Low, gate: true,
+    TextureKey { key: "rough", label: "rough edges", side: Side::Low, gate: true, jev: true,
         advice: "loosen it in the author's own ways (the kinds below), not with filler" },
-    TextureKey { key: "polish", label: "polish (0 plain to 3 highly crafted)", side: Side::High, gate: true,
+    TextureKey { key: "polish", label: "polish (0 plain to 3 highly crafted)", side: Side::High, gate: true, jev: true,
         advice: "write plainer: say what happens and what is thought, directly" },
-    TextureKey { key: "button", label: "crafted closing lines", side: Side::High, gate: true,
+    TextureKey { key: "button", label: "crafted closing lines", side: Side::High, gate: true, jev: true,
         advice: "end passages on ordinary sentences, not kickers, reveals or callbacks" },
-    TextureKey { key: "figurative", label: "fresh figures of speech", side: Side::High, gate: true,
+    TextureKey { key: "figurative", label: "fresh figures of speech", side: Side::High, gate: true, jev: true,
         advice: "cut inventive metaphors and similes" },
-    TextureKey { key: "hedge", label: "filler hedges (I guess, kind of)", side: Side::High, gate: true,
-        advice: "cut filler hedges; the author rarely uses them" },
-    TextureKey { key: "overexplain", label: "over-explaining", side: Side::Low, gate: false,
+    TextureKey { key: "hedge", label: "filler hedges per 1,000 words (counted)", side: Side::Both, gate: true, jev: false,
+        advice: "use filler hedges (I guess, kind of) about as often as the author does: piling them on reads as imitation" },
+    TextureKey { key: "overexplain", label: "over-explaining", side: Side::Low, gate: false, jev: true,
         advice: "spell out reasons, logistics and feelings a little more fully, as the author does" },
-    TextureKey { key: "repeat", label: "repeating a noun instead of a pronoun", side: Side::Low, gate: false,
+    TextureKey { key: "repeat", label: "repeating a noun instead of a pronoun", side: Side::Low, gate: false, jev: true,
         advice: "repeat the key noun now and then where the author would" },
-    TextureKey { key: "splice", label: "loosely joined, run-on sentences", side: Side::Low, gate: false,
+    TextureKey { key: "splice", label: "loosely joined, run-on sentences", side: Side::Low, gate: false, jev: true,
         advice: "let a few sentences run on, joined loosely with commas or \"and\"" },
-    TextureKey { key: "oneliner", label: "dramatic one-line paragraphs", side: Side::High, gate: false,
+    TextureKey { key: "oneliner", label: "one-sentence paragraphs (counted)", side: Side::High, gate: false, jev: false,
         advice: "fold some standalone beats back into their paragraphs" },
 ];
+
+/// The keys JEV judges.
+pub fn jev_keys() -> impl Iterator<Item = &'static TextureKey> {
+    KEYS.iter().filter(|k| k.jev)
+}
+
+/// The texture questions JEV is asked: the measured set minus what code
+/// counts.
+pub fn jev_questions() -> serde_json::Value {
+    let all = jev::questions("texture");
+    let map: serde_json::Map<String, serde_json::Value> =
+        jev_keys().filter_map(|k| all.get(k.key).map(|q| (k.key.to_string(), q.clone()))).collect();
+    serde_json::Value::Object(map)
+}
+
+/// Version of what is asked (passage and sentence questions): stored with
+/// the author's measurements, so a change of wording re-measures them.
+pub fn questions_version() -> String {
+    let h = Sha256::digest(format!("{}\n{}\n{}", jev::questions_version("texture"), jev_questions(), sentence_questions()).as_bytes());
+    format!("texture-{}", h[..6].iter().map(|b| format!("{b:02x}")).collect::<String>())
+}
+
+/// Sentence-level drill-down: after a passage is flagged as polished, as
+/// ending on a crafted line or as figurative, each of its candidate
+/// sentences is asked these two narrow Nouls, so findings cite exact lines.
+const SENTENCE: &str = include_str!("data/jev_sentence.json");
+
+pub fn sentence_questions() -> serde_json::Value {
+    serde_json::from_str(SENTENCE).expect("embedded sentence questions are valid JSON")
+}
+
+/// At most this many sentences are drilled into per check.
+pub const MAX_SENTENCE_REQUESTS: usize = 40;
+/// A sentence is cited when JEV gives at least this probability.
+const SENTENCE_YES: f64 = 0.5;
 
 /// About this many words per judged passage (paragraph-aligned), as in the
 /// eval that set the bands.
@@ -341,12 +383,12 @@ fn sample(sizes: &[usize]) -> Vec<(usize, usize)> {
 
 /// Every key's value from one answer set, or `None` if any is missing.
 fn values_of(a: &Answers) -> Option<BTreeMap<String, f64>> {
-    KEYS.iter().map(|k| a.value(k.key).map(|v| (k.key.to_string(), v))).collect()
+    jev_keys().map(|k| a.value(k.key).map(|v| (k.key.to_string(), v))).collect()
 }
 
 /// Judge passages in parallel (cached); `None` where JEV did not answer.
 fn judge(jev: &Jev, texts: &[&str]) -> Vec<Option<BTreeMap<String, f64>>> {
-    let q = jev::questions("texture");
+    let q = jev_questions();
     let states: Vec<serde_json::Value> = texts.iter().map(|t| json!({ "text": t })).collect();
     jev.ask_all(&states, &q).iter().map(|a| a.as_ref().and_then(values_of)).collect()
 }
@@ -383,7 +425,7 @@ pub fn measure_author(jev: &Jev, p: &Profile) -> Result<(Sidecar, Usage), String
         schema: SIDECAR_SCHEMA,
         profile: p.name.clone(),
         model: jev.model.clone(),
-        questions_version: jev::questions_version("texture"),
+        questions_version: questions_version(),
         fingerprint: fingerprint(p),
         register: p.register.as_str().to_string(),
         short_form: short,
@@ -414,7 +456,7 @@ pub fn load_fresh(p: &Profile, model: &str) -> Option<Sidecar> {
     let sc: Sidecar = serde_json::from_slice(&raw).ok()?;
     let fresh = sc.schema == SIDECAR_SCHEMA
         && sc.model == model
-        && sc.questions_version == jev::questions_version("texture")
+        && sc.questions_version == questions_version()
         && sc.failed == 0
         && sc.fingerprint == fingerprint(p);
     fresh.then_some(sc)
@@ -456,27 +498,20 @@ pub fn bands(sc: &Sidecar, k: usize) -> Option<Bands> {
             _ => runs.push(vec![a]),
         }
     }
-    let k = k.clamp(1, runs.iter().map(Vec::len).max()?);
-    let step = (k / 2).max(1);
-    let mut windows: Vec<(&[&AuthorPassage], f64)> = Vec::new();
-    for r in &runs {
-        if r.len() < k {
-            continue;
+    // A draft longer than the author's runs is compared with the longest
+    // stretches that still give enough windows.
+    let mut k = k.clamp(1, runs.iter().map(Vec::len).max()?);
+    let windows = loop {
+        let w = windows_of(&runs, k);
+        if w.len() >= MIN_WINDOWS || k == 1 {
+            break w;
         }
-        let mut starts: Vec<usize> = (0..=r.len() - k).step_by(step).collect();
-        if starts.last() != Some(&(r.len() - k)) {
-            starts.push(r.len() - k);
-        }
-        for s in starts {
-            let w = &r[s..s + k];
-            windows.push((w, w.iter().map(|a| a.weight).sum::<f64>() / k as f64));
-        }
-    }
+        k -= 1;
+    };
     if windows.len() < MIN_WINDOWS {
         return None;
     }
-    let by_key = KEYS
-        .iter()
+    let by_key = jev_keys()
         .map(|key| {
             let v: Vec<(f64, f64)> = windows
                 .iter()
@@ -486,6 +521,24 @@ pub fn bands(sc: &Sidecar, k: usize) -> Option<Bands> {
         })
         .collect();
     Some(Bands { k, windows: windows.len(), by_key })
+}
+
+/// Every stretch of `k` consecutive passages within a run, half-overlapping
+/// (the last one flush with the run's end), with its mean weight.
+fn windows_of<'a>(runs: &'a [Vec<&'a AuthorPassage>], k: usize) -> Vec<(&'a [&'a AuthorPassage], f64)> {
+    let step = (k / 2).max(1);
+    let mut out = Vec::new();
+    for r in runs.iter().filter(|r| r.len() >= k) {
+        let mut starts: Vec<usize> = (0..=r.len() - k).step_by(step).collect();
+        if starts.last() != Some(&(r.len() - k)) {
+            starts.push(r.len() - k);
+        }
+        for s in starts {
+            let w = &r[s..s + k];
+            out.push((w, w.iter().map(|a| a.weight).sum::<f64>() / k as f64));
+        }
+    }
+    out
 }
 
 /// p15, p50, p85: linear interpolation between order statistics, as the
@@ -530,22 +583,206 @@ fn round3(v: f64) -> f64 {
     (v * 1000.0).round() / 1000.0
 }
 
+// ── Counted keys ─────────────────────────────────────────────────────────────
+
+const HEDGES: &str = include_str!("data/hedges.txt");
+/// "kind of" and "sort of" after these are nouns ("what kind of car").
+const DETERMINERS: [&str; 14] =
+    ["a", "the", "what", "this", "that", "these", "those", "some", "any", "every", "each", "one", "no", "which"];
+/// One hedge is never "piling them on": too many needs at least this many.
+const MIN_HEDGES_HIGH: usize = 2;
+
+fn hedge_list() -> Vec<Vec<String>> {
+    HEDGES
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| l.split_whitespace().map(str::to_string).collect())
+        .collect()
+}
+
+/// A line's words, lowercased, apostrophes straightened (and dropped at
+/// the ends of words, where they are quote marks).
+fn words(line: &str) -> Vec<String> {
+    line.to_lowercase()
+        .replace('\u{2019}', "'")
+        .split(|c: char| !(c.is_alphanumeric() || c == '\''))
+        .map(|w| w.trim_matches('\''))
+        .filter(|w| !w.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Where filler hedges start in a run of words.
+fn hedges_at(ws: &[String], list: &[Vec<String>]) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    for i in 0..ws.len() {
+        for h in list {
+            if !ws[i..].starts_with(h) {
+                continue;
+            }
+            let noun = (h[0] == "kind" || h[0] == "sort") && i > 0 && DETERMINERS.contains(&ws[i - 1].as_str());
+            if !noun {
+                out.push((i, h.join(" ")));
+            }
+            break;
+        }
+    }
+    out
+}
+
+/// Filler hedges in a draft: (1-based line, the hedge, the line) per hit,
+/// and the draft's words.
+pub fn draft_hedges(draft: &str) -> (Vec<(usize, String, String)>, usize) {
+    let list = hedge_list();
+    let (mut hits, mut n) = (Vec::new(), 0);
+    for (i, line) in draft.lines().enumerate() {
+        let ws = words(line);
+        n += ws.len();
+        hits.extend(hedges_at(&ws, &list).into_iter().map(|(_, h)| (i + 1, h, line.trim().to_string())));
+    }
+    (hits, n)
+}
+
+/// The author's filler hedges per 1,000 words over half-overlapping
+/// windows of `words` words of one work: p15, p50, p85.
+pub fn hedge_band(p: &Profile, words_per_window: usize) -> Option<[f64; 3]> {
+    let list = hedge_list();
+    let w = words_per_window.max(100);
+    let mut rates = Vec::new();
+    for (_, text, _) in author_works(p) {
+        let ws = words(&text);
+        if ws.len() < w {
+            continue;
+        }
+        let mut prefix = vec![0usize; ws.len() + 1];
+        for (i, _) in hedges_at(&ws, &list) {
+            prefix[i + 1] += 1;
+        }
+        for i in 0..ws.len() {
+            prefix[i + 1] += prefix[i];
+        }
+        let mut starts: Vec<usize> = (0..=ws.len() - w).step_by(w / 2).collect();
+        if starts.last() != Some(&(ws.len() - w)) {
+            starts.push(ws.len() - w);
+        }
+        rates.extend(starts.into_iter().map(|s| ((prefix[s + w] - prefix[s]) as f64 * 1000.0 / w as f64, 1.0)));
+    }
+    (rates.len() >= MIN_WINDOWS).then(|| quantiles(rates))
+}
+
+// ── Sentence drill-down ──────────────────────────────────────────────────────
+
+/// One sentence of a flagged passage, asked the sentence questions.
+#[derive(Debug, Clone, Serialize)]
+pub struct SentenceRow {
+    pub line: usize,
+    pub text: String,
+    /// P(a fresh figure of speech).
+    pub figure: f64,
+    /// P(a crafted, quotable line: kicker, reveal, aphorism).
+    pub crafted: f64,
+    /// Ends its paragraph.
+    pub closing: bool,
+}
+
+/// The sentences of a passage with their lines, and whether each ends its
+/// paragraph.
+fn sentences_of(lines: &[&str], p: &PassageRow, short: bool) -> Vec<(usize, String, bool)> {
+    let mut out: Vec<(usize, String, bool)> = Vec::new();
+    for l in p.lines[0]..=p.lines[1] {
+        let Some(line) = lines.get(l - 1) else { continue };
+        if line.trim().is_empty() {
+            if let Some(last) = out.last_mut() {
+                last.2 = true;
+            }
+            continue;
+        }
+        out.extend(text::sentences_for(line.trim(), short).into_iter().map(|s| (l, s, false)));
+    }
+    if let Some(last) = out.last_mut() {
+        last.2 = true;
+    }
+    out
+}
+
+/// The sentences that back a key's finding: fresh figures for
+/// `figurative`, crafted lines ending a paragraph for `button`, either for
+/// `polish`.
+pub fn cited<'a>(p: &'a PassageRow, key: &str) -> Vec<&'a SentenceRow> {
+    p.sentences
+        .iter()
+        .filter(|s| match key {
+            "figurative" => s.figure >= SENTENCE_YES,
+            "button" => s.closing && s.crafted >= SENTENCE_YES,
+            "polish" => s.figure >= SENTENCE_YES || s.crafted >= SENTENCE_YES,
+            _ => false,
+        })
+        .collect()
+}
+
+/// Ask the sentence questions of flagged passages, worst passages first,
+/// at most `MAX_SENTENCE_REQUESTS` sentences: every sentence when the
+/// passage is too polished or figurative, its paragraph endings when it
+/// only ends on crafted lines.
+fn drill(jev: &Jev, draft: &str, short: bool, off: &[&'static str], passages: &mut [PassageRow]) {
+    let drillable = ["polish", "button", "figurative"];
+    let keys: Vec<&str> = off.iter().copied().filter(|k| drillable.contains(k)).collect();
+    if keys.is_empty() {
+        return;
+    }
+    let lines: Vec<&str> = draft.lines().collect();
+    let mut order: Vec<usize> = (0..passages.len()).filter(|&i| passages[i].flags.iter().any(|f| keys.contains(f))).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(passages[i].flags.iter().filter(|f| keys.contains(f)).count()));
+    let mut asks: Vec<(usize, usize, String, bool)> = Vec::new(); // (passage, line, sentence, closing)
+    for i in order {
+        let only_endings = passages[i].flags.iter().filter(|f| keys.contains(f)).all(|f| *f == "button");
+        let mut prev = String::new();
+        for (line, s, closing) in sentences_of(&lines, &passages[i], short) {
+            if (!only_endings || closing) && asks.len() < MAX_SENTENCE_REQUESTS {
+                asks.push((i, line, format!("{prev}\u{0}{s}"), closing));
+            }
+            prev = s;
+        }
+    }
+    let states: Vec<serde_json::Value> = asks
+        .iter()
+        .map(|(_, _, both, _)| {
+            let (before, s) = both.split_once('\u{0}').unwrap_or(("", both));
+            json!({ "sentence": normalize(s), "before": normalize(before) })
+        })
+        .collect();
+    let answers = jev.ask_all(&states, &sentence_questions());
+    for ((i, line, both, closing), a) in asks.into_iter().zip(answers) {
+        let (Some(figure), Some(crafted)) = (a.as_ref().and_then(|a| a.noul("figure")), a.as_ref().and_then(|a| a.noul("crafted"))) else {
+            continue;
+        };
+        let s = both.split_once('\u{0}').map(|x| x.1).unwrap_or(&both);
+        passages[i].sentences.push(SentenceRow { line, text: excerpt(s, 160), figure: round3(figure), crafted: round3(crafted), closing });
+    }
+}
+
 // ── A draft's texture ────────────────────────────────────────────────────────
 
-/// One key: the draft's mean over its passages next to the author's band
-/// for stretches of the same length.
+/// One key: the draft's value (JEV keys: the mean over its passages;
+/// counted keys: the rate) next to the author's band at the same length.
 #[derive(Debug, Clone, Serialize)]
 pub struct KeyRow {
     pub key: &'static str,
     pub label: &'static str,
     pub side: Side,
     pub gate: bool,
+    /// jev (judged per passage) | count (counted in code)
+    pub source: &'static str,
     pub draft: f64,
     pub low: f64,
     pub median: f64,
     pub high: f64,
-    /// ok | off (beyond the band on the side that is a fault)
+    /// ok | off (beyond the band on a side that is a fault)
     pub status: &'static str,
+    /// When off: low (too little) or high (too much).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub off_side: Option<Side>,
 }
 
 /// One judged passage of the draft.
@@ -557,13 +794,19 @@ pub struct PassageRow {
     pub values: BTreeMap<String, f64>,
     /// Keys beyond the author's passage-level band, on their fault side.
     pub flags: Vec<&'static str>,
+    /// Flagged passages only: their sentences, asked about figures and
+    /// crafted lines so findings cite exact lines.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sentences: Vec<SentenceRow>,
     #[serde(skip)]
     pub excerpt: String,
 }
 
 /// The `texture` block of `check`: how the draft's prose texture compares
-/// with the author's own, judged by JEV. Advice: it never changes `pass`,
-/// `score` or `--strict`.
+/// with the author's own. JEV judges what code cannot (rough edges, polish,
+/// crafted lines, figures, kinds of roughness); hedges and one-sentence
+/// paragraphs are counted. Advice: it never changes `pass`, `score` or
+/// `--strict`.
 #[derive(Debug, Clone, Serialize)]
 pub struct Texture {
     /// measured | unavailable
@@ -574,7 +817,7 @@ pub struct Texture {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub questions_version: Option<String>,
-    /// No gate key off.
+    /// No gate key off (hedges: only too many fails).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pass: Option<bool>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -593,9 +836,12 @@ pub struct Texture {
     /// first check after a build without JEV, or after the profile changed).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub author_measured: Option<Usage>,
-    /// Everything this run asked JEV, author included.
+    /// Everything this run asked JEV, author and sentences included.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
+    /// Filler hedges in the draft: (line, hedge, the line's text).
+    #[serde(skip)]
+    pub hedges: Vec<(usize, String, String)>,
 }
 
 impl Texture {
@@ -613,6 +859,7 @@ impl Texture {
             author_windows: None,
             author_measured: None,
             usage: None,
+            hedges: Vec::new(),
         }
     }
 
@@ -626,6 +873,19 @@ impl Texture {
         v.sort_by_key(|k| !k.gate);
         v
     }
+
+    /// Add a counted row measured elsewhere (one-sentence paragraphs come
+    /// from `check`'s own metric) and settle `pass` again.
+    pub fn add_counted(&mut self, key: &str, draft: f64, band: [f64; 3]) {
+        let Some(def) = self::key(key) else { return };
+        if !self.measured() {
+            return;
+        }
+        self.keys.retain(|k| k.key != key);
+        self.keys.push(row(def, round3(draft), band.map(round3), true));
+        self.keys.sort_by_key(|k| KEYS.iter().position(|d| d.key == k.key));
+        self.pass = Some(pass_of(&self.keys));
+    }
 }
 
 pub fn key(id: &str) -> Option<&'static TextureKey> {
@@ -633,10 +893,43 @@ pub fn key(id: &str) -> Option<&'static TextureKey> {
 }
 
 fn is_off(side: Side, v: f64, band: [f64; 3]) -> bool {
-    match side {
-        Side::Low => v < band[0],
-        Side::High => v > band[2],
+    off_side(side, v, band, true).is_some()
+}
+
+/// Which side the value is off on, if a fault. `may_be_high` lets a
+/// counted key need several hits before too many counts.
+fn off_side(side: Side, v: f64, band: [f64; 3], may_be_high: bool) -> Option<Side> {
+    let low = matches!(side, Side::Low | Side::Both) && v < band[0];
+    let high = matches!(side, Side::High | Side::Both) && v > band[2] && may_be_high;
+    if low {
+        Some(Side::Low)
+    } else if high {
+        Some(Side::High)
+    } else {
+        None
     }
+}
+
+fn row(k: &'static TextureKey, draft: f64, band: [f64; 3], may_be_high: bool) -> KeyRow {
+    let off = off_side(k.side, draft, band, may_be_high);
+    KeyRow {
+        key: k.key,
+        label: k.label,
+        side: k.side,
+        gate: k.gate,
+        source: if k.jev { "jev" } else { "count" },
+        draft,
+        low: band[0],
+        median: band[1],
+        high: band[2],
+        status: if off.is_some() { "off" } else { "ok" },
+        off_side: off,
+    }
+}
+
+/// No gate key off; a two-sided gate key fails only on too much.
+fn pass_of(keys: &[KeyRow]) -> bool {
+    !keys.iter().any(|k| k.gate && k.status == "off" && (k.side != Side::Both || k.off_side == Some(Side::High)))
 }
 
 fn excerpt(t: &str, chars: usize) -> String {
@@ -658,7 +951,8 @@ pub fn assess(p: &Profile, draft: &str) -> Texture {
 }
 
 pub fn assess_with(jev: &Jev, p: &Profile, draft: &str) -> Texture {
-    let ps = passages(draft, p.register.is_short_form());
+    let short = p.register.is_short_form();
+    let ps = passages(draft, short);
     if ps.is_empty() {
         return Texture::unavailable("the draft has no prose passages to judge");
     }
@@ -682,42 +976,40 @@ pub fn assess_with(jev: &Jev, p: &Profile, draft: &str) -> Texture {
             sc.passages.len()
         ));
     };
-    let keys: Vec<KeyRow> = KEYS
-        .iter()
+    let mut keys: Vec<KeyRow> = jev_keys()
         .map(|k| {
             let draft = round3(judged.iter().map(|(_, v)| v.get(k.key).copied().unwrap_or(0.0)).sum::<f64>() / judged.len() as f64);
-            let band = b.get(k.key);
-            KeyRow {
-                key: k.key,
-                label: k.label,
-                side: k.side,
-                gate: k.gate,
-                draft,
-                low: band[0],
-                median: band[1],
-                high: band[2],
-                status: if is_off(k.side, draft, band) { "off" } else { "ok" },
-            }
+            row(k, draft, b.get(k.key), true)
         })
         .collect();
-    let passages = judged
+    // Hedges are a word list, held to the author's rate at the draft's length.
+    let (hedges, words) = draft_hedges(draft);
+    if let (Some(def), Some(band)) = (key("hedge"), hedge_band(p, words)) {
+        let rate = round3(hedges.len() as f64 * 1000.0 / words.max(1) as f64);
+        keys.push(row(def, rate, band, hedges.len() >= MIN_HEDGES_HIGH));
+    }
+    keys.sort_by_key(|k| KEYS.iter().position(|d| d.key == k.key));
+    let mut passages: Vec<PassageRow> = judged
         .iter()
         .enumerate()
         .map(|(i, (x, v))| PassageRow {
             index: i + 1,
             lines: [x.start_line, x.end_line],
             values: v.iter().map(|(k, x)| (k.clone(), round3(*x))).collect(),
-            flags: KEYS.iter().filter(|k| is_off(k.side, v[k.key], pb.get(k.key))).map(|k| k.key).collect(),
+            flags: jev_keys().filter(|k| is_off(k.side, v[k.key], pb.get(k.key))).map(|k| k.key).collect(),
+            sentences: Vec::new(),
             excerpt: excerpt(&x.text, 100),
         })
         .collect();
+    let off: Vec<&'static str> = keys.iter().filter(|k| k.status == "off").map(|k| k.key).collect();
+    drill(jev, draft, short, &off, &mut passages);
     let u = jev.usage();
     Texture {
         status: "measured",
         reason: None,
         model: Some(jev.model.clone()),
         questions_version: Some(sc.questions_version.clone()),
-        pass: Some(!keys.iter().any(|k| k.gate && k.status == "off")),
+        pass: Some(pass_of(&keys)),
         keys,
         passages,
         author_passages: Some(sc.passages.len()),
@@ -732,6 +1024,7 @@ pub fn assess_with(jev: &Jev, p: &Profile, draft: &str) -> Texture {
             input_tokens: u.input_tokens,
             cost_usd: cost(u.input_tokens),
         }),
+        hedges,
     }
 }
 
@@ -770,6 +1063,85 @@ mod tests {
         assert_eq!(p.len(), 2, "9 posts: 4 + 5 (a lone trailing post joins the batch before)");
         assert!(p[0].text.contains("post 0") && p[0].text.contains("post 3") && !p[0].text.contains("post 4"));
         assert!(p[1].text.contains("post 8"));
+    }
+
+    fn sidecar(runs: &[(usize, usize)], value: impl Fn(usize, usize) -> f64) -> Sidecar {
+        let passages = runs
+            .iter()
+            .flat_map(|&(source, n)| (0..n).map(move |index| (source, index)))
+            .map(|(source, index)| AuthorPassage {
+                source,
+                index,
+                weight: 1.0,
+                values: KEYS.iter().map(|k| (k.key.to_string(), value(source, index))).collect(),
+            })
+            .collect();
+        Sidecar {
+            schema: SIDECAR_SCHEMA,
+            profile: "t".into(),
+            model: "m".into(),
+            questions_version: "q".into(),
+            fingerprint: "f".into(),
+            register: "fiction".into(),
+            short_form: false,
+            total_passages: 0,
+            failed: 0,
+            measured_at: 0,
+            passages,
+        }
+    }
+
+    #[test]
+    fn sampling_takes_everything_when_small_and_even_runs_when_large() {
+        assert_eq!(sample(&[5, 3]).len(), 8);
+        let big = sample(&[400, 100, 300]);
+        assert!(big.len() <= SAMPLE_PASSAGES && big.len() > SAMPLE_PASSAGES - RUN, "{}", big.len());
+        // Runs of consecutive passages, spread over every work in proportion.
+        let per = |w: usize| big.iter().filter(|p| p.0 == w).count();
+        assert!(per(0) > per(2) && per(2) > per(1) && per(1) > 0, "{} {} {}", per(0), per(1), per(2));
+        assert!(big.windows(2).filter(|p| p[0].0 == p[1].0 && p[0].1 + 1 == p[1].1).count() >= big.len() * 3 / 4);
+    }
+
+    #[test]
+    fn bands_average_k_consecutive_passages_of_one_work() {
+        // Work 0 alternates 0/1, work 1 is all 0.5: 2-passage means are all 0.5.
+        let sc = sidecar(&[(0, 8), (1, 8)], |s, i| if s == 0 { (i % 2) as f64 } else { 0.5 });
+        let one = bands(&sc, 1).unwrap();
+        assert_eq!(one.k, 1);
+        assert_eq!(one.windows, 16);
+        assert_eq!(one.get("rough"), [0.0, 0.5, 1.0]);
+        let two = bands(&sc, 2).unwrap();
+        assert_eq!(two.get("rough"), [0.5, 0.5, 0.5]);
+        assert_eq!(two.windows, 14, "half-overlap: starts 0..6 in each run of 8");
+        // Longer drafts: the longest stretches that still give 3+ windows.
+        let long = bands(&sc, 50).unwrap();
+        assert_eq!((long.k, long.windows), (7, 4));
+        let tiny = sidecar(&[(0, 2)], |_, _| 0.3);
+        assert!(bands(&tiny, 1).is_none(), "fewer than {MIN_WINDOWS} passages give no bands");
+        // A gap in the indices breaks a run.
+        let mut gap = sidecar(&[(0, 6)], |_, _| 0.3);
+        gap.passages[3].index = 10;
+        assert_eq!(bands(&gap, 6).unwrap().k, 2);
+    }
+
+    #[test]
+    fn quantiles_match_the_eval_and_weigh_blends() {
+        let v: Vec<(f64, f64)> = (0..11).map(|i| (i as f64 / 10.0, 1.0)).collect();
+        assert_eq!(quantiles(v), [0.15, 0.5, 0.85]);
+        // A component with three times the weight pulls the median its way.
+        let w = vec![(0.0, 3.0), (0.0, 3.0), (1.0, 1.0), (1.0, 1.0)];
+        assert_eq!(quantiles(w)[1], 0.0);
+    }
+
+    #[test]
+    fn hedges_are_counted_by_line_and_kind_of_after_a_determiner_is_a_noun() {
+        let (hits, words) = draft_hedges("I guess it was kind of fine.\nWhat kind of car?\nSort of, I dunno\u{2019}.");
+        let found: Vec<(usize, &str)> = hits.iter().map(|h| (h.0, h.1.as_str())).collect();
+        assert_eq!(found, [(1, "i guess"), (1, "kind of"), (3, "sort of"), (3, "i dunno")]);
+        assert_eq!(words, 15);
+        assert!(!jev_questions().as_object().unwrap().contains_key("hedge"), "counted keys never go to JEV");
+        assert!(!jev_questions().as_object().unwrap().contains_key("oneliner"));
+        assert_eq!(jev_keys().count(), 7);
     }
 
     #[test]

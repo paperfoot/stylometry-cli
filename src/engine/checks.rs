@@ -2253,17 +2253,18 @@ fn habit_advice(feature: &str, h: &metrics::ItemHabits, m: &ItemMeasure, none_sh
 
 // ── Texture ──────────────────────────────────────────────────────────────────
 
-/// Add JEV's texture judgment to a check: one soft finding per key off the
-/// author's band and one plan step, right after typography. Advice only:
-/// nothing here is hard, so `pass`, `score` and `--strict` never move.
+/// Add the texture judgment to a check: one soft finding per key off the
+/// author's band (citing the exact sentences JEV picked out, or the hedges
+/// counted, where it can) and one plan step, right after typography.
+/// Advice only: nothing here is hard, so `pass`, `score` and `--strict`
+/// never move. One-sentence paragraphs already have their metric finding.
 pub fn add_texture(c: &mut Checked, t: &texture::Texture, draft_text: &str) {
-    let off = t.off();
+    let off: Vec<&texture::KeyRow> = t.off().into_iter().filter(|r| r.key != "oneliner").collect();
     if !t.measured() || off.is_empty() {
         return;
     }
     let lines: Vec<&str> = draft_text.lines().collect();
-    // The prose lines of a passage (blank lines and breaks between its
-    // paragraphs are not prose).
+    // The prose lines of a passage (blank lines between its paragraphs are not prose).
     let prose_lines = |p: &texture::PassageRow| -> Vec<usize> {
         (p.lines[0]..=p.lines[1]).filter(|&l| lines.get(l - 1).is_some_and(|s| !s.trim().is_empty())).collect()
     };
@@ -2273,34 +2274,79 @@ pub fn add_texture(c: &mut Checked, t: &texture::Texture, draft_text: &str) {
     let mut findings = Vec::new();
     for row in &off {
         let Some(def) = texture::key(row.key) else { continue };
+        let too_much = row.off_side == Some(texture::Side::High);
+        let (more, which) = if too_much { ("too much", "above") } else { ("too little", "below") };
+        if row.key == "hedge" {
+            // Counted: the exact lines, one excerpt per line with its hedges.
+            let hits: Vec<&(usize, String, String)> = if too_much { t.hedges.iter().collect() } else { Vec::new() };
+            let mut by_line: Vec<(usize, Vec<String>, &str)> = Vec::new();
+            for h in &hits {
+                match by_line.last_mut() {
+                    Some(l) if l.0 == h.0 => l.1.push(format!("'{}'", h.1)),
+                    _ => by_line.push((h.0, vec![format!("'{}'", h.1)], h.2.as_str())),
+                }
+            }
+            let first = |l: &(usize, Vec<String>, &str)| l.1[0].trim_matches('\'').to_string();
+            findings.push(Finding {
+                kind: "texture",
+                key: row.key.to_string(),
+                count: hits.len().max(1),
+                lines: by_line.iter().map(|l| l.0).collect(),
+                excerpts: by_line.iter().take(MAX_EXCERPTS).map(|l| format!("L{}: {} in {}", l.0, l.1.join(", "), excerpt(l.2, &first(l)))).collect(),
+                message: format!(
+                    "{} {}: {} in this draft, {which} the author's {}–{} (median {}) at this length",
+                    if too_much { "too many" } else { "too few" },
+                    row.label,
+                    t2(row.draft),
+                    t2(row.low),
+                    t2(row.high),
+                    t2(row.median)
+                ),
+                suggestion: capitalize(def.advice),
+                hard: false,
+                severity: if row.gate && too_much { 55.0 } else { 20.0 },
+                alt: None,
+            });
+            continue;
+        }
         let mut hit: Vec<&texture::PassageRow> = t.passages.iter().filter(|p| p.flags.contains(&row.key)).collect();
         if hit.is_empty() {
             // Off on average though no single passage is: point at the worst one.
             let worse = |p: &&texture::PassageRow| {
                 let v = p.values.get(row.key).copied().unwrap_or(0.0);
-                if row.side == texture::Side::Low { -v } else { v }
+                if too_much { v } else { -v }
             };
             hit.extend(t.passages.iter().max_by(|a, b| worse(a).total_cmp(&worse(b))));
         }
         let ranges: Vec<String> = hit.iter().map(|p| format!("{}–{}", p.lines[0], p.lines[1])).collect();
-        let (more, which) = match row.side {
-            texture::Side::Low => ("too little", "below"),
-            texture::Side::High => ("too much", "above"),
+        // Sentence-level citations where JEV picked them out; else the passages.
+        let cited: Vec<&texture::SentenceRow> = hit.iter().flat_map(|p| texture::cited(p, row.key)).collect();
+        let (lines_of, excerpts): (Vec<usize>, Vec<String>) = if cited.is_empty() {
+            (
+                hit.iter().flat_map(|p| prose_lines(p)).collect(),
+                hit.iter().take(MAX_EXCERPTS).map(|p| format!("L{}–{}: {}", p.lines[0], p.lines[1], p.excerpt)).collect(),
+            )
+        } else {
+            (cited.iter().map(|s| s.line).collect(), cited.iter().take(MAX_EXCERPTS).map(|s| format!("L{}: {}", s.line, s.text)).collect())
+        };
+        let at = if cited.is_empty() {
+            format!("worst at lines {}", ranges.join(", "))
+        } else {
+            format!("{} sentence(s) at lines {}", cited.len(), join_lines(&cited.iter().map(|s| s.line).collect::<Vec<_>>()))
         };
         findings.push(Finding {
             kind: "texture",
             key: row.key.to_string(),
-            count: hit.len(),
-            lines: hit.iter().flat_map(|p| prose_lines(p)).collect(),
-            excerpts: hit.iter().take(MAX_EXCERPTS).map(|p| format!("L{}–{}: {}", p.lines[0], p.lines[1], p.excerpt)).collect(),
+            count: if cited.is_empty() { hit.len() } else { cited.len() },
+            lines: lines_of,
+            excerpts,
             message: format!(
-                "{more} {}: {} over the draft's {n} {unit}, {which} the author's {}–{} (median {}) for {k}-passage stretches of their own text; worst at lines {}",
+                "{more} {}: {} over the draft's {n} {unit}, {which} the author's {}–{} (median {}) for {k}-passage stretches of their own text; {at}",
                 row.label,
                 t2(row.draft),
                 t2(row.low),
                 t2(row.high),
                 t2(row.median),
-                ranges.join(", ")
             ),
             suggestion: capitalize(def.advice),
             hard: false,
@@ -2314,18 +2360,15 @@ pub fn add_texture(c: &mut Checked, t: &texture::Texture, draft_text: &str) {
     // The plan step: gate faults first, the worst passages by line, and the
     // warning that faked roughness reads as imitation too.
     let advice: Vec<String> = off.iter().filter_map(|r| texture::key(r.key)).map(|d| d.advice.to_string()).collect();
-    let mut worst: Vec<(usize, &texture::PassageRow)> = t
-        .passages
-        .iter()
-        .map(|p| (p.flags.iter().filter(|f| off.iter().any(|r| r.key == **f)).count(), p))
-        .filter(|(n, _)| *n > 0)
-        .collect();
+    let is_off = |f: &&str| off.iter().any(|r| r.key == *f);
+    let mut worst: Vec<(usize, &texture::PassageRow)> =
+        t.passages.iter().map(|p| (p.flags.iter().filter(|f| is_off(f)).count(), p)).filter(|(n, _)| *n > 0).collect();
     worst.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.index.cmp(&b.1.index)));
     let named: Vec<String> = worst
         .iter()
         .take(4)
         .map(|(_, p)| {
-            let why: Vec<&str> = p.flags.iter().filter(|f| off.iter().any(|r| r.key == **f)).filter_map(|f| texture::key(f)).map(|d| d.label).collect();
+            let why: Vec<&str> = p.flags.iter().filter(|f| is_off(f)).filter_map(|f| texture::key(f)).map(|d| d.label).collect();
             format!("lines {}–{} ({})", p.lines[0], p.lines[1], why.join(", "))
         })
         .collect();
@@ -2334,18 +2377,19 @@ pub fn add_texture(c: &mut Checked, t: &texture::Texture, draft_text: &str) {
     if !named.is_empty() {
         action.push_str(&format!(". Start with {}", named.join("; ")));
     }
-    let off_rows: Vec<String> = off
-        .iter()
-        .map(|r| format!("{} {} (author {}–{})", r.label, t2(r.draft), t2(r.low), t2(r.high)))
-        .collect();
+    let off_rows: Vec<String> = off.iter().map(|r| format!("{} {} (author {}–{})", r.label, t2(r.draft), t2(r.low), t2(r.high))).collect();
+    let mut step_lines: Vec<usize> = worst.iter().flat_map(|(_, p)| prose_lines(p)).collect();
+    if off.iter().any(|r| r.key == "hedge" && r.off_side == Some(texture::Side::High)) {
+        step_lines.extend(t.hedges.iter().map(|h| h.0));
+    }
     c.plan.push(PlanStep {
         action,
         why: format!(
-            "JEV reads this draft's texture outside the author's own: {}. Don't fake roughness with filler hedges, padding, misspellings or mechanical repetition: readers catch that as imitation too",
+            "the draft's texture sits outside the author's own: {}. Don't fake roughness with filler hedges, padding, misspellings or mechanical repetition: readers catch that as imitation too",
             off_rows.join("; ")
         ),
-        quantity: format!("{} of {n} {unit}", worst.len().max(1).min(n)),
-        lines: worst.iter().flat_map(|(_, p)| prose_lines(p)).collect(),
+        quantity: format!("{} of {n} {unit}", worst.len().clamp(1, n.max(1))),
+        lines: step_lines,
         hard: false,
         order: 890.0,
     });
@@ -2353,7 +2397,7 @@ pub fn add_texture(c: &mut Checked, t: &texture::Texture, draft_text: &str) {
     c.plan = finish_plan(plan);
 }
 
-/// Texture values: probabilities and polish levels, to two decimals.
+/// Texture values: probabilities, polish levels and rates, to two decimals.
 fn t2(v: f64) -> String {
     format!("{v:.2}")
 }

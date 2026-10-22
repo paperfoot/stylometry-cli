@@ -195,7 +195,8 @@ pub fn run(ctx: Ctx, a: GuideArgs) -> Result<(), AppError> {
     let texture = match texture::author_bands(&p) {
         Ok((bands, n, measured)) => {
             let at = sections.iter().position(|s| s.exemplar).unwrap_or(sections.len().saturating_sub(1));
-            sections.insert(at, texture_section(&bands, n, p.register.is_short_form()));
+            let hedges = texture::hedge_band(&p, a.window);
+            sections.insert(at, texture_section(&bands, n, p.register.is_short_form(), hedges));
             GuideTexture { status: "measured", reason: None, author_passages: Some(n), author_measured: measured }
         }
         Err(why) => GuideTexture { status: "unavailable", reason: Some(why), author_passages: None, author_measured: None },
@@ -541,7 +542,8 @@ fn giveaways(c: &Ctxt, extra: &[String]) -> Option<Section> {
 /// The author's prose texture as JEV reads their own passages: how plain
 /// or polished, which kinds of roughness they have, what they rarely do,
 /// what AI drafts do instead, and that faked roughness gives itself away.
-fn texture_section(b: &texture::Bands, n: usize, short: bool) -> Section {
+/// Hedges are counted (per 1,000 words), not judged.
+fn texture_section(b: &texture::Bands, n: usize, short: bool, hedges: Option<[f64; 3]>) -> Section {
     let unit = if short { "batches of posts" } else { "passages" };
     let m = |k: &str| b.get(k)[1];
     let share = |k: &str| format!("{:.0}%", m(k) * 100.0);
@@ -562,21 +564,21 @@ fn texture_section(b: &texture::Bands, n: usize, short: bool) -> Section {
             share("splice")
         ),
     ];
-    let (often, rarely): (Vec<_>, Vec<_>) = [
-        ("filler hedges (I guess, kind of)", "hedge"),
-        ("crafted closing lines", "button"),
-        ("fresh figures of speech", "figurative"),
-        ("dramatic one-line paragraphs", "oneliner"),
-    ]
-    .into_iter()
-    .map(|(label, k)| (format!("{label} {}", share(k)), m(k)))
-    .partition(|(_, v)| *v >= 0.5);
+    let (often, rarely): (Vec<_>, Vec<_>) = [("crafted closing lines", "button"), ("fresh figures of speech", "figurative")]
+        .into_iter()
+        .map(|(label, k)| (format!("{label} {}", share(k)), m(k)))
+        .partition(|(_, v)| *v >= 0.5);
     let list = |v: Vec<(String, f64)>| v.into_iter().map(|x| x.0).collect::<Vec<_>>().join(", ");
     if !rarely.is_empty() {
         lines.push(format!("Rare in their {unit}, keep it so: {}.", list(rarely)));
     }
     if !often.is_empty() {
         lines.push(format!("Common in their {unit}: {}.", list(often)));
+    }
+    if let Some([lo, med, hi]) = hedges {
+        lines.push(format!(
+            "Filler hedges (I guess, kind of, sort of), counted: {med:.1} per 1,000 words, usually {lo:.1}-{hi:.1}. Stay in that range: piled-on hedges gave tuned imitations away."
+        ));
     }
     lines.push(
         "AI drafts go the other way: bare model drafts score polish about 2.0-2.5 and rough edges only 30-50%, and end on kickers and fresh metaphors. `check` reports it as `texture`.".into(),
