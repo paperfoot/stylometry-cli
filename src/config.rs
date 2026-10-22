@@ -13,6 +13,42 @@ use crate::error::AppError;
 pub struct AppConfig {
     /// Update / distribution settings.
     pub update: UpdateConfig,
+    /// JEV (TypeSafe System One) judgments: prose texture and example
+    /// re-ranking. On whenever a key is found; fails open to local-only.
+    #[serde(default)]
+    pub jev: JevConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct JevConfig {
+    /// Use JEV when a key is available. Sends passages of drafts and of
+    /// profiled text to api.typesafe.ai; set false to stay fully local.
+    pub enabled: bool,
+    /// Pinned model; thresholds were measured against this version.
+    pub model: String,
+    /// Environment variable holding the API key.
+    pub key_env: String,
+    /// Command whose output is the key, when the variable is unset (run
+    /// with `sh -c`; plain text, or JSON with `data.value` as `akm` prints).
+    pub key_command: String,
+    /// Parallel requests.
+    pub workers: usize,
+    /// Per-request deadline, milliseconds.
+    pub timeout_ms: u64,
+}
+
+impl Default for JevConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            model: "jev-1.13.0".into(),
+            key_env: "TYPESAFE_API_KEY".into(),
+            key_command: String::new(),
+            workers: 8,
+            timeout_ms: 8000,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

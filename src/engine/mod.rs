@@ -8,6 +8,7 @@ pub mod checks;
 pub mod delta;
 pub mod features;
 pub mod import;
+pub mod jev;
 pub mod lexicon;
 pub mod metrics;
 pub mod model;
@@ -16,6 +17,7 @@ pub mod retrieve;
 pub mod score;
 pub mod store;
 pub mod style;
+pub mod texture;
 pub mod text;
 pub mod voice;
 

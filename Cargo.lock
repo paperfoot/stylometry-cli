@@ -1924,6 +1924,7 @@ dependencies = [
  "self_update",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
  "unicode-segmentation",

@@ -12,7 +12,12 @@ use assert_cmd::Command;
 use serde_json::{Value, json};
 
 fn bin() -> Command {
-    Command::cargo_bin("stylometry").unwrap()
+    {
+        // Offline and deterministic: never call JEV from tests.
+        let mut c = Command::cargo_bin("stylometry").unwrap();
+        c.env("STYLOMETRY_JEV__ENABLED", "false");
+        c
+    }
 }
 
 const TOPICS: [&str; 8] = [

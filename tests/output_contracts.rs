@@ -8,7 +8,12 @@ use assert_cmd::Command;
 use serde_json::Value;
 
 fn bin(home: &std::path::Path) -> Command {
-    let mut cmd = Command::cargo_bin("stylometry").unwrap();
+    let mut cmd = {
+        // Offline and deterministic: never call JEV from tests.
+        let mut c = Command::cargo_bin("stylometry").unwrap();
+        c.env("STYLOMETRY_JEV__ENABLED", "false");
+        c
+    };
     cmd.env("HOME", home)
         .env("STYLOMETRY_DATA_DIR", home.join("data"));
     cmd

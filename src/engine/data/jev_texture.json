@@ -1,0 +1,149 @@
+{
+ "rough": {
+  "type": "noul",
+  "instructions": {
+   "question": "Does `text` have the rough edges of an unedited human draft: awkward or clunky phrasing, needless repetition, run-on or loose sentences, over-explaining, or small slips?",
+   "focus": "Judge how the writing is made, not its topic, its opinions or its punctuation marks."
+  },
+  "criteria": {
+   "true": {
+    "what": "At least one sentence a careful editor would smooth out",
+    "examples": [
+     "It shows how much he cares about being a good dad to him.",
+     "The quality and the speed was really much better then expected",
+     "recieve"
+    ]
+   },
+   "false": {
+    "what": "Every sentence is smooth, balanced and deliberate"
+   }
+  }
+ },
+ "polish": {
+  "type": "score",
+  "instructions": {
+   "question": "How crafted and polished is the writing in `text`?",
+   "focus": "Judge how the writing is made, not its topic, its opinions or its punctuation marks."
+  },
+  "criteria": [
+   "Plain and functional: says things directly, sometimes clumsily or at length",
+   "Clear and competent, with little ornament",
+   "Polished: balanced sentences and a few crafted lines",
+   "Highly crafted: aphorisms, figures of speech and quotable lines throughout"
+  ]
+ },
+ "button": {
+  "type": "noul",
+  "instructions": {
+   "question": "Does `text` end on a crafted closing line: a short, quotable punchline or reveal placed last for effect?",
+   "focus": "Judge how the writing is made, not its topic, its opinions or its punctuation marks."
+  },
+  "criteria": {
+   "true": {
+    "what": "The last sentence is a polished button, kicker, twist or callback",
+    "examples": [
+     "She never called again.",
+     "That was the last time I saw it.",
+     "Some doors stay shut."
+    ]
+   },
+   "false": {
+    "what": "It just stops, or ends on an ordinary sentence that carries on the narration, argument or post"
+   }
+  }
+ },
+ "figurative": {
+  "type": "noul",
+  "instructions": {
+   "question": "Does `text` use a crafted figure of speech: a fresh metaphor, simile or personification chosen for effect?",
+   "focus": "Judge how the writing is made, not its topic, its opinions or its punctuation marks."
+  },
+  "criteria": {
+   "true": {
+    "what": "An inventive image a plain writer would not reach for",
+    "examples": [
+     "the house held its breath",
+     "her laugh was a door slamming somewhere far away"
+    ]
+   },
+   "false": {
+    "what": "Plain literal language, or only everyday idioms and dead metaphors (\"fell in love\", \"a lot on my mind\")"
+   }
+  }
+ },
+ "hedge": {
+  "type": "noul",
+  "instructions": {
+   "question": "Does `text` lean on filler hedges or softeners (I guess, kind of, sort of, pretty much, or whatever, I don't know) more than once?",
+   "focus": "Judge how the writing is made, not its topic, its opinions or its punctuation marks."
+  },
+  "criteria": {
+   "true": {
+    "what": "Two or more filler hedges or softeners"
+   },
+   "false": {
+    "what": "None or one, even if the tone is casual"
+   }
+  }
+ },
+ "repeat": {
+  "type": "noul",
+  "instructions": {
+   "question": "Does `text` repeat the same noun or phrase in close succession where a writer would normally use a pronoun or say it once?",
+   "focus": "Judge how the writing is made, not its topic, its opinions or its punctuation marks."
+  },
+  "criteria": {
+   "true": {
+    "what": "A noun or phrase repeated mechanically within a sentence or two"
+   },
+   "false": {
+    "what": "Repetition only for rhetorical effect, or none"
+   }
+  }
+ },
+ "overexplain": {
+  "type": "noul",
+  "instructions": {
+   "question": "Does `text` over-explain: spell out reasons, logistics or feelings the reader could already infer?",
+   "focus": "Judge how the writing is made, not its topic, its opinions or its punctuation marks."
+  },
+  "criteria": {
+   "true": {
+    "what": "At least one sentence that states the obvious or explains an inference"
+   },
+   "false": {
+    "what": "Everything stated is needed"
+   }
+  }
+ },
+ "splice": {
+  "type": "noul",
+  "instructions": {
+   "question": "Does `text` contain a run-on sentence or a comma splice joining two complete clauses?",
+   "focus": "Judge how the writing is made, not its topic, its opinions or its punctuation marks."
+  },
+  "criteria": {
+   "true": {
+    "what": "Two independent clauses joined by only a comma, or a sentence that runs on loosely"
+   },
+   "false": {
+    "what": "Every sentence is punctuated conventionally"
+   }
+  }
+ },
+ "oneliner": {
+  "type": "noul",
+  "instructions": {
+   "question": "Does `text` set a short dramatic line or inner thought as its own paragraph for emphasis?",
+   "focus": "Judge how the writing is made, not its topic, its opinions or its punctuation marks."
+  },
+  "criteria": {
+   "true": {
+    "what": "A one-line paragraph used for a beat, reveal or thought"
+   },
+   "false": {
+    "what": "No such standalone line"
+   }
+  }
+ }
+}

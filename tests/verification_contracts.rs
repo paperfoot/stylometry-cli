@@ -8,7 +8,12 @@ use std::path::Path;
 use assert_cmd::Command;
 
 fn bin() -> Command {
-    Command::cargo_bin("stylometry").unwrap()
+    {
+        // Offline and deterministic: never call JEV from tests.
+        let mut c = Command::cargo_bin("stylometry").unwrap();
+        c.env("STYLOMETRY_JEV__ENABLED", "false");
+        c
+    }
 }
 
 // ── Synthetic corpora ───────────────────────────────────────────────────────

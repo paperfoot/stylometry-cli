@@ -1,0 +1,15 @@
+{
+ "fit": {
+  "type": "score",
+  "instructions": {
+   "question": "How useful is `passage` as a model for writing what `topic` describes?",
+   "focus": "Judge the kind of scene, argument or post and what happens in it, not shared names or keywords."
+  },
+  "criteria": [
+   "Unrelated: a different kind of piece about something else",
+   "Same broad area, but a different situation or argument",
+   "A similar situation, argument or kind of post",
+   "Close: the same kind of scene, argument or post, in a similar situation"
+  ]
+ }
+}

@@ -297,6 +297,22 @@ fn check_config() -> DoctorCheck {
     }
 }
 
+/// JEV is optional: without it, texture checks and example re-ranking are
+/// skipped and everything else works, so a missing key is a warning.
+fn check_jev() -> DoctorCheck {
+    let cfg = config::load().map(|c| c.jev).unwrap_or_default();
+    match crate::engine::jev::unavailable_reason(&cfg) {
+        None => DoctorCheck::new(
+            "jev",
+            CheckStatus::Pass,
+            format!("on ({}): texture checks and example re-ranking send passages to api.typesafe.ai", cfg.model),
+        ),
+        Some(_) if !cfg.enabled => DoctorCheck::new("jev", CheckStatus::Pass, "off by config: everything stays local"),
+        Some(why) => DoctorCheck::new("jev", CheckStatus::Warn, format!("{why}; texture checks and example re-ranking are skipped"))
+            .fix(format!("export {}=<key>, or set jev.key_command in {}", cfg.key_env, config::config_path().display())),
+    }
+}
+
 pub fn run(ctx: Ctx) -> Result<(), AppError> {
     let mut checks = vec![check_data_dir()];
     let inv = check_profiles(&mut checks);
@@ -304,6 +320,7 @@ pub fn run(ctx: Ctx) -> Result<(), AppError> {
     checks.push(check_calibration(&inv));
     checks.push(check_lexicons());
     checks.push(check_config());
+    checks.push(check_jev());
 
     let count = |s: CheckStatus| checks.iter().filter(|c| c.status == s).count();
     let summary = DoctorSummary {
