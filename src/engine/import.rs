@@ -136,6 +136,7 @@ pub fn read_corpus_as(path: &Path, register: Option<Register>) -> Result<Corpus,
     // Structured files are read first and filtered across files at the end
     // (dominant author, duplicate ids, self-replies need the whole corpus).
     let mut structured: Vec<(String, Vec<Raw>, Register)> = Vec::new();
+    let mut archive_parts: HashMap<(Option<PathBuf>, &'static str), usize> = HashMap::new();
     let mut note_pool = NotePool::new(notes);
     for f in &files {
         let name = label(path, f);
@@ -209,7 +210,19 @@ pub fn read_corpus_as(path: &Path, register: Option<Register>) -> Result<Corpus,
             })
         })();
         match parsed {
-            Ok(Some((items, reg))) => structured.push((name, items, reg)),
+            Ok(Some((items, reg))) => {
+                // An archive splits one account's posts over tweets.js,
+                // tweets-part1.js, ...: one source, sorted by time later.
+                let key = (ext == "js").then(|| (f.parent().map(Path::to_path_buf), reg.as_str()));
+                if let Some(&i) = key.as_ref().and_then(|k| archive_parts.get(k)) {
+                    structured[i].1.extend(items);
+                } else {
+                    if let Some(k) = key {
+                        archive_parts.insert(k, structured.len());
+                    }
+                    structured.push((name, items, reg));
+                }
+            }
             Ok(None) => {}
             // In a folder, one unreadable export shouldn't sink the rest.
             Err(e) if !single && matches!(ext.as_str(), "json" | "jsonl" | "ndjson" | "csv" | "js") => {
