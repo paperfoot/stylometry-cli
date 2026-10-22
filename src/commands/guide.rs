@@ -685,12 +685,20 @@ pub fn typography_note(t: &TypographyHabits) -> String {
 /// abbreviations kept in running prose and (posts) loose starts and endings.
 #[derive(Default)]
 struct Hand {
-    /// "..", "!!", "??", "?!" the author writes, per 1,000 words.
-    doubled: Vec<(&'static str, f64)>,
+    /// "..", "!!", "??", "?!" the author writes, with their count.
+    doubled: Vec<(&'static str, usize)>,
+    /// Words the counts come from.
+    words: usize,
     /// "etc", "e.g.", "i.e." in running text, per 1,000 words.
     abbrevs: Vec<(&'static str, f64)>,
     /// Short-form: lowercase starts, no final full stop.
     loose: Vec<String>,
+}
+
+impl Hand {
+    fn per_1k(&self, n: usize) -> f64 {
+        n as f64 * 1000.0 / self.words.max(1) as f64
+    }
 }
 
 /// Whether an item's last mark is the writer's: an email ends on its
@@ -738,13 +746,7 @@ fn hand_of(c: &Ctxt, habits: Option<&ItemHabits>) -> Hand {
             *n += m;
         }
     }
-    // Three uses and one per 10,000 words make a habit, not a stray.
-    let doubled = DOUBLED
-        .iter()
-        .zip(counts)
-        .filter(|(_, n)| *n >= 3 && *n as f64 * 1000.0 / words >= 0.1)
-        .map(|(f, n)| (*f, n as f64 * 1000.0 / words))
-        .collect();
+    let doubled = DOUBLED.iter().zip(counts).filter(|(_, n)| *n > 0).map(|(f, n)| (*f, n)).collect();
     let abbrevs = [("etc", "etc"), ("e.g", "e.g."), ("i.e", "i.e.")]
         .iter()
         .filter_map(|(key, shown)| {
@@ -769,7 +771,7 @@ fn hand_of(c: &Ctxt, habits: Option<&ItemHabits>) -> Hand {
             loose.push(format!("no final full stop ({} of {})", pct(bare), item_noun(c)));
         }
     }
-    Hand { doubled, abbrevs, loose }
+    Hand { doubled, words: p.n_tokens as usize, abbrevs, loose }
 }
 
 /// Mechanics from the author's bands (`double_punct_per_1k`,
@@ -782,18 +784,38 @@ fn mechanics_lines(bands: &[Band], h: &Hand) -> Vec<String> {
         return Vec::new();
     };
     let mut out = Vec::new();
-    let quoted = |v: &[(&'static str, f64)]| v.iter().map(|(f, _)| format!("\"{f}\"")).collect::<Vec<_>>();
-    if h.doubled.is_empty() {
+    fn quoted<T>(v: &[(&'static str, T)]) -> Vec<String> {
+        v.iter().map(|(f, _)| format!("\"{f}\"")).collect()
+    }
+    // A habit only where the author's typical passage has one: the brief
+    // reads the band `check` scores, so it never asks for marks `check`
+    // then cuts. A form must also recur (three uses, one per 10,000 words).
+    // A few "?!" in a long edited novel are strays, not an informal hand.
+    let habit: Vec<(&'static str, usize)> = if doubled.median > 0.0 {
+        h.doubled.iter().copied().filter(|&(_, n)| n >= 3 && h.per_1k(n) >= 0.1).collect()
+    } else {
+        Vec::new()
+    };
+    if !habit.is_empty() {
+        out.push(format!(
+            "Doubled marks: {} (typically {} per 1,000 words, up to {}). They are the author's: use them where the author would.",
+            quoted(&habit).join(", "),
+            fmt_num(doubled.median),
+            fmt_num(doubled.high)
+        ));
+    } else if h.doubled.iter().map(|d| d.1).sum::<usize>() < 3 {
+        // One or two in a whole corpus are strays.
         if doubled.high == 0.0 {
             out.push("Doubled marks (!!, ?!, ..): never.".to_string());
         }
     } else {
-        out.push(format!(
-            "Doubled marks: {} (typically {} per 1,000 words, up to {}). They are the author's: use them where the author would.",
-            quoted(&h.doubled).join(", "),
-            fmt_num(doubled.median),
-            fmt_num(doubled.high)
-        ));
+        let seen: Vec<String> = h.doubled.iter().map(|(f, n)| format!("{n} \"{f}\"")).collect();
+        let advice = match () {
+            _ if doubled.high == 0.0 => "; leave them out",
+            _ if doubled.median == 0.0 => "; most passages have none",
+            _ => "",
+        };
+        out.push(format!("Doubled marks: rare ({} in {} words){advice}.", seen.join(", "), h.words));
     }
     let spaced = band("space_before_punct_per_1k").filter(|b| b.median >= 0.5);
     if let Some(b) = spaced {
@@ -810,9 +832,9 @@ fn mechanics_lines(bands: &[Band], h: &Hand) -> Vec<String> {
             )
         })
         .unwrap_or_default();
-    let informal = !h.doubled.is_empty() || spaced.is_some() || !h.loose.is_empty();
+    let informal = !habit.is_empty() || spaced.is_some() || !h.loose.is_empty();
     if informal {
-        let mut kept = quoted(&h.doubled);
+        let mut kept = quoted(&habit);
         kept.extend(quoted(&h.abbrevs));
         if spaced.is_some() {
             kept.push("the space before a mark".into());
@@ -1844,7 +1866,8 @@ mod tests {
             mk_band("nonword_per_1k", 4.0, 9.0, 15.0),
         ];
         let hand = Hand {
-            doubled: vec![("..", 3.6)],
+            doubled: vec![("..", 36)],
+            words: 10_000,
             abbrevs: vec![("e.g.", 0.7)],
             loose: vec!["no final full stop (10% of posts)".into()],
         };
@@ -1867,6 +1890,34 @@ mod tests {
         assert!(!t.contains("space before"), "an occasional stray space is no habit: {t}");
         // Without the mechanics measures there is nothing to say.
         assert!(mechanics_lines(&[], &hand).is_empty());
+    }
+
+    /// Review: three "?!" in a 20,000-word edited novel made the brief say
+    /// "use them" and "Polish: informal" while the band `check` scores was
+    /// 0–0, so `check` then cut the one "?!" the brief had asked for.
+    #[test]
+    fn doubled_marks_follow_the_band_check_scores() {
+        let few = Hand { doubled: vec![("?!", 3)], words: 20_000, ..Default::default() };
+        let zero = vec![mk_band("double_punct_per_1k", 0.0, 0.0, 0.0)];
+        let t = mechanics_lines(&zero, &few).join("\n");
+        assert!(t.contains("Doubled marks: rare (3 \"?!\" in 20000 words); leave them out."), "{t}");
+        assert!(!t.contains("use them") && !t.contains("informal"), "{t}");
+        assert!(t.contains("Polish: edited copy"), "{t}");
+        let stray = Hand { doubled: vec![("?!", 1)], words: 110_000, ..Default::default() };
+        assert_eq!(mechanics_lines(&zero, &stray)[0], "Doubled marks (!!, ?!, ..): never.");
+        // Spread out, some passages have one: still no habit while the
+        // typical passage has none.
+        let spread = Hand { doubled: vec![("?!", 4)], words: 20_000, ..Default::default() };
+        let some = vec![mk_band("double_punct_per_1k", 0.0, 0.0, 0.9)];
+        let t = mechanics_lines(&some, &spread).join("\n");
+        assert!(t.contains("Doubled marks: rare (4 \"?!\" in 20000 words); most passages have none."), "{t}");
+        assert!(!t.contains("use them") && !t.contains("informal"), "{t}");
+        // A typical passage with one is a habit; a form used once is not.
+        let posts = Hand { doubled: vec![("..", 40), ("!!", 1)], words: 10_000, ..Default::default() };
+        let usual = vec![mk_band("double_punct_per_1k", 0.0, 2.0, 6.0)];
+        let t = mechanics_lines(&usual, &posts).join("\n");
+        assert!(t.contains("Doubled marks: \"..\" (typically 2.0 per 1,000 words, up to 6.0). They are the author's"), "{t}");
+        assert!(t.contains("Polish: informal. Keeps \"..\"; don't tidy these away."), "{t}");
     }
 
     #[test]
