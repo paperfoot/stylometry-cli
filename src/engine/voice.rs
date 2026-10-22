@@ -757,7 +757,7 @@ const FIRST_NARRATOR: [&str; 9] = ["i", "me", "my", "mine", "myself", "i'm", "i'
 const THIRD_NARRATOR: [&str; 10] = ["he", "she", "him", "her", "his", "hers", "himself", "herself", "he's", "she's"];
 
 /// POV from the narration (dialogue removed): first person when the
-/// narrator's I/me/my outnumber he/she/him/her. Tense from the present share
+/// narrator's I/me/my are at least half as many as he/she/him/her. Tense from the present share
 /// of narration verbs: present at 0.6 or more, past at 0.3 or less, else
 /// mixed. None when the stretch has too little narration to tell.
 pub fn mode_of(paragraphs: &[String]) -> Option<ModeLabel> {
@@ -776,7 +776,10 @@ pub fn mode_of(paragraphs: &[String]) -> Option<ModeLabel> {
     }
     let present = present_share(paragraphs)?;
     Some(ModeLabel {
-        pov: if first > third { "first" } else { "third" },
+        // A first-person narrator still says "he" about everyone else, so
+        // I/me/my at half the he/she count already marks first person;
+        // third-person narration keeps I/me/my almost entirely to dialogue.
+        pov: if first * 2 >= third { "first" } else { "third" },
         tense: if present >= 0.6 {
             "present"
         } else if present <= 0.3 {
@@ -873,7 +876,7 @@ pub fn habit_words(p: &Profile, words: &[SignatureWord]) -> Vec<SignatureWord> {
     let topical = topical_words(p, 50);
     words
         .iter()
-        .filter(|w| w.spread >= 0.3 && !topical.contains(w.word.as_str()))
+        .filter(|w| w.spread >= 0.3 && !topical.contains(w.word.as_str()) && !matches!(w.word.as_str(), "url" | "user"))
         .cloned()
         .collect()
 }

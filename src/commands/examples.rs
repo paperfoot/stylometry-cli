@@ -35,6 +35,10 @@ pub struct Example {
     pub date: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<&'static str>,
+    /// Long-form: nearness of the passage's style to the target (the draft
+    /// given with --like, else the author's typical passage), 0–1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shape: Option<f64>,
     /// Long-form: dialogue share of the passage.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dialogue_share: Option<f64>,
@@ -58,6 +62,8 @@ struct ExamplesOut {
     task: &'static str,
     topic_match: TopicMatch,
     candidates: usize,
+    /// Content words of the task found in the corpus (0 = nothing to match).
+    query_terms: usize,
     examples: Vec<Example>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     notes: Vec<String>,
@@ -87,6 +93,7 @@ pub fn rows(p: &Profile, r: &Retrieval) -> Vec<Example> {
                 likes: meta.and_then(|m| m.likes),
                 date: meta.and_then(|m| m.date.clone()),
                 kind: short.then(|| retrieve::kind_label(meta.map(|m| m.kind).unwrap_or_default())),
+                shape: h.shape,
                 dialogue_share: h.dialogue_share,
                 mode: h.mode.map(|m| format!("{} person, {}", m.pov, m.tense)),
                 opening: h.opening,
@@ -128,6 +135,7 @@ pub fn run(
         task,
         topic_match: r.topic_match,
         candidates: r.candidates,
+        query_terms: r.query_terms,
         examples: rows(&p, &r),
         notes: r.notes.clone(),
     };

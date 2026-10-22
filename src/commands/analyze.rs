@@ -4,9 +4,10 @@
 use serde::Serialize;
 
 use crate::commands::input;
-use crate::engine::metrics::{self, Ranges};
-use crate::engine::profile::{Profile, ProfileKind};
-use crate::engine::voice::{self, AvoidedWord, Concept, Corpus, DialogueTags, Phrase, SignatureWord};
+use crate::engine::metrics::{self, ItemHabits, Ranges};
+use crate::engine::profile::{ItemKind, Profile, ProfileKind, Register};
+use crate::engine::retrieve;
+use crate::engine::voice::{self, AvoidedWord, Concept, Corpus, DialogueTags, Modes, Phrase, SignatureWord};
 use crate::error::AppError;
 use crate::output::{self, Ctx};
 
@@ -16,11 +17,26 @@ pub struct TellUse {
     pub per_1k: f64,
 }
 
+/// Short-form: one kind of item (posts, replies, thread parts) measured on
+/// its own, since each is written differently.
+#[derive(Debug, Serialize)]
+pub struct KindReport {
+    pub kind: &'static str,
+    pub items: usize,
+    /// p15 / median / p85 of per-item measures over this kind's items.
+    pub ranges: Ranges,
+    pub habits: ItemHabits,
+}
+
 /// Everything a voice is made of, measured once.
 #[derive(Debug, Serialize)]
 pub struct VoiceReport {
     pub profile: String,
     pub kind: ProfileKind,
+    pub register: Register,
+    pub register_reason: String,
+    /// The measures a brief for this register leads with.
+    pub headline: Vec<&'static str>,
     pub words: u64,
     pub works: usize,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -31,15 +47,30 @@ pub struct VoiceReport {
     pub style_words: Vec<SignatureWord>,
     /// Content words the author leans on (habit or subject).
     pub content_words: Vec<SignatureWord>,
+    /// The content words that are habits, not subjects: in 30%+ of passages
+    /// and not characteristic of any single work.
+    pub recurring_words: Vec<SignatureWord>,
     pub avoided_words: Vec<AvoidedWord>,
     /// Synonym groups: the author's preferred member and the ones never used.
     pub concepts: Vec<Concept>,
     pub phrases: Vec<Phrase>,
+    /// 4+ word runs repeated in 3+ items or passages: signature phrasing
+    /// (the copy guard exempts them).
+    pub formulas: Vec<Phrase>,
     pub dialogue_tags: DialogueTags,
+    /// Long-form: narration POV/tense per chapter (a dual narrative has two).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modes: Option<Modes>,
+    /// Short-form: per-kind item ranges and habits.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub items: Vec<KindReport>,
     /// LLM tells the author genuinely uses: voice, not slop, for this author.
     pub tells_used: Vec<TellUse>,
     /// LLM tells the author never uses: the short ban list for a brief.
     pub tells_unused: Vec<&'static str>,
+    /// Short-form: social-post tells (phrases, layouts) the author never uses.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub social_tells_unused: Vec<&'static str>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
 }
@@ -70,21 +101,55 @@ pub fn report(p: &Profile, limit: usize, window: usize) -> VoiceReport {
             p.n_tokens
         ));
     }
+    let short = p.register.is_short_form();
+    let items: Vec<KindReport> = if short {
+        [ItemKind::Post, ItemKind::Reply, ItemKind::ThreadPart, ItemKind::Quote]
+            .into_iter()
+            .filter_map(|k| {
+                let n = p
+                    .chunks
+                    .iter()
+                    .filter(|c| c.meta.as_ref().map(|m| m.kind).unwrap_or_default() == k)
+                    .count();
+                (n > 0).then(|| KindReport {
+                    kind: retrieve::kind_label(k),
+                    items: n,
+                    ranges: metrics::item_ranges(p, k),
+                    habits: metrics::item_habits(p, k),
+                })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let social_tells_unused = if short {
+        voice::unused_social_tells(&rates, &voice::item_tell_shares(p))
+    } else {
+        Vec::new()
+    };
     VoiceReport {
         profile: p.name.clone(),
         kind: p.kind,
+        register: p.register,
+        register_reason: p.register_reason.clone(),
+        headline: metrics::headline_keys(p.register).to_vec(),
         words: p.n_tokens,
         works: p.sources.len(),
         components: p.components.clone(),
         ranges,
+        recurring_words: voice::habit_words(p, &content_words),
         style_words,
         content_words,
         avoided_words: voice::avoided_words(&corpus, limit),
         concepts: voice::concepts(&corpus, 10.0).into_iter().take(limit).collect(),
         phrases: voice::signature_phrases(&corpus, limit),
+        formulas: voice::signature_formulas(p, limit),
         dialogue_tags: voice::dialogue_tags(&corpus, 12),
+        modes: (p.register == Register::Fiction).then(|| voice::section_modes(p)).flatten(),
+        items,
         tells_used,
         tells_unused: voice::unused_tells(&rates, limit),
+        social_tells_unused,
         warnings,
     }
 }
@@ -132,6 +197,26 @@ fn print_human(r: &VoiceReport) {
             )
         }
     );
+    println!("{} {} ({})", "register".bold(), r.register.as_str(), r.register_reason);
+    if let Some(m) = &r.modes {
+        let modes: Vec<String> = m
+            .modes
+            .iter()
+            .map(|x| format!("{} person {} {:.0}%", x.pov, x.tense, x.share * 100.0))
+            .collect();
+        println!("{} {} (over {} {})", "modes".bold(), modes.join(", "), m.sections, m.basis);
+    }
+    for k in &r.items {
+        let mut line = format!("{} {}", k.items, k.kind);
+        if let Some(b) = k.ranges.bands.iter().find(|b| b.key == "item_words") {
+            line.push_str(&format!(", {}–{} words (median {})", b.low, b.high, b.median));
+        }
+        if !k.habits.endings.is_empty() {
+            let e: Vec<String> = k.habits.endings.iter().take(4).map(|(e, s)| format!("{e} {:.0}%", s * 100.0)).collect();
+            line.push_str(&format!("; endings {}", e.join(", ")));
+        }
+        println!("{} {line}", "items".bold());
+    }
     println!("{}", "style words".bold());
     println!("  {}", words_line(&r.style_words, 15));
     println!("{}", "content words".bold());
@@ -176,6 +261,13 @@ fn print_human(r: &VoiceReport) {
         "  {}",
         r.phrases.iter().take(15).map(|p| p.phrase.as_str()).collect::<Vec<_>>().join(", ")
     );
+    if !r.formulas.is_empty() {
+        println!("{}", "formulas".bold());
+        println!(
+            "  {}",
+            r.formulas.iter().take(10).map(|p| p.phrase.as_str()).collect::<Vec<_>>().join("; ")
+        );
+    }
     println!("{}", "dialogue tags".bold());
     println!(
         "  {}",

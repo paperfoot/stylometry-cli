@@ -377,7 +377,7 @@ pub fn retrieve(p: &Profile, req: &Request) -> Retrieval {
         .map(|i| Hit {
             chunks: cands[i].chunks.clone(),
             similarity: voice::r3(score[i].clamp(0.0, 1.0)),
-            topic: voice::r3(topic[i]),
+            topic: if topic[i] > 0.0 { voice::r3(topic[i]) } else { 0.0 },
             shape: shape_sim[i].map(voice::r3),
             engagement_pct: cands[i].engagement.map(voice::r3),
             dialogue_share: cands[i].dialogue.map(voice::r3),
