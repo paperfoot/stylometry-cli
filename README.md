@@ -18,7 +18,7 @@
 &nbsp;
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)](LICENSE)
 &nbsp;
-[![Pure Rust](https://img.shields.io/badge/Pure_Rust-no_model,_no_network-9cf?style=for-the-badge&logo=rust&logoColor=white)](#how-it-works)
+[![Pure Rust](https://img.shields.io/badge/Pure_Rust-local_counts_%2B_JEV_judgments-9cf?style=for-the-badge&logo=rust&logoColor=white)](#jev-judgments-counting-cannot-make)
 
 ---
 
@@ -45,8 +45,12 @@ how many sentences run under five words, whether the narrator asks herself
 questions.
 
 `stylometry` measures those counts from the writer's own text and holds drafts
-to them. Everything is local: a single Rust binary, no model, no network
-(except a one-time download of public-domain reference books).
+to them, in a single Rust binary. Counting is local. What counting cannot see
+(is this line a crafted kicker, a fresh metaphor, a sentence an editor would
+smooth?) goes to [JEV](https://typesafe.ai), a fast model that answers narrow
+questions about short passages, and is always judged against the writer's own
+passages. JEV is on when a key is found and everything falls back to local
+when it isn't.
 
 ## Install
 
@@ -107,6 +111,7 @@ stylometry check chapter-07.md --profile target --strict   # exit 5 if it fails:
 | **Machine tells** | LLM-typical words and structures (*delve*, *a testament to*, "not X, but Y", trailing *-ing* clauses), flagged only when the writer doesn't use them |
 | **Posts** | Length and layout (one line, line-per-sentence, blocks), openers, endings, emoji and hashtags (which, where, how often), casing, links and mentions, what the writer never does (citing counts) |
 | **Structure** | Headings and lists (blogs), opening and closing paragraphs, narrative mode per chapter (fiction) |
+| **Texture** (JEV) | Per ~150-word passage, against the writer's own: rough edges, polish, crafted closing lines, fresh figures of speech, over-explaining; flagged passages are drilled down to the exact sentences. Filler hedges and one-line paragraphs are counted, not judged |
 | **Copying** | Any long run shared with the writer's own text is a hard failure; the writer's recurring formulas are exempt and listed as signature phrasing |
 
 Targets are measured at the length you're checking. A 1,200-word scene is
@@ -137,6 +142,32 @@ followed by the writer's own passages closest to the topic.
 worth most ("merge about 9 of your 31 fragments", "add 2-4 questions", "use
 curly quotes: 52 straight quotes on lines 7, 9, …"), and grouped `findings`
 with line numbers. `--strict` exits 5 on failure, for gates.
+
+## JEV: judgments counting cannot make
+
+With a [TypeSafe](https://typesafe.ai) key (`TYPESAFE_API_KEY`, or a
+`jev.key_command` in `stylometry config path` such as
+`akm get TYPESAFE_API_KEY --raw`), three things use JEV:
+
+- **`check` → `texture`**: each ~150-word passage of the draft is asked a few
+  narrow questions (rough edges? polish? does it end on a crafted line? a
+  fresh metaphor? over-explaining?) and compared with the same answers on
+  the writer's own passages, measured once per profile (about $0.01, saved
+  next to the profile). Passages that come out smoother or more crafted than
+  the writer ever writes are drilled down to the sentences responsible, so
+  findings cite exact lines. Texture is advice: it never changes `pass` or
+  `score`, and it never asks a writer to add filler, repetition or
+  misspellings (that reads as imitation too).
+- **`guide` → Texture section**: how plain or rough the writer's prose is, in
+  which ways, and what AI drafts do instead.
+- **`examples` / `guide --about`**: candidate passages are re-ranked by how
+  well a short excerpt fits the piece being written (same kind of argument or
+  post), not by shared words (`rank_basis: "jev"`).
+
+Requests are cached by content, run in parallel, and stop after a few
+failures or a time budget; any failure leaves the local result unchanged.
+`STYLOMETRY_JEV__ENABLED=false` keeps everything local. Passages are sent to
+api.typesafe.ai, so don't enable it for text that must not leave the machine.
 
 `export <voice> -o train.jsonl` writes the writer's passages as fine-tuning
 pairs. Fine-tuning on a writer's own text is the strongest documented way to
@@ -199,6 +230,33 @@ speech, and none of the writer's rough edges. Treat a passing `check` as
 necessary, not sufficient. For a voice that has to survive close reading,
 add a human edit, or fine-tune a model on the writer's text (`export`).
 
+**Texture (JEV).** Each texture question was written with structured
+criteria and invented examples, then scored on 329 labelled ~150-word
+passages (author passages and held-out pieces vs imitations, split by piece
+into dev and test) and kept only if it held on test. Held-out AUC, genuine
+vs imitation, per voice (novel / essays / posts):
+
+| Question | AUC (test) |
+|---|---|
+| Rough edges an editor would smooth | 0.90 / 0.90 / 0.91 |
+| Polish: how finished each sentence is | 0.85 / 0.93 / 0.91 |
+| Closing line that holds back for effect | 0.78 / 0.72 / 1.00 |
+| Over-explaining (diagnostic) | 0.88 / 0.90 / 0.74 |
+| Fresh figures of speech (advice only) | 0.60 / 0.23 / 0.61 |
+
+As shipped, `texture.pass` holds for 8 of the 9 held-out genuine pieces
+and fails 31 of 32 imitations, including the 16 written by agents that had
+JEV feedback in their loop. Writing to it helps less than detecting with
+it: agents given texture feedback rose from 0.05 to 0.10–0.14 with blind
+readers on the novel scenes (0.12–0.17 on posts) and were still caught,
+now for padding, filler hedges and mechanical repetition. That is why
+`check` never asks for more roughness and keeps texture out of `pass`.
+
+**Example ranking (JEV).** On 12 writing tasks with hand-labelled fit,
+re-ranking candidate passages by JEV's fit raised NDCG@5 from 0.50 to 0.67
+for essays and 0.57 to 0.80 for posts; novels tied, so fiction keeps the
+word-based ranking.
+
 **Verification.** An Adams profile from five books, calibrated against 42
 public-domain background authors plus three near-neighbour British
 humorists:
@@ -216,6 +274,9 @@ unseen writers as the target about half the time; the background pool is
 what fixes that.
 
 ## Data and licences
+
+JEV judgments come from TypeSafe's API (`api.typesafe.ai`) under your own
+key; passages sent there leave the machine, and answers are cached locally.
 
 Code: MIT. The embedded English frequency table comes from
 [wordfreq](https://github.com/rspeer/wordfreq) (Robyn Speer et al.), data
