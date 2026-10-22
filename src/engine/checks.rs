@@ -19,7 +19,7 @@ use serde::Serialize;
 use crate::engine::lexicon;
 use crate::engine::metrics::{self, Band, ItemMeasure, ItemModel, Mode, Status, Unit, WindowRow};
 use crate::engine::profile::{ItemKind, Profile, Register};
-use crate::engine::text;
+use crate::engine::{text, texture};
 use crate::engine::voice::{self, Concept, Corpus};
 
 /// Shared n-gram length that counts as copying long-form text.
@@ -51,7 +51,7 @@ const MAX_PLAN: usize = 8;
 pub struct Finding {
     /// copy_overlap | avoid_list | never | length | typography |
     /// metric_out_of_range | habit | llm_tell | off_voice_word |
-    /// synonym_variation | structure | tense_drift | batch
+    /// synonym_variation | structure | tense_drift | batch | texture
     pub kind: &'static str,
     /// What the finding is about: a metric key, a word, a habit.
     pub key: String,
@@ -2251,11 +2251,118 @@ fn habit_advice(feature: &str, h: &metrics::ItemHabits, m: &ItemMeasure, none_sh
     }
 }
 
+// ── Texture ──────────────────────────────────────────────────────────────────
+
+/// Add JEV's texture judgment to a check: one soft finding per key off the
+/// author's band and one plan step, right after typography. Advice only:
+/// nothing here is hard, so `pass`, `score` and `--strict` never move.
+pub fn add_texture(c: &mut Checked, t: &texture::Texture, draft_text: &str) {
+    let off = t.off();
+    if !t.measured() || off.is_empty() {
+        return;
+    }
+    let lines: Vec<&str> = draft_text.lines().collect();
+    // The prose lines of a passage (blank lines and breaks between its
+    // paragraphs are not prose).
+    let prose_lines = |p: &texture::PassageRow| -> Vec<usize> {
+        (p.lines[0]..=p.lines[1]).filter(|&l| lines.get(l - 1).is_some_and(|s| !s.trim().is_empty())).collect()
+    };
+    let n = t.passages.len();
+    let unit = if c.register.is_short_form() { "batch(es) of posts" } else { "passage(s)" };
+    let k = t.band_passages.unwrap_or(1);
+    let mut findings = Vec::new();
+    for row in &off {
+        let Some(def) = texture::key(row.key) else { continue };
+        let mut hit: Vec<&texture::PassageRow> = t.passages.iter().filter(|p| p.flags.contains(&row.key)).collect();
+        if hit.is_empty() {
+            // Off on average though no single passage is: point at the worst one.
+            let worse = |p: &&texture::PassageRow| {
+                let v = p.values.get(row.key).copied().unwrap_or(0.0);
+                if row.side == texture::Side::Low { -v } else { v }
+            };
+            hit.extend(t.passages.iter().max_by(|a, b| worse(a).total_cmp(&worse(b))));
+        }
+        let ranges: Vec<String> = hit.iter().map(|p| format!("{}–{}", p.lines[0], p.lines[1])).collect();
+        let (more, which) = match row.side {
+            texture::Side::Low => ("too little", "below"),
+            texture::Side::High => ("too much", "above"),
+        };
+        findings.push(Finding {
+            kind: "texture",
+            key: row.key.to_string(),
+            count: hit.len(),
+            lines: hit.iter().flat_map(|p| prose_lines(p)).collect(),
+            excerpts: hit.iter().take(MAX_EXCERPTS).map(|p| format!("L{}–{}: {}", p.lines[0], p.lines[1], p.excerpt)).collect(),
+            message: format!(
+                "{more} {}: {} over the draft's {n} {unit}, {which} the author's {}–{} (median {}) for {k}-passage stretches of their own text; worst at lines {}",
+                row.label,
+                t2(row.draft),
+                t2(row.low),
+                t2(row.high),
+                t2(row.median),
+                ranges.join(", ")
+            ),
+            suggestion: capitalize(def.advice),
+            hard: false,
+            severity: if row.gate { 55.0 } else { 20.0 },
+            alt: None,
+        });
+    }
+    c.findings.extend(findings);
+    sort_findings(&mut c.findings);
+
+    // The plan step: gate faults first, the worst passages by line, and the
+    // warning that faked roughness reads as imitation too.
+    let advice: Vec<String> = off.iter().filter_map(|r| texture::key(r.key)).map(|d| d.advice.to_string()).collect();
+    let mut worst: Vec<(usize, &texture::PassageRow)> = t
+        .passages
+        .iter()
+        .map(|p| (p.flags.iter().filter(|f| off.iter().any(|r| r.key == **f)).count(), p))
+        .filter(|(n, _)| *n > 0)
+        .collect();
+    worst.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.index.cmp(&b.1.index)));
+    let named: Vec<String> = worst
+        .iter()
+        .take(4)
+        .map(|(_, p)| {
+            let why: Vec<&str> = p.flags.iter().filter(|f| off.iter().any(|r| r.key == **f)).filter_map(|f| texture::key(f)).map(|d| d.label).collect();
+            format!("lines {}–{} ({})", p.lines[0], p.lines[1], why.join(", "))
+        })
+        .collect();
+    let gate = off.iter().any(|r| r.gate);
+    let mut action = format!("{} the texture: {}", if gate { "Rework" } else { "Adjust" }, advice.join("; "));
+    if !named.is_empty() {
+        action.push_str(&format!(". Start with {}", named.join("; ")));
+    }
+    let off_rows: Vec<String> = off
+        .iter()
+        .map(|r| format!("{} {} (author {}–{})", r.label, t2(r.draft), t2(r.low), t2(r.high)))
+        .collect();
+    c.plan.push(PlanStep {
+        action,
+        why: format!(
+            "JEV reads this draft's texture outside the author's own: {}. Don't fake roughness with filler hedges, padding, misspellings or mechanical repetition: readers catch that as imitation too",
+            off_rows.join("; ")
+        ),
+        quantity: format!("{} of {n} {unit}", worst.len().max(1).min(n)),
+        lines: worst.iter().flat_map(|(_, p)| prose_lines(p)).collect(),
+        hard: false,
+        order: 890.0,
+    });
+    let plan = std::mem::take(&mut c.plan);
+    c.plan = finish_plan(plan);
+}
+
+/// Texture values: probabilities and polish levels, to two decimals.
+fn t2(v: f64) -> String {
+    format!("{v:.2}")
+}
+
 /// Finding counts by kind, every kind present (zero when absent).
 pub fn counts(findings: &[Finding]) -> BTreeMap<&'static str, usize> {
     let mut m: BTreeMap<&'static str, usize> = [
         "copy_overlap", "avoid_list", "never", "length", "typography", "metric_out_of_range", "habit", "llm_tell",
-        "off_voice_word", "synonym_variation", "structure", "tense_drift", "batch",
+        "off_voice_word", "synonym_variation", "structure", "tense_drift", "batch", "texture",
     ]
     .into_iter()
     .map(|k| (k, 0))

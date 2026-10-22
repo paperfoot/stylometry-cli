@@ -14,6 +14,7 @@ use crate::engine::checks::{self, Batch, Finding, HabitRow, ItemScore, MetricRow
 use crate::engine::metrics::Status;
 use crate::engine::profile::Register;
 use crate::engine::score::{self, VoiceMatch};
+use crate::engine::texture::{self, Texture};
 use crate::engine::{store, text};
 use crate::error::AppError;
 use crate::output::{self, Ctx};
@@ -78,6 +79,10 @@ pub struct CheckReport {
     /// Only with --verify.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub voice_match: Option<VoiceMatch>,
+    /// Prose texture next to the author's own, judged by JEV (on when a key
+    /// is found): advice with its own `pass`; it never changes `pass`,
+    /// `score` or `--strict`. `status: unavailable` with the reason otherwise.
+    pub texture: Texture,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
 }
@@ -120,7 +125,11 @@ pub fn run(ctx: Ctx, args: CheckArgs) -> Result<(), AppError> {
     }
 
     let guard_refs: Vec<_> = guards.iter().collect();
-    let checked = checks::check(&target, &guard_refs, &avoid, &draft, args.as_kind);
+    let mut checked = checks::check(&target, &guard_refs, &avoid, &draft, args.as_kind);
+    // Decided before texture is added: texture is advice and never moves it.
+    let pass = checked.pass();
+    let texture = texture::assess(&target, &draft);
+    checks::add_texture(&mut checked, &texture, &draft);
     let mut warnings = checked.warnings.clone();
     let voice_match = if !args.verify {
         None
@@ -145,7 +154,6 @@ pub fn run(ctx: Ctx, args: CheckArgs) -> Result<(), AppError> {
     };
 
     let hard = checked.hard_failures();
-    let pass = checked.pass();
     let judged: Vec<&MetricRow> = checked.rows.iter().filter(|r| r.status != Status::Unmeasured).collect();
     let out = judged.iter().filter(|r| r.status == Status::OutOfRange).count();
     let counts = checks::counts(&checked.findings);
@@ -174,6 +182,7 @@ pub fn run(ctx: Ctx, args: CheckArgs) -> Result<(), AppError> {
         items: checked.items,
         batch: checked.batch,
         voice_match,
+        texture,
         warnings,
     };
 
@@ -233,6 +242,7 @@ fn print_human(r: &CheckReport) {
     if let Some(v) = &r.voice_match {
         println!("voice match: typicality {:.2}, nearest {}, {}", v.typicality, v.nearest_profile, v.verdict);
     }
+    print_texture(&r.texture);
     if !r.plan.is_empty() {
         println!("{}", "plan".bold());
         for (i, s) in r.plan.iter().enumerate() {
@@ -264,5 +274,30 @@ fn print_human(r: &CheckReport) {
     }
     for w in &r.warnings {
         println!("{} {w}", "warning:".yellow());
+    }
+}
+
+/// One line for the texture verdict, then the keys off the author's band.
+fn print_texture(t: &Texture) {
+    use owo_colors::OwoColorize;
+    if !t.measured() {
+        println!("{}", format!("texture: unavailable ({})", t.reason.as_deref().unwrap_or("")).dimmed());
+        return;
+    }
+    let verdict = if t.pass == Some(true) { "reads like the author".green().to_string() } else { "off the author's".yellow().to_string() };
+    let usage = t.usage.map(|u| format!("{} passage(s), {} request(s), ${:.4}", u.passages, u.requests, u.cost_usd)).unwrap_or_default();
+    println!("texture (JEV, advice only): {verdict} · {usage}");
+    if let Some(m) = t.author_measured {
+        println!("{}", format!("  measured {} of the author's passages first ({} requests, ${:.4}); saved for next time", m.passages, m.requests, m.cost_usd).dimmed());
+    }
+    for k in t.off() {
+        println!(
+            "  {}{} {:.2} (author {:.2}–{:.2})",
+            k.label,
+            if k.gate { "" } else { " [advisory]" },
+            k.draft,
+            k.low,
+            k.high
+        );
     }
 }
