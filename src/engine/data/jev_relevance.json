@@ -2,14 +2,14 @@
  "fit": {
   "type": "score",
   "instructions": {
-   "question": "How useful is `passage` as a model for writing what `topic` describes?",
-   "focus": "Judge the kind of scene, argument or post and what happens in it, not shared names or keywords."
+   "question": "An author is about to write `piece_to_write` and wants an example from their own work to imitate. How close an example is `author_passage`?",
+   "focus": "Judge the kind of piece (scene, letter, argument, explanation or post) and the situation or point it covers, not shared names or keywords, and not how well it is written."
   },
   "criteria": [
    "Unrelated: a different kind of piece about something else",
-   "Same broad area, but a different situation or argument",
-   "A similar situation, argument or kind of post",
-   "Close: the same kind of scene, argument or post, in a similar situation"
+   "Same broad subject, but a different situation, point or kind of piece",
+   "Similar: the same kind of piece about a related situation or point",
+   "Close: the same kind of piece about nearly the same situation or point"
   ]
  }
 }

@@ -9,7 +9,7 @@ use serde::Serialize;
 
 use crate::commands::input;
 use crate::engine::profile::{ItemKind, Profile};
-use crate::engine::retrieve::{self, Request, Retrieval, TopicMatch};
+use crate::engine::retrieve::{self, RankBasis, Request, Retrieval, TopicMatch};
 use crate::engine::store;
 use crate::error::AppError;
 use crate::output::{self, Ctx};
@@ -27,6 +27,11 @@ pub struct Example {
     pub similarity: f64,
     /// Vocabulary overlap with the task (TF-IDF cosine), 0 without a task.
     pub topic: f64,
+    /// JEV's judgment of how good a model the example is for the task, 0
+    /// (unrelated) to 3 (the same kind of piece in a similar situation);
+    /// present when `rank_basis` is "jev".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fit: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub engagement_pct: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -61,6 +66,9 @@ struct ExamplesOut {
     /// What the examples were matched to: like (a file), about (words), none.
     task: &'static str,
     topic_match: TopicMatch,
+    /// What ordered the examples: "jev" (fit to the task, judged by JEV)
+    /// or "lexical" (shared words, style and engagement).
+    rank_basis: RankBasis,
     candidates: usize,
     /// Content words of the task found in the corpus (0 = nothing to match).
     query_terms: usize,
@@ -92,6 +100,7 @@ pub fn rows(p: &Profile, r: &Retrieval) -> Vec<Example> {
                 source: p.sources[first.source as usize].name.clone(),
                 similarity: h.similarity,
                 topic: h.topic,
+                fit: h.fit,
                 engagement_pct: h.engagement_pct,
                 likes: meta.and_then(|m| m.likes),
                 date: meta.and_then(|m| m.date.clone()),
@@ -137,11 +146,12 @@ pub fn run(
         kind: short.then(|| retrieve::kind_label(as_kind)),
         task,
         topic_match: r.topic_match,
+        rank_basis: r.rank_basis,
         candidates: r.candidates,
         query_terms: r.query_terms,
         examples: rows(&p, &r),
         typography_note: crate::commands::guide::typography_note(&crate::engine::metrics::typography_habits(&p)),
-        notes: r.notes.clone(),
+        notes: r.notes.iter().chain(&r.rank_note).cloned().collect(),
     };
     let mut next = Vec::new();
     match (&like, &about) {
@@ -153,11 +163,15 @@ pub fn run(
     output::print_success_with(ctx, &data, &next, |d| {
         use owo_colors::OwoColorize;
         println!(
-            "{} {} examples ({}, topic match: {:?})",
+            "{} {} examples ({}, topic match: {:?}, ranked by {})",
             d.profile.bold(),
             d.examples.len(),
             d.register,
-            d.topic_match
+            d.topic_match,
+            match d.rank_basis {
+                RankBasis::Jev => "fit to the task (JEV)",
+                RankBasis::Lexical => "shared words",
+            }
         );
         for n in &d.notes {
             println!("{} {n}", "note:".yellow());
@@ -165,6 +179,9 @@ pub fn run(
         println!("{}", d.typography_note);
         for e in &d.examples {
             let mut tags = vec![format!("similarity {:.2}", e.similarity)];
+            if let Some(f) = e.fit {
+                tags.push(format!("fit {f:.1}/3"));
+            }
             if let Some(x) = e.engagement_pct {
                 tags.push(format!("engagement p{:.0}", x * 100.0));
             }

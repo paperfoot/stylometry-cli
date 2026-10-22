@@ -19,15 +19,33 @@
 //! Strong also needs two of the task's terms in one piece; the task's words
 //! the corpus never uses count against the match. Weak and none come with a
 //! note, and none falls back to typical pieces.
+//!
+//! With JEV (on by default when a key is found) and a task described in
+//! words, essays, blogs and posts re-rank the top `JEV_POOL` candidates of
+//! that ranking by how good a model each is for the piece (`fit`, 0-3: the
+//! same kind of argument or post, not shared words), judged on a short
+//! excerpt of each, with the word ranking as a quarter of the score;
+//! `topic_match` then comes from the best fit (a strong word match drops
+//! at most to weak). On 8 essay and post tasks labelled by hand before JEV
+//! saw them, the top five went from NDCG@5 0.54 to 0.73 and precision@3
+//! 0.38 to 0.67. Fiction keeps the word and shape ranking: on 4 scene tasks
+//! short excerpts did no better (0.50 both). Any failure, or no answer for
+//! the whole pool within `JEV_BUDGET`, keeps the word ranking, and the rest
+//! of the run skips JEV.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, mpsc};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
+use serde_json::{Value, json};
 
+use crate::engine::jev::Jev;
 use crate::engine::metrics;
 use crate::engine::profile::{ItemKind, Profile, Register};
 use crate::engine::voice::{self, ModeLabel};
-use crate::engine::{lexicon, style, text};
+use crate::engine::{lexicon, style, text, texture};
 
 /// How strongly the best piece shares the task's vocabulary (TF-IDF cosine).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -48,6 +66,46 @@ const STRONG: f64 = 0.12;
 const NULL_TASKS: usize = 200;
 /// MMR trade-off between relevance and novelty.
 const LAMBDA: f64 = 0.7;
+/// Candidates JEV judges: the top of the word ranking (the eval's pool).
+const JEV_POOL: usize = 24;
+/// Words of each candidate JEV reads: one short span, not the window.
+const EXCERPT_WORDS: usize = 180;
+/// Longer tasks are drafts, not descriptions: they keep the word and shape
+/// ranking (fit was measured on descriptions of 20-90 words).
+const JEV_TASK_WORDS: usize = 300;
+/// Share of the word ranking in a JEV-ranked score (eval: 0.25 beat 0.1
+/// and fit alone on NDCG@5 under all three question wordings tried).
+const JEV_LEXICAL: f64 = 0.25;
+/// Best-fit lines for `TopicMatch` (0-3 scale), set on the 180-word
+/// excerpts JEV reads (they score lower than whole windows). Over 20 essay
+/// and post tasks, labelled by the best passage in their pool: where one
+/// was a similar or close piece (8), the best fit was 1.9 or more in 7;
+/// where the nearest only shared the broad subject (5), 0.94 to 1.18; where
+/// nothing was related (7), 0.71 or less. These lines get 19 of 20 right
+/// (2.0 and 1.0 got 15: "strong" missed 3 of the 8); the miss is a task
+/// whose two best passages were labelled similar but fit 0.98 and 0.71.
+const FIT_STRONG: f64 = 1.5;
+const FIT_WEAK: f64 = 0.8;
+/// How long JEV gets to judge a whole pool, every request together (24
+/// passages take about 1-1.5 s uncached, nothing cached). Without it a slow
+/// or hanging API held `examples` for the per-request timeout once per wave
+/// of requests (25 s) and a brief, which retrieves several times, for 58 s.
+const JEV_BUDGET: Duration = Duration::from_millis(3000);
+
+/// Set once JEV failed or ran out of time in this process, so later
+/// retrievals (a brief retrieves several times) keep the word ranking
+/// without asking again.
+static JEV_FAILED: AtomicBool = AtomicBool::new(false);
+
+/// What ordered the picks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RankBasis {
+    /// JEV's judgment of fit to the task, with the word ranking as a tie-break.
+    Jev,
+    /// Shared words, style nearness and engagement (no task, no JEV, or JEV failed).
+    Lexical,
+}
 
 pub struct Request<'a> {
     /// The task: a draft/outline or a few words. None = typical pieces.
@@ -64,6 +122,8 @@ pub struct Request<'a> {
     pub mix_dialogue: bool,
     /// Chunk indices that must not be used (already shown elsewhere).
     pub exclude: HashSet<usize>,
+    /// Re-rank by JEV fit when a client is configured (default true).
+    pub jev: bool,
 }
 
 impl<'a> Request<'a> {
@@ -76,6 +136,7 @@ impl<'a> Request<'a> {
             openings_only: false,
             mix_dialogue: false,
             exclude: HashSet::new(),
+            jev: true,
         }
     }
 }
@@ -95,16 +156,23 @@ pub struct Hit {
     pub mode: Option<ModeLabel>,
     /// The first window of its work.
     pub opening: bool,
+    /// JEV's fit to the task, 0 (unrelated) to 3 (the same kind of piece in
+    /// a similar situation); None unless JEV ranked.
+    pub fit: Option<f64>,
 }
 
 pub struct Retrieval {
     pub hits: Vec<Hit>,
     pub topic_match: TopicMatch,
+    pub rank_basis: RankBasis,
     /// Pieces considered.
     pub candidates: usize,
     /// Content words of the task found anywhere in the corpus.
     pub query_terms: usize,
     pub notes: Vec<String>,
+    /// Why JEV was configured but did not rank (for `examples`; a brief
+    /// has no use for it).
+    pub rank_note: Option<String>,
 }
 
 /// Content-word stem, or None for words that carry no topic.
@@ -474,18 +542,19 @@ pub fn retrieve(p: &Profile, req: &Request) -> Retrieval {
         let (any, two) = null_cosines(p, &vecs, &tfs, &idf, idf_unseen, q_tf.values().sum::<f64>() as usize, names_ok);
         (WEAK.max(quantile(&any, 0.5)), STRONG.max(quantile(&two, 0.95)))
     };
-    let topic_match = if best_need >= strong_line {
+    let mut topic_match = if best_need >= strong_line {
         TopicMatch::Strong
     } else if best_topic >= weak_line {
         TopicMatch::Weak
     } else {
         TopicMatch::None
     };
+    let mut lexical_note = None;
     if req.query.is_some() {
         // A word in a quarter of the pieces or more is the corpus's own
         // subject, so no single piece stands out on it.
         let everywhere = q_tf.keys().any(|t| df.get(t.as_str()).is_some_and(|d| *d >= 0.25 * n));
-        let note = match (topic_match, single, everywhere) {
+        lexical_note = match (topic_match, single, everywhere) {
             (TopicMatch::Strong, ..) => None,
             (TopicMatch::None, _, true) => Some(
                 "the task's words run through much of the corpus, so no piece stands out on them: these are typical pieces instead",
@@ -498,7 +567,6 @@ pub fn retrieve(p: &Profile, req: &Request) -> Retrieval {
                 "no piece is clearly about the task (its words are rare in the corpus or spread thinly across it): take these pieces' voice, not their subject",
             ),
         };
-        notes.extend(note.map(String::from));
     }
     // BM25 relative to the best candidate, scaled by how far the evidence
     // goes: 1 for a strong match, at most 0.5 for a weak one, so a loosely
@@ -532,7 +600,7 @@ pub fn retrieve(p: &Profile, req: &Request) -> Retrieval {
         (false, _, true) => 0.2,
         (false, _, false) => 0.5,
     };
-    let score: Vec<f64> = (0..n_cands)
+    let mut score: Vec<f64> = (0..n_cands)
         .map(|i| {
             let rest = if short {
                 let eng = if cands[i].best_ok { cands[i].engagement.unwrap_or(0.5) } else { 0.0 };
@@ -549,6 +617,42 @@ pub fn retrieve(p: &Profile, req: &Request) -> Retrieval {
         })
         .collect();
 
+    // JEV re-ranks the top of that ranking by fit to a described task
+    // (not fiction, where it measured no better than scene shape).
+    let task = req
+        .query
+        .filter(|q| req.jev && !fiction && !q.trim().is_empty() && text::count_words(q) <= JEV_TASK_WORDS);
+    let judged = match task {
+        Some(t) => {
+            // The pool is what `examples -n 24` would list: diversified
+            // like the final picks, so one work's many windows can't fill
+            // it and leave the one-per-work picks to unjudged passages.
+            let pool = mmr(&cands, &vecs, &score, JEV_POOL, short, topic_match != TopicMatch::None);
+            let excerpts: Vec<String> = pool.iter().map(|&i| excerpt(p, &cands[i], &q_tf, &idf, names_ok)).collect();
+            judge_fit(n_cands, &pool, &excerpts, t).map(|fits| (pool, fits))
+        }
+        None => Err(None),
+    };
+    let (rank_basis, fits, rank_note) = match judged {
+        Ok((pool, fits)) => {
+            score = fit_scores(&score, &pool, &fits);
+            let best = fits.iter().flatten().copied().fold(0.0, f64::max);
+            topic_match = fit_match(best, topic_match);
+            lexical_note = match topic_match {
+                TopicMatch::Strong => None,
+                TopicMatch::Weak => Some(
+                    "no passage is a close model for the task (the nearest share its broad subject, not its situation or kind of piece): take their voice, not their subject",
+                ),
+                TopicMatch::None => Some(
+                    "nothing in the corpus is like the task: these passages are the least far off, so take their voice, not their subject",
+                ),
+            };
+            (RankBasis::Jev, fits, None)
+        }
+        Err(why) => (RankBasis::Lexical, vec![None; n_cands], why),
+    };
+    notes.extend(lexical_note.map(String::from));
+
     let mut picks = mmr(&cands, &vecs, &score, req.n, short, topic_match != TopicMatch::None);
     if req.mix_dialogue && !short {
         mix_dialogue(&cands, &score, &mut picks);
@@ -564,15 +668,153 @@ pub fn retrieve(p: &Profile, req: &Request) -> Retrieval {
             dialogue_share: cands[i].dialogue.map(voice::r3),
             mode: cands[i].mode,
             opening: cands[i].opening,
+            fit: fits[i].map(voice::r3),
         })
         .collect();
     Retrieval {
         hits,
         topic_match,
+        rank_basis,
         candidates: n_cands,
         query_terms,
         notes,
+        rank_note,
     }
+}
+
+/// The span JEV judges for a candidate (a narrow question wants a short
+/// span, never a whole window): the run of whole paragraphs, up to
+/// `EXCERPT_WORDS`, holding the most IDF weight of the task's terms; the
+/// opening when none of them appears. A longer paragraph is cut.
+fn excerpt(p: &Profile, c: &Cand, q_tf: &HashMap<String, f64>, idf: &HashMap<String, f64>, names_ok: bool) -> String {
+    let paras: Vec<&str> = c.chunks.iter().flat_map(|&i| p.chunks[i].paragraphs.iter().map(String::as_str)).collect();
+    let mut best: Option<(f64, String)> = None;
+    for start in 0..paras.len() {
+        let (mut parts, mut words) = (Vec::new(), 0);
+        for para in &paras[start..] {
+            let n = text::count_words(para);
+            if words > 0 && words + n > EXCERPT_WORDS {
+                break;
+            }
+            parts.push(*para);
+            words += n;
+        }
+        let span = parts.join("\n\n");
+        let tf = terms_of(p, &span, names_ok);
+        let weight: f64 = q_tf.keys().filter(|t| tf.contains_key(*t)).filter_map(|t| idf.get(t)).sum();
+        if best.as_ref().is_none_or(|(b, _)| weight > *b) {
+            best = Some((weight, span));
+        }
+    }
+    let span = texture::normalize(&best.map(|b| b.1).unwrap_or_default());
+    span.split(' ').take(EXCERPT_WORDS).collect::<Vec<_>>().join(" ")
+}
+
+/// JEV's fit to the task for the candidates in `pool`, judged on their
+/// `excerpts` (None for the rest). Err carries why not: None when JEV is
+/// off or has no key (the word ranking is then the normal path, not a
+/// failure), a note when it was asked and did not answer for every one in
+/// time; that also turns JEV off for the rest of the run.
+fn judge_fit(n_cands: usize, pool: &[usize], excerpts: &[String], task: &str) -> Result<Vec<Option<f64>>, Option<String>> {
+    if pool.is_empty() {
+        return Err(None);
+    }
+    if JEV_FAILED.load(Ordering::Relaxed) {
+        return Err(Some("JEV did not answer earlier in this run: ranked by shared words instead".into()));
+    }
+    let cfg = crate::config::load().map(|c| c.jev).unwrap_or_default();
+    let jev = Jev::from_config(&cfg).map_err(|_| None)?;
+    let task = texture::normalize(task);
+    let states: Vec<Value> = excerpts
+        .iter()
+        .map(|x| json!({ "piece_to_write": task, "author_passage": x }))
+        .collect();
+    let got = fits_within(jev, states, cfg.workers, JEV_BUDGET).map_err(|why| {
+        JEV_FAILED.store(true, Ordering::Relaxed);
+        Some(why)
+    })?;
+    let mut fits = vec![None; n_cands];
+    for (&i, f) in pool.iter().zip(got) {
+        fits[i] = Some(f);
+    }
+    Ok(fits)
+}
+
+/// Each state's fit, asked `workers` at a time. All or nothing (one
+/// unjudged passage sends the pool back to the word ranking), so the first
+/// failure ends the batch, and when `budget` runs out the requests still
+/// out are left to finish or time out in the background (an answer that
+/// lands is cached for the next run).
+fn fits_within(jev: Jev, states: Vec<Value>, workers: usize, budget: Duration) -> Result<Vec<f64>, String> {
+    let n = states.len();
+    let shared = Arc::new((jev, states, crate::engine::jev::questions("relevance")));
+    let next = Arc::new(AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let (tx, rx) = mpsc::channel();
+    for _ in 0..workers.clamp(1, 12).min(n) {
+        let (shared, next, stop, tx) = (shared.clone(), next.clone(), stop.clone(), tx.clone());
+        std::thread::spawn(move || {
+            let (jev, states, questions) = &*shared;
+            while !stop.load(Ordering::Relaxed) {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                if i >= states.len() {
+                    break;
+                }
+                let fit = jev.ask(&states[i], questions).and_then(|a| a.score("fit"));
+                if tx.send((i, fit)).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+    drop(tx);
+    let deadline = Instant::now() + budget;
+    let mut fits = vec![0.0; n];
+    for _ in 0..n {
+        let why = match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok((i, Some(f))) => {
+                fits[i] = f.min(3.0);
+                continue;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                format!("JEV did not judge the passages within {} s (slow or no connection)", budget.as_secs())
+            }
+            Ok((_, None)) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                "JEV did not judge every passage (bad answer or no connection)".to_string()
+            }
+        };
+        stop.store(true, Ordering::Relaxed);
+        return Err(format!("{why}: ranked by shared words instead"));
+    }
+    Ok(fits)
+}
+
+/// `TopicMatch` from the best fit in the pool. A strong word match (two of
+/// the task's terms in one piece, beyond what random tasks reach) means the
+/// corpus does take up the subject, so JEV can lower it to weak but never
+/// to none: "nothing in the corpus is like the task" would be false.
+fn fit_match(best: f64, lexical: TopicMatch) -> TopicMatch {
+    if best >= FIT_STRONG {
+        TopicMatch::Strong
+    } else if best >= FIT_WEAK || lexical == TopicMatch::Strong {
+        TopicMatch::Weak
+    } else {
+        TopicMatch::None
+    }
+}
+
+/// Scores once JEV has judged the pool: fit (0-3) for three quarters and
+/// the pool's own order (the word ranking) for a quarter, mapped above
+/// every unjudged candidate (those keep their order, below 0.1), so MMR
+/// and the dialogue mix see the new order.
+fn fit_scores(score: &[f64], pool: &[usize], fits: &[Option<f64>]) -> Vec<f64> {
+    let m = pool.len().max(1) as f64;
+    let mut out: Vec<f64> = score.iter().map(|s| 0.1 * s.clamp(0.0, 1.0)).collect();
+    for (r, &i) in pool.iter().enumerate() {
+        let f = fits[i].unwrap_or(0.0);
+        out[i] = 0.1 + 0.9 * ((1.0 - JEV_LEXICAL) * f / 3.0 + JEV_LEXICAL * (1.0 - r as f64 / m));
+    }
+    out
 }
 
 fn short_candidates(p: &Profile, req: &Request, notes: &mut Vec<String>) -> Vec<Cand> {
@@ -928,6 +1170,31 @@ mod tests {
         assert_eq!(quarter("Wed Oct"), None);
         assert_eq!(bare_words("lol https://t.co/x"), 1);
         assert_eq!(bare_words("@alice thanks a lot for this"), 5);
+    }
+
+    #[test]
+    fn fit_lines_and_the_word_match_floor() {
+        // Excerpt fits from the eval: a close essay task, the same-subject
+        // and unrelated tasks either side of the weak line.
+        assert_eq!(fit_match(1.92, TopicMatch::Strong), TopicMatch::Strong);
+        assert_eq!(fit_match(1.99, TopicMatch::Weak), TopicMatch::Strong);
+        assert_eq!(fit_match(0.94, TopicMatch::None), TopicMatch::Weak);
+        assert_eq!(fit_match(0.71, TopicMatch::Weak), TopicMatch::None);
+        // Shared words beyond chance: JEV lowers strong to weak, not none.
+        assert_eq!(fit_match(0.4, TopicMatch::Strong), TopicMatch::Weak);
+    }
+
+    #[test]
+    fn fit_orders_the_pool_above_the_rest() {
+        // Candidates 0-2 judged (pool order 1, 0, 2), 3 not.
+        let score = [0.9, 0.95, 0.5, 0.99];
+        let fits = [Some(0.5), Some(1.0), Some(3.0), None];
+        let s = fit_scores(&score, &[1, 0, 2], &fits);
+        assert!(s[2] > s[1] && s[1] > s[0], "{s:?}");
+        assert!(s[3] < s[0] && s[3] <= 0.1, "unjudged stays below the pool: {s:?}");
+        // Equal fits: the pool's order (the word ranking) decides.
+        let s = fit_scores(&score, &[1, 0, 2], &[Some(1.0), Some(1.0), Some(1.0), None]);
+        assert!(s[1] > s[0] && s[0] > s[2], "{s:?}");
     }
 
     #[test]
