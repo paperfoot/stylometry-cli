@@ -9,6 +9,9 @@ const FUNCTION_WORDS: &str = include_str!("data/function_words.txt");
 const ENGLISH_ZIPF: &str = include_str!("data/english_zipf.tsv");
 const SYNONYMS: &str = include_str!("data/synonyms.txt");
 const LLM_TELLS: &str = include_str!("data/llm_tells.txt");
+const SLOP_WORDS: &str = include_str!("data/slop_words.txt");
+const SLOP_PHRASES: &str = include_str!("data/slop_phrases.txt");
+const STOPWORDS: &str = include_str!("data/stopwords_nltk.txt");
 
 fn lines(src: &str) -> impl Iterator<Item = &str> {
     src.lines()
@@ -51,6 +54,10 @@ static GROUP_OF: LazyLock<HashMap<&'static str, usize>> = LazyLock::new(|| {
 });
 
 static TELLS: LazyLock<Vec<&'static str>> = LazyLock::new(|| lines(LLM_TELLS).collect());
+static SLOP_WORD_LIST: LazyLock<Vec<&'static str>> = LazyLock::new(|| lines(SLOP_WORDS).collect());
+static SLOP_PHRASE_LIST: LazyLock<Vec<&'static str>> =
+    LazyLock::new(|| lines(SLOP_PHRASES).collect());
+static STOP_SET: LazyLock<HashSet<&'static str>> = LazyLock::new(|| lines(STOPWORDS).collect());
 
 /// Articles, pronouns, prepositions, conjunctions, auxiliaries and the like.
 pub fn is_function_word(w: &str) -> bool {
@@ -86,6 +93,32 @@ pub fn llm_tells() -> &'static [&'static str] {
     &TELLS
 }
 
+/// Fiction/essay words LLMs over-use (slop-score, MIT). Author-relative:
+/// only a tell where the author uses the word less than the draft does.
+pub fn slop_words() -> &'static [&'static str] {
+    &SLOP_WORD_LIST
+}
+
+/// LLM-typical word bigrams/trigrams in stopword-stripped form ("voice
+/// barely whisper"); match against `content_stream` tokens.
+pub fn slop_phrases() -> &'static [&'static str] {
+    &SLOP_PHRASE_LIST
+}
+
+/// NLTK English stopwords, as slop-score strips them.
+pub fn is_stopword(w: &str) -> bool {
+    STOP_SET.contains(w)
+}
+
+/// Indices of the tokens that survive slop-score's stopword stripping.
+/// Contractions are stripped too: slop-score's tokenizer splits "couldn't"
+/// into stopword pieces, so its phrases never contain them.
+pub fn content_stream(tokens: &[String]) -> Vec<usize> {
+    (0..tokens.len())
+        .filter(|&i| !is_stopword(&tokens[i]) && !tokens[i].contains('\''))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100,6 +133,9 @@ mod tests {
         let g = group_of("however").unwrap();
         assert!(synonym_groups()[g].contains(&"but"));
         assert!(llm_tells().contains(&"delve"));
+        assert!(slop_words().len() > 500);
+        assert!(slop_phrases().iter().all(|p| p.contains(' ')));
+        assert!(is_stopword("the") && !is_stopword("voice"));
     }
 
     #[test]
