@@ -3,7 +3,8 @@
 //! agents read, the brief's sections and length budget, and the failure
 //! cases the v0.4 critiques found: topic nouns as "recurring words",
 //! word-choice rows that order up tells, blog openings skipped, a
-//! fiction template for X posts. Every test gets its OWN tempdir for
+//! fiction template for X posts; and round 2's typography, mechanics and
+//! "what gives imitations away". Every test gets its OWN tempdir for
 //! STYLOMETRY_DATA_DIR; corpora are synthetic.
 
 use std::path::Path;
@@ -146,7 +147,7 @@ fn fiction_brief_has_modes_dialogue_and_stays_short() {
     assert_eq!(d["register"], "fiction");
     assert_eq!(d["task"], "none");
     let secs = sections(&v);
-    for want in ["Narration mode", "Dialogue", "Avoid", "Loop"] {
+    for want in ["Narration mode", "Dialogue", "What gives imitations away", "Loop"] {
         assert!(secs.iter().any(|s| s.starts_with(want)), "missing {want}: {secs:?}");
     }
     assert!(secs.iter().any(|s| s.contains("Scene rhythm targets")), "{secs:?}");
@@ -239,7 +240,7 @@ fn social_brief_is_about_posts_not_scenes() {
     assert_eq!(d["register"], "social");
     assert_eq!(d["kind"], "post");
     let secs = sections(&v);
-    for want in ["Length and layout", "Hooks", "Vocabulary", "Avoid", "Loop"] {
+    for want in ["Length and layout", "Hooks", "Vocabulary", "What gives imitations away", "Loop"] {
         assert!(secs.iter().any(|s| s == want), "missing {want}: {secs:?}");
     }
     assert!(secs.iter().any(|s| s.starts_with("Example posts")), "{secs:?}");
@@ -256,6 +257,50 @@ fn social_brief_is_about_posts_not_scenes() {
     assert!(avoid.contains("let that sink in") && avoid.contains("🧵👇"), "{avoid}");
     assert!(!avoid.contains("hot take"), "{avoid}");
     assert!(!md.contains("dialogue"), "fiction wording in a social brief: {md}");
+}
+
+/// The typography, mechanics and giveaway sections follow the analyze
+/// report: rendered when it measures them, absent (never empty) when it
+/// doesn't, in every register, and the brief stays inside its budget.
+#[test]
+fn briefs_carry_typography_mechanics_and_giveaways() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data = tmp.path().join("data");
+    let (fic, blog, x) = (tmp.path().join("fic"), tmp.path().join("blog"), tmp.path().join("x"));
+    fiction_corpus(&fic);
+    blog_corpus(&blog);
+    social_corpus(&x);
+    build(&data, "fic", &fic, "fiction");
+    build(&data, "essays", &blog, "blog");
+    build(&data, "poster", &x, "social");
+    for name in ["fic", "essays", "poster"] {
+        let a = run_json(&data, &["analyze", name]);
+        let typo = &a["data"]["typography"];
+        for family in ["double_quotes", "apostrophes", "ellipses", "dashes", "scene_breaks"] {
+            assert!(typo[family].is_array(), "{name}: typography.{family} missing: {typo}");
+        }
+        let has_band = |key: &str| a["data"]["ranges"]["bands"].as_array().unwrap().iter().any(|b| b["key"] == key);
+        let v = run_json(&data, &["guide", name]);
+        let (md, secs) = (markdown(&v), sections(&v));
+        let families = if name == "poster" { 4 } else { 5 };
+        let measured = ["double_quotes", "apostrophes", "ellipses", "dashes", "scene_breaks"][..families]
+            .iter()
+            .any(|f| !typo[*f].as_array().unwrap().is_empty());
+        assert_eq!(secs.iter().any(|s| s.starts_with("Typography")), measured, "{name}: {secs:?}");
+        assert_eq!(secs.iter().any(|s| s == "Mechanics"), has_band("double_punct_per_1k"), "{name}: {secs:?}");
+        assert!(secs.iter().any(|s| s == "What gives imitations away"), "{name}: {secs:?}");
+        assert!(md.contains("Their punctuation and quote marks are part of the voice"), "{name}: no exemplar note");
+        assert!(!md.contains("## Avoid") && !md.contains("## Never"), "{name}: old sections left: {secs:?}");
+        let words = v["data"]["brief_words"].as_u64().unwrap();
+        assert!(words <= 1200, "{name}: brief_words {words}");
+        // Slips are stated, never prescribed.
+        assert!(!md.contains("typo"), "{name}: {md}");
+        if name == "fic" && !typo["double_quotes"].as_array().unwrap().is_empty() {
+            // The synthetic novel is set with curly quotes and apostrophes.
+            assert!(md.contains("Quotes: curly \u{201C} \u{201D} (100%)"), "{md}");
+            assert!(md.contains("Agents default to forms this author never uses: straight \" quotes"), "{md}");
+        }
+    }
 }
 
 // ── examples ────────────────────────────────────────────────────────────────

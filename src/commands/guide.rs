@@ -13,6 +13,13 @@
 //! description for holding a voice; `--for previous_chapter.md` continues
 //! the agent's own last chapter, while `--for outline.md` only picks the
 //! exemplars), and the write -> check -> revise loop.
+//!
+//! Blind readers caught every guided imitation in the round-1 A/B test by
+//! things word lists never show: straight quotes in a writer who sets them
+//! curly, flawless mechanics in a writer with "..", "e.g." and loose
+//! endings, and tidy beats (three short sentences in a row, mirrored
+//! pairs). So every brief also carries the author's typography, their
+//! mechanics, and the polish their own text almost never has.
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -22,7 +29,7 @@ use serde::Serialize;
 use crate::commands::analyze::{self, KindReport, VoiceReport};
 use crate::commands::examples::{self, Example};
 use crate::commands::input;
-use crate::engine::metrics::{self, Band, ItemHabits, Unit};
+use crate::engine::metrics::{self, Band, ItemHabits, TypographyHabits, Unit};
 use crate::engine::profile::{ItemKind, Profile, Register};
 use crate::engine::retrieve::{self, Request, TopicMatch};
 use crate::engine::{lexicon, store, text, voice};
@@ -361,21 +368,32 @@ fn plural_kind(k: ItemKind) -> &'static str {
     }
 }
 
-/// 5–7 numeric targets from the register's headline measures.
+/// 5–7 numeric targets from the register's headline measures. A measure
+/// at zero across the author's whole range says "never": it goes on one
+/// line instead of taking a row a real target could use, and unmeasured
+/// markup is no target at all.
 fn targets(c: &Ctxt, ranges: &metrics::Ranges, title: String) -> Option<Section> {
     let keys = metrics::headline_keys(c.register);
-    let rows: Vec<&Band> = keys
+    let (zero, rows): (Vec<&Band>, Vec<&Band>) = keys
         .iter()
         .filter_map(|k| ranges.bands.iter().find(|b| b.key == *k))
-        .take(MAX_TARGETS)
-        .collect();
-    if rows.is_empty() {
+        .filter(|b| !b.unmeasured)
+        .partition(|b| b.low == 0.0 && b.high == 0.0);
+    if rows.is_empty() && zero.is_empty() {
         return None;
     }
-    let mut body = String::from("| measure | range | typical |\n|---|---|---|\n");
-    for b in rows {
+    let mut body = String::new();
+    if !rows.is_empty() {
+        body.push_str("| measure | range | typical |\n|---|---|---|\n");
+    }
+    for b in rows.into_iter().take(MAX_TARGETS) {
         let f = |v: f64| if matches!(b.unit, Unit::Share) { pct(v) } else { fmt_num(v) };
         let _ = writeln!(body, "| {} | {}–{} | {} |", b.label, f(b.low), f(b.high), f(b.median));
+    }
+    if !zero.is_empty() {
+        let unit = if c.p.register.is_short_form() { item_noun(c) } else { "passages" };
+        let labels: Vec<&str> = zero.iter().map(|b| b.label.as_str()).collect();
+        let _ = writeln!(body, "\nZero in most of the author's {unit}: {}.", labels.join(", "));
     }
     let _ = writeln!(
         body,
@@ -447,8 +465,22 @@ fn habits(c: &Ctxt) -> Option<Section> {
     Some(sec("Signature habits (use naturally, never as a checklist)", bullets(&lines)))
 }
 
-fn avoid(c: &Ctxt, extra: &[String]) -> Option<Section> {
+/// What gives an imitation away, all author-relative: the tidy moves this
+/// author's own text almost never has (blind readers named them first),
+/// then (posts) what they never do, the words they don't use and the stock
+/// tells they never write.
+fn giveaways(c: &Ctxt, extra: &[String]) -> Option<Section> {
     let r = c.r;
+    let mut body = String::new();
+    let polish = polish_rows(&r.ranges.bands);
+    if !polish.is_empty() {
+        let _ = writeln!(
+            body,
+            "Imitations read too tidy. These are rare in this author's own text (at most this many per 1,000 words in 85% of their passages); write them no more often:\n"
+        );
+        body.push_str(&bullets(&polish));
+        body.push('\n');
+    }
     let mut lines: Vec<String> = extra.to_vec();
     // Short-form: only words with the author's own replacement; "his" or
     // "she" missing from posts says nothing about voice.
@@ -467,13 +499,328 @@ fn avoid(c: &Ctxt, extra: &[String]) -> Option<Section> {
         lines.push(format!("Words this author doesn't use: {}", avoided.join(", ")));
     }
     if !r.tells_unused.is_empty() {
-        let tells = distinct_tells(&r.tells_unused, if c.p.register.is_short_form() { 8 } else { 15 });
+        // `check` catches every tell; the brief names the ones agents reach for most.
+        let tells = distinct_tells(&r.tells_unused, if short { 8 } else { 10 });
         lines.push(format!("Machine-prose tells this author never writes: {}", tells.join(", ")));
     }
-    if lines.is_empty() {
+    body.push_str(&bullets(&lines));
+    if body.trim().is_empty() {
         return None;
     }
-    Some(sec("Avoid", bullets(&lines)))
+    Some(sec("What gives imitations away", body))
+}
+
+/// Tidy moves blind readers named in imitations, with a plain example each.
+/// Each is listed only where the author's own text rarely has it: a writer
+/// who really stacks short sentences is not giving anything away.
+const POLISH: [(&str, &str); 6] = [
+    ("short_triplets_per_1k", "three or more short sentences in a row (\"He left. She stayed. Nobody spoke.\")"),
+    ("anaphora_runs_per_1k", "runs of sentences that open the same way (\"Same street. Same light. Same silence.\")"),
+    ("mirror_pairs_per_1k", "mirrored pairs, one negated (\"I want to go. I don't want to go.\")"),
+    ("not_but_per_1k", "\"not X, but Y\" contrasts (\"It's not the money. It's the silence.\")"),
+    ("narration_questions_per_1k", "rhetorical questions (\"Why am I doing this?\")"),
+    ("similes_per_1k", "similes (\"like a …\", \"as if …\")"),
+];
+
+/// "Rare": the author's 85th-percentile passage has at most one per 1,000 words.
+const RARE_PER_1K: f64 = 1.0;
+
+fn polish_rows(bands: &[Band]) -> Vec<String> {
+    POLISH
+        .iter()
+        .filter_map(|(key, what)| {
+            let b = bands.iter().find(|b| b.key == *key && !b.unmeasured && b.high <= RARE_PER_1K)?;
+            Some(format!("{what}: {}", if b.high == 0.0 { "none".to_string() } else { fmt_num(b.high) }))
+        })
+        .collect()
+}
+
+// ── typography and mechanics ───────────────────────────────────────────────
+
+/// A typography family, as `metrics::TypographyHabits` reports it.
+#[derive(Clone, Copy, PartialEq)]
+enum Family {
+    Quotes,
+    Apostrophes,
+    Ellipses,
+    Dashes,
+    Breaks,
+}
+
+/// The author's main form in full: the glyphs to copy and how they sit.
+/// A form this table doesn't know is shown as it is.
+fn form_long(f: Family, form: &str) -> String {
+    let s = match (f, form) {
+        (Family::Quotes, "curly") => "curly \u{201C} \u{201D}",
+        (Family::Quotes, "straight") => "straight \"",
+        (Family::Apostrophes, "curly") => "curly \u{2019} (don\u{2019}t)",
+        (Family::Apostrophes, "straight") => "straight ' (don't)",
+        (Family::Ellipses, "\u{2026}") => "\u{2026} (one character, no spaces)",
+        (Family::Ellipses, "...") => "... (three dots)",
+        (Family::Ellipses, ". . .") => ". . . (spaced dots)",
+        (Family::Ellipses, "..") => ".. (two dots, as a joiner)",
+        (Family::Dashes, "\u{2014}") => "closed em dash (word\u{2014}word)",
+        (Family::Dashes, " \u{2014} ") => "spaced em dash (word \u{2014} word)",
+        (Family::Dashes, "--") => "double hyphen (--)",
+        (Family::Dashes, " - ") => "spaced hyphen (word - word)",
+        (Family::Dashes, "\u{2013}") => "en dash (\u{2013})",
+        (Family::Breaks, b) => return format!("`{b}` on a line of its own"),
+        (_, other) => return format!("\"{other}\""),
+    };
+    s.to_string()
+}
+
+/// Another form, in short.
+fn form_short(f: Family, form: &str) -> String {
+    let s = match (f, form) {
+        (Family::Quotes, "curly") => "\u{201C} \u{201D}",
+        (Family::Quotes, "straight") => "\"",
+        (Family::Apostrophes, "curly") => "\u{2019}",
+        (Family::Apostrophes, "straight") => "'",
+        (Family::Dashes, "\u{2014}") => "word\u{2014}word",
+        (Family::Dashes, " \u{2014} ") => "word \u{2014} word",
+        (Family::Dashes, " - ") => "word - word",
+        (Family::Breaks, b) => return format!("`{b}`"),
+        (_, other) => other,
+    };
+    s.to_string()
+}
+
+/// A form under this share is one the author doesn't use (a few strays in
+/// a long corpus are noise, not a habit).
+const NEVER_FORM_SHARE: f64 = 0.05;
+/// Other forms worth naming beside the main one.
+const ALSO_FORM_SHARE: f64 = 0.1;
+
+fn share_of(forms: &[(String, f64)], form: &str) -> f64 {
+    forms.iter().find(|f| f.0 == form).map_or(0.0, |f| f.1)
+}
+
+/// One line per family with enough evidence, then the forms agents default
+/// to (straight quotes, "...", "---") where this author never uses them.
+/// Posts have no scene breaks (a `---` line separates posts in a batch).
+fn typography_lines(t: &TypographyHabits, short_form: bool) -> Vec<String> {
+    let families = [
+        (Family::Quotes, "Quotes", &t.double_quotes),
+        (Family::Apostrophes, "Apostrophes", &t.apostrophes),
+        (Family::Ellipses, "Ellipses", &t.ellipses),
+        (Family::Dashes, "Dashes", &t.dashes),
+        (Family::Breaks, "Scene breaks", &t.scene_breaks),
+    ];
+    let mut out = Vec::new();
+    for (f, name, forms) in families {
+        if f == Family::Breaks && short_form {
+            continue;
+        }
+        let Some((top, share)) = forms.first() else { continue };
+        let mut line = format!("{name}: {} ({})", form_long(f, top), pct(*share));
+        let also: Vec<String> = forms[1..]
+            .iter()
+            .filter(|x| x.1 >= ALSO_FORM_SHARE)
+            .take(2)
+            .map(|(x, s)| format!("{} {}", form_short(f, x), pct(*s)))
+            .collect();
+        if !also.is_empty() {
+            let _ = write!(line, "; also {}", also.join(", "));
+        }
+        line.push('.');
+        out.push(line);
+    }
+    let never = |forms: &[(String, f64)], form: &str| !forms.is_empty() && share_of(forms, form) < NEVER_FORM_SHARE;
+    let mut defaults = Vec::new();
+    if never(&t.double_quotes, "straight") {
+        defaults.push("straight \" quotes");
+    }
+    if never(&t.apostrophes, "straight") {
+        defaults.push("straight ' apostrophes");
+    }
+    if never(&t.ellipses, "...") {
+        defaults.push("\"...\"");
+    }
+    if never(&t.dashes, "\u{2014}") {
+        defaults.push("closed em dashes (\u{2014})");
+    }
+    if !short_form && never(&t.scene_breaks, "---") {
+        defaults.push("`---` breaks");
+    }
+    if !defaults.is_empty() {
+        out.push(format!(
+            "Agents default to forms this author never uses: {}. Convert every one; `check` flags them.",
+            defaults.join(", ")
+        ));
+    }
+    out
+}
+
+fn typography_section(c: &Ctxt) -> Option<Section> {
+    let lines = typography_lines(&c.r.typography, c.p.register.is_short_form());
+    (!lines.is_empty()).then(|| sec("Typography (set it exactly like this)", bullets(&lines)))
+}
+
+/// The exemplars' one-line reminder that their marks are the voice too,
+/// naming the forms the author holds 80% of the time or more.
+fn typography_note(t: &TypographyHabits) -> String {
+    let families = [
+        (Family::Quotes, &t.double_quotes),
+        (Family::Apostrophes, &t.apostrophes),
+        (Family::Ellipses, &t.ellipses),
+        (Family::Dashes, &t.dashes),
+    ];
+    let forms: Vec<String> = families
+        .iter()
+        .filter_map(|(f, v)| v.first().filter(|x| x.1 >= 0.8).map(|x| form_short(*f, &x.0)))
+        .collect();
+    let what = if forms.is_empty() { String::new() } else { format!(" ({})", forms.join(", ")) };
+    format!("Their punctuation and quote marks are part of the voice{what}: set yours the same way.")
+}
+
+/// The marks of a real hand, counted in the author's text: doubled marks,
+/// abbreviations kept in running prose and (posts) loose starts and endings.
+#[derive(Default)]
+struct Hand {
+    /// "..", "!!", "??", "?!" the author writes, per 1,000 words.
+    doubled: Vec<(&'static str, f64)>,
+    /// "etc", "e.g.", "i.e." in running text, per 1,000 words.
+    abbrevs: Vec<(&'static str, f64)>,
+    /// Short-form: lowercase starts, no final full stop.
+    loose: Vec<String>,
+}
+
+const DOUBLED: [&str; 4] = ["..", "!!", "??", "?!"];
+
+/// Doubled marks in a text, in `DOUBLED` order. A run of three or more dots
+/// is an ellipsis, not a doubled mark; "?!" covers "!?" and longer mixes.
+fn doubled_marks(t: &str) -> [usize; 4] {
+    let mut out = [0; 4];
+    let cs: Vec<char> = t.chars().collect();
+    let mut i = 0;
+    while i < cs.len() {
+        if !matches!(cs[i], '.' | '!' | '?') {
+            i += 1;
+            continue;
+        }
+        let run: Vec<char> = cs[i..].iter().copied().take_while(|ch| matches!(ch, '.' | '!' | '?')).collect();
+        let has = |ch: char| run.contains(&ch);
+        if run.len() == 2 && run.iter().all(|&ch| ch == '.') {
+            out[0] += 1;
+        } else if run.len() >= 2 && !has('.') {
+            match (has('!'), has('?')) {
+                (true, true) => out[3] += 1,
+                (true, false) => out[1] += 1,
+                _ => out[2] += 1,
+            }
+        }
+        i += run.len();
+    }
+    out
+}
+
+fn hand_of(c: &Ctxt, habits: Option<&ItemHabits>) -> Hand {
+    let p = c.p;
+    let words = p.n_tokens.max(1) as f64;
+    let mut counts = [0usize; 4];
+    for para in p.chunks.iter().flat_map(|ch| ch.paragraphs.iter()) {
+        for (n, m) in counts.iter_mut().zip(doubled_marks(para)) {
+            *n += m;
+        }
+    }
+    // Three uses and one per 10,000 words make a habit, not a stray.
+    let doubled = DOUBLED
+        .iter()
+        .zip(counts)
+        .filter(|(_, n)| *n >= 3 && *n as f64 * 1000.0 / words >= 0.1)
+        .map(|(f, n)| (*f, n as f64 * 1000.0 / words))
+        .collect();
+    let abbrevs = [("etc", "etc"), ("e.g", "e.g."), ("i.e", "i.e.")]
+        .iter()
+        .filter_map(|(key, shown)| {
+            let n = p.word_counts.get(*key).copied().unwrap_or(0);
+            let rate = n as f64 * 1000.0 / words;
+            (n >= 2 && rate >= 0.2).then_some((*shown, rate))
+        })
+        .collect();
+    let mut loose = Vec::new();
+    if p.register.is_short_form() && !c.items.is_empty() {
+        let lower = c
+            .items
+            .iter()
+            .filter(|&&i| p.chunks[i].text().chars().find(|ch| ch.is_alphabetic()).is_some_and(|ch| ch.is_lowercase()))
+            .count() as f64
+            / c.items.len() as f64;
+        if lower >= 0.08 {
+            loose.push(format!("lowercase starts ({})", pct(lower)));
+        }
+        let bare = habits.map_or(0.0, |h| share_of(&h.endings, "none"));
+        if bare >= 0.08 {
+            loose.push(format!("no final full stop ({} of {})", pct(bare), item_noun(c)));
+        }
+    }
+    Hand { doubled, abbrevs, loose }
+}
+
+/// Mechanics from the author's bands (`double_punct_per_1k`,
+/// `space_before_punct_per_1k`, `nonword_per_1k`) and the forms behind
+/// them. Words outside the dictionary are stated, never prescribed: the
+/// brief must not tell an agent to misspell.
+fn mechanics_lines(bands: &[Band], h: &Hand) -> Vec<String> {
+    let band = |key: &str| bands.iter().find(|b| b.key == key && !b.unmeasured);
+    let Some(doubled) = band("double_punct_per_1k") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let quoted = |v: &[(&'static str, f64)]| v.iter().map(|(f, _)| format!("\"{f}\"")).collect::<Vec<_>>();
+    if h.doubled.is_empty() {
+        if doubled.high == 0.0 {
+            out.push("Doubled marks (!!, ?!, ..): never.".to_string());
+        }
+    } else {
+        let forms: Vec<String> = h.doubled.iter().map(|(f, r)| format!("\"{f}\" {}", fmt_num(*r))).collect();
+        out.push(format!(
+            "Doubled marks per 1,000 words: {} (typically {} in all, up to {}). They are the author's: use them where the author would.",
+            forms.join(", "),
+            fmt_num(doubled.median),
+            fmt_num(doubled.high)
+        ));
+    }
+    let spaced = band("space_before_punct_per_1k").filter(|b| b.median >= 0.5);
+    if let Some(b) = spaced {
+        out.push(format!(
+            "A space before punctuation (\"word ,\", \"word ?\"): typically {} per 1,000 words.",
+            fmt_num(b.median)
+        ));
+    }
+    let nonword = band("nonword_per_1k")
+        .map(|b| {
+            format!(
+                " About {} words per 1,000 are outside the dictionary (names, coinages, jargon, slips); never invent misspellings.",
+                fmt_num(b.median)
+            )
+        })
+        .unwrap_or_default();
+    let informal = !h.doubled.is_empty() || spaced.is_some() || !h.loose.is_empty();
+    if informal {
+        let mut kept = quoted(&h.doubled);
+        kept.extend(quoted(&h.abbrevs));
+        if spaced.is_some() {
+            kept.push("the space before a mark".into());
+        }
+        kept.extend(h.loose.iter().cloned());
+        out.push(format!("Polish: informal. Keeps {}; don't tidy these away.{nonword}", kept.join(", ")));
+    } else {
+        let uses = if h.abbrevs.is_empty() { String::new() } else { format!(" (uses {})", quoted(&h.abbrevs).join(", ")) };
+        out.push(format!("Polish: edited copy, standard spelling and punctuation{uses}.{nonword}"));
+    }
+    out
+}
+
+fn mechanics_section(c: &Ctxt, habits: Option<&ItemHabits>) -> Option<Section> {
+    let lines = mechanics_lines(&c.r.ranges.bands, &hand_of(c, habits));
+    (!lines.is_empty()).then(|| sec("Mechanics", bullets(&lines)))
+}
+
+/// Typography and mechanics, the two mechanical, certain sections.
+fn type_and_hand(c: &Ctxt, habits: Option<&ItemHabits>) -> Vec<Section> {
+    typography_section(c).into_iter().chain(mechanics_section(c, habits)).collect()
 }
 
 /// Tells without their inflected repeats ("delve" covers "delves",
@@ -497,11 +844,13 @@ fn distinct_tells(tells: &[&'static str], n: usize) -> Vec<&'static str> {
     out
 }
 
-fn exemplar_section(heading: String, rows: &[Example], label: impl Fn(&Example) -> String) -> Option<Section> {
+/// The exemplars, led by one line saying their marks are part of the voice
+/// (the author's own text shows their typography better than any rule).
+fn exemplar_section(c: &Ctxt, heading: String, rows: &[Example], label: impl Fn(&Example) -> String) -> Option<Section> {
     if rows.is_empty() {
         return None;
     }
-    let mut body = String::new();
+    let mut body = format!("{}\n\n", typography_note(&c.r.typography));
     for (i, e) in rows.iter().enumerate() {
         let _ = writeln!(body, "### {} {} ({})\n", heading_unit(&heading), i + 1, label(e));
         let _ = writeln!(body, "{}\n", quote(&e.text));
@@ -617,6 +966,7 @@ fn fiction(c: &Ctxt) -> (Vec<Section>, Vec<Example>, TopicMatch) {
     let r = c.r;
     let mut out = vec![header(c, "fiction")];
     out.push(sec("The voice in brief", bullets(&long_summary(r, true))));
+    out.extend(type_and_hand(c, None));
     if let Some(s) = modes_section(c) {
         out.push(s);
     }
@@ -626,11 +976,12 @@ fn fiction(c: &Ctxt) -> (Vec<Section>, Vec<Example>, TopicMatch) {
     out.extend(targets(c, &r.ranges, format!("Scene rhythm targets ({}-word passages)", r.ranges.window_words)));
     out.extend(word_choices(r));
     out.extend(habits(c));
-    out.extend(avoid(c, &[]));
+    out.extend(giveaways(c, &[]));
     let (picks, tm) = pick(c, c.exemplars, true, false);
     let spare = spare_passage(c, &picks);
     let shown = &picks[..];
     out.extend(exemplar_section(
+        c,
         "The author's own passages (study the mechanics; do not reuse)".into(),
         shown,
         |e| {
@@ -973,16 +1324,18 @@ fn prose(c: &Ctxt) -> (Vec<Section>, Vec<Example>, TopicMatch) {
     let what = if c.register == Register::Blog { "blog posts" } else { "non-fiction" };
     let mut out = vec![header(c, what)];
     out.push(sec("The voice in brief", bullets(&long_summary(r, false))));
+    out.extend(type_and_hand(c, None));
     out.extend(openings_closings(c));
     out.extend(structure(c));
     out.push(stance(c));
     out.extend(targets(c, &r.ranges, format!("Targets ({}-word passages)", r.ranges.window_words)));
     out.extend(word_choices(r));
     out.extend(habits(c));
-    out.extend(avoid(c, &[]));
+    out.extend(giveaways(c, &[]));
     let (picks, tm) = pick(c, c.exemplars, false, false);
     let spare = spare_passage(c, &picks);
     out.extend(exemplar_section(
+        c,
         "The author's own passages (study the mechanics; do not reuse)".into(),
         &picks,
         |e| format!("{}, {} words{}", e.source, e.words, if e.opening { ", opening" } else { "" }),
@@ -1093,6 +1446,7 @@ fn social(c: &Ctxt) -> (Vec<Section>, Vec<Example>, TopicMatch) {
     let habits = kr.map(|k| &k.habits).filter(|h| h.items > 0);
     let mut out = vec![header(c, plural_kind(c.kind))];
     out.push(length_section(c, habits));
+    out.extend(type_and_hand(c, habits));
     if let Some(k) = kr {
         out.extend(targets(c, &k.ranges, "Targets per post".into()));
     }
@@ -1112,27 +1466,24 @@ fn social(c: &Ctxt) -> (Vec<Section>, Vec<Example>, TopicMatch) {
         if !lines.is_empty() {
             out.push(sec("Endings, emoji, hashtags", bullets(&lines)));
         }
-        if !h.never.is_empty() {
-            let rows: Vec<String> = h
-                .never
-                .iter()
-                .map(|n| format!("{}: {} of {} {}", n.label, n.count, n.of, plural_kind(c.kind)))
-                .collect();
-            out.push(sec("Never (what they almost never do identifies them more than averages)", bullets(&rows)));
-        }
     }
     out.extend(short_words(c));
     out.extend(thread_section(c));
+    // What they almost never do identifies them more than averages.
+    let mut extra: Vec<String> = Vec::new();
+    if let Some(h) = habits.filter(|h| !h.never.is_empty()) {
+        let rows: Vec<String> = h.never.iter().map(|n| format!("{} {} of {}", n.label, n.count, n.of)).collect();
+        extra.push(format!("Almost never in their {}: {}", plural_kind(c.kind), rows.join("; ")));
+    }
     let layout: Vec<&str> = r.social_tells_unused.iter().copied().filter(|t| voice::ITEM_TELLS.contains(t)).collect();
     let phrases = r.social_tells_unused.iter().copied().filter(|t| !voice::ITEM_TELLS.contains(t)).take(10);
     let tells: Vec<&str> = layout.into_iter().chain(phrases).collect();
-    let extra: Vec<String> = if tells.is_empty() {
-        Vec::new()
-    } else {
-        vec![format!("Social-post tells this author never writes: {}", tells.join(", "))]
-    };
-    out.extend(avoid(c, &extra));
+    if !tells.is_empty() {
+        extra.push(format!("Social-post tells this author never writes: {}", tells.join(", ")));
+    }
+    out.extend(giveaways(c, &extra));
     out.extend(exemplar_section(
+        c,
         format!("Example {} (study the moves; never reuse the lines)", plural_kind(c.kind)),
         &picks,
         |e| {
@@ -1290,6 +1641,7 @@ fn mail(c: &Ctxt) -> (Vec<Section>, Vec<Example>, TopicMatch) {
     let _ = writeln!(len.body, "- Paragraphs: typically {}, up to {}.", fmt_count(pmed), fmt_count(phi));
     len.heading = "Length and paragraphing".into();
     out.push(len);
+    out.extend(type_and_hand(c, habits));
     let mut tone = Vec::new();
     if let Some(cb) = band(r, "contractions_per_1k") {
         tone.push(format!("Contractions: {} per 1,000 words.", fmt_num(cb.median)));
@@ -1307,9 +1659,10 @@ fn mail(c: &Ctxt) -> (Vec<Section>, Vec<Example>, TopicMatch) {
         out.extend(targets(c, &k.ranges, format!("Targets per {}", &what[..what.len() - 1])));
     }
     out.extend(short_words(c));
-    out.extend(avoid(c, &[]));
+    out.extend(giveaways(c, &[]));
     let (picks, tm) = pick(c, c.exemplars.max(4), false, false);
     out.extend(exemplar_section(
+        c,
         format!("Example {what} (study the moves; never reuse the lines)"),
         &picks,
         |e| format!("{}, {} words", e.source, e.words),
@@ -1390,6 +1743,124 @@ mod tests {
     fn tells_lose_inflected_repeats() {
         let t = distinct_tells(&["delve", "delves", "delving", "testament", "a testament to", "navigate", "navigating", "realm"], 10);
         assert_eq!(t, vec!["delve", "testament", "navigate", "realm"]);
+    }
+
+    fn curly_book() -> TypographyHabits {
+        TypographyHabits {
+            double_quotes: vec![("curly".into(), 0.98), ("straight".into(), 0.02)],
+            apostrophes: vec![("curly".into(), 0.99), ("straight".into(), 0.01)],
+            ellipses: vec![("\u{2026}".into(), 0.9), ("..".into(), 0.07), ("...".into(), 0.03)],
+            dashes: vec![("\u{2014}".into(), 0.85), ("--".into(), 0.15)],
+            scene_breaks: vec![("\u{2022} \u{2022} \u{2022}".into(), 1.0)],
+        }
+    }
+
+    /// Round 1: judges named straight quotes, "..." and "---" breaks in
+    /// imitations of a book set with curly quotes, "…" and "• • •".
+    #[test]
+    fn typography_names_the_forms_and_the_defaults_the_author_never_uses() {
+        let lines = typography_lines(&curly_book(), false);
+        let t = lines.join("\n");
+        assert!(t.contains("Quotes: curly \u{201C} \u{201D} (98%)."), "{t}");
+        assert!(t.contains("Apostrophes: curly \u{2019} (don\u{2019}t) (99%)."), "{t}");
+        assert!(t.contains("Ellipses: \u{2026} (one character, no spaces) (90%)."), "{t}");
+        assert!(t.contains("Dashes: closed em dash (word\u{2014}word) (85%); also -- 15%."), "{t}");
+        assert!(t.contains("Scene breaks: `\u{2022} \u{2022} \u{2022}` on a line of its own (100%)."), "{t}");
+        let defaults = lines.last().unwrap();
+        assert!(defaults.starts_with("Agents default to forms this author never uses"), "{defaults}");
+        for want in ["straight \" quotes", "straight ' apostrophes", "\"...\"", "`---` breaks"] {
+            assert!(defaults.contains(want), "{want}: {defaults}");
+        }
+        assert!(!defaults.contains("em dash"), "the author's own dash is no default to avoid: {defaults}");
+
+        // Posts: no scene breaks (`---` separates posts in a batch), and an
+        // author who writes straight apostrophes has nothing to convert.
+        let posts = TypographyHabits {
+            apostrophes: vec![("straight".into(), 0.94), ("curly".into(), 0.06)],
+            ellipses: vec![("..".into(), 0.73), ("...".into(), 0.27)],
+            dashes: vec![(" - ".into(), 0.4), ("--".into(), 0.4), ("\u{2014}".into(), 0.2)],
+            scene_breaks: vec![("---".into(), 1.0)],
+            ..Default::default()
+        };
+        let t = typography_lines(&posts, true).join("\n");
+        assert!(t.contains("Apostrophes: straight ' (don't) (94%)."), "{t}");
+        assert!(t.contains("Ellipses: .. (two dots, as a joiner) (73%); also ... 27%."), "{t}");
+        assert!(t.contains("Dashes: spaced hyphen (word - word) (40%); also -- 40%, word\u{2014}word 20%."), "{t}");
+        assert!(!t.contains("Scene breaks") && !t.contains("Agents default"), "{t}");
+        // Nothing measured, nothing said.
+        assert!(typography_lines(&TypographyHabits::default(), false).is_empty());
+    }
+
+    #[test]
+    fn exemplar_note_names_the_forms_the_author_holds() {
+        assert_eq!(
+            typography_note(&curly_book()),
+            "Their punctuation and quote marks are part of the voice (\u{201C} \u{201D}, \u{2019}, \u{2026}, word\u{2014}word): set yours the same way."
+        );
+        assert_eq!(
+            typography_note(&TypographyHabits::default()),
+            "Their punctuation and quote marks are part of the voice: set yours the same way."
+        );
+    }
+
+    fn mk_band(key: &str, low: f64, median: f64, high: f64) -> Band {
+        Band { key: key.into(), label: key.into(), unit: Unit::Per1k, low, median, high, family: "mechanics", unmeasured: false }
+    }
+
+    #[test]
+    fn doubled_marks_skip_ellipses() {
+        assert_eq!(doubled_marks("wait.. what?! no!! really?? fine... ok."), [1, 1, 1, 1]);
+        assert_eq!(doubled_marks("He paused... then. . . left! Why?"), [0, 0, 0, 0]);
+        assert_eq!(doubled_marks("so..\nand!?"), [1, 0, 0, 1]);
+    }
+
+    /// Round 1: posts imitations had "no typos, no '!!', no 'e.g.'/'etc'".
+    /// The brief keeps the author's loose hand but never asks for slips.
+    #[test]
+    fn mechanics_keep_an_informal_hand_and_never_prescribe_slips() {
+        let bands = vec![
+            mk_band("double_punct_per_1k", 0.0, 3.0, 6.0),
+            mk_band("space_before_punct_per_1k", 0.0, 1.0, 2.0),
+            mk_band("nonword_per_1k", 4.0, 9.0, 15.0),
+        ];
+        let hand = Hand {
+            doubled: vec![("..", 3.6)],
+            abbrevs: vec![("e.g.", 0.7)],
+            loose: vec!["no final full stop (10% of posts)".into()],
+        };
+        let t = mechanics_lines(&bands, &hand).join("\n");
+        assert!(t.contains("Doubled marks per 1,000 words: \"..\" 3.6 (typically 3.0 in all, up to 6.0)."), "{t}");
+        assert!(t.contains("A space before punctuation (\"word ,\", \"word ?\"): typically 1.0 per 1,000 words."), "{t}");
+        assert!(
+            t.contains("Polish: informal. Keeps \"..\", \"e.g.\", the space before a mark, no final full stop (10% of posts); don't tidy these away."),
+            "{t}"
+        );
+        assert!(t.contains("About 9.0 words per 1,000 are outside the dictionary"), "{t}");
+        assert_eq!(t.matches("misspell").count(), t.matches("never invent misspellings").count(), "{t}");
+        assert!(!t.contains("typo"), "{t}");
+
+        let bands = vec![mk_band("double_punct_per_1k", 0.0, 0.0, 0.0), mk_band("space_before_punct_per_1k", 0.0, 0.2, 1.0)];
+        let edited = Hand { abbrevs: vec![("etc", 0.3)], ..Default::default() };
+        let t = mechanics_lines(&bands, &edited).join("\n");
+        assert!(t.contains("Doubled marks (!!, ?!, ..): never."), "{t}");
+        assert!(t.contains("Polish: edited copy, standard spelling and punctuation (uses \"etc\")."), "{t}");
+        assert!(!t.contains("space before"), "an occasional stray space is no habit: {t}");
+        // Without the mechanics measures there is nothing to say.
+        assert!(mechanics_lines(&[], &hand).is_empty());
+    }
+
+    #[test]
+    fn polish_rows_list_only_what_the_author_rarely_does() {
+        let bands = vec![
+            mk_band("short_triplets_per_1k", 0.0, 0.0, 0.0),
+            mk_band("anaphora_runs_per_1k", 0.0, 0.0, 1.0),
+            mk_band("mirror_pairs_per_1k", 0.0, 1.0, 3.0),
+            Band { unmeasured: true, ..mk_band("not_but_per_1k", 0.0, 0.0, 0.0) },
+        ];
+        let rows = polish_rows(&bands);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert!(rows[0].starts_with("three or more short sentences in a row") && rows[0].ends_with(": none"), "{rows:?}");
+        assert!(rows[1].starts_with("runs of sentences that open the same way") && rows[1].ends_with(": 1.0"), "{rows:?}");
     }
 
     #[test]
