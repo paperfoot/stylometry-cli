@@ -304,23 +304,7 @@ fn is_fence_line(l: &str) -> bool {
 
 /// A line without markdown link targets and bare URLs.
 fn prose_of_line(l: &str) -> String {
-    let mut out = String::with_capacity(l.len());
-    let mut rest = l;
-    while let Some(i) = rest.find("](") {
-        out.push_str(&rest[..i + 1]);
-        rest = match rest[i + 2..].find(')') {
-            Some(j) => &rest[i + 2 + j + 1..],
-            None => "",
-        };
-    }
-    out.push_str(rest);
-    out.split(' ')
-        .filter(|w| {
-            let b = w.trim_start_matches(['(', '[', '<', '"']);
-            !(b.starts_with("http://") || b.starts_with("https://") || b.starts_with("www."))
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+    metrics::strip_links(l)
 }
 
 impl<'a> Draft<'a> {
@@ -425,18 +409,19 @@ impl<'a> Draft<'a> {
             for s in text::sentences(para) {
                 let off = para[cursor..].find(s.as_str()).map(|o| o + cursor).unwrap_or(cursor);
                 cursor = off;
-                out.push((self.line_of(pi, off), text::count_words(&s), s));
+                out.push((self.line_of(pi, off), text::count_words(&metrics::strip_links(&s)), s));
             }
         }
         out
     }
 
-    /// Lines (1-based) containing any of `needles`, outside headings.
+    /// Lines (1-based) whose prose contains any of `needles`, outside
+    /// headings (the colon in "https:" is not a colon to cut).
     fn lines_with(&self, needles: &[&str]) -> Vec<usize> {
         self.lines
             .iter()
             .enumerate()
-            .filter(|(_, l)| !is_heading_line(l) && needles.iter().any(|n| l.contains(n)))
+            .filter(|(_, l)| !is_heading_line(l) && needles.iter().any(|n| prose_of_line(l).contains(n)))
             .map(|(i, _)| i + 1)
             .collect()
     }

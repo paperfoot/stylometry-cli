@@ -748,6 +748,77 @@ pub fn inline_markup(p: &str) -> (usize, usize, usize) {
     (bold, singles / 2, links)
 }
 
+fn is_url_word(w: &str) -> bool {
+    let b = w.trim_start_matches(['(', '[', '<', '"', '\u{201C}']);
+    b.starts_with("http://") || b.starts_with("https://") || b.starts_with("www.")
+}
+
+/// Prose without web links, line by line: a markdown link keeps its text
+/// and loses its target, a bare URL goes (its trailing full stop or comma
+/// stays, so sentences still end). Otherwise "https:" counts as a colon,
+/// "](" as a parenthesis, and URL path pieces as words, digits and echo
+/// phrases. Link counts come from the raw text (`inline_markup`).
+pub fn strip_links(p: &str) -> String {
+    let mut lines = Vec::new();
+    for line in p.split('\n') {
+        let mut out = String::with_capacity(line.len());
+        let mut rest = line;
+        while let Some(i) = rest.find("](") {
+            let before = &rest[..i];
+            // "[text](target)" → "text"; a stray "](" just loses its target.
+            match before.rfind('[') {
+                Some(o) => {
+                    out.push_str(&before[..o]);
+                    out.push_str(&before[o + 1..]);
+                }
+                None => out.push_str(before),
+            }
+            // The target ends at its matching ')': Wikipedia targets hold
+            // balanced parentheses of their own.
+            let target = &rest[i + 2..];
+            let mut depth = 0usize;
+            let close = target.char_indices().find(|&(_, c)| match c {
+                '(' => {
+                    depth += 1;
+                    false
+                }
+                ')' if depth == 0 => true,
+                ')' => {
+                    depth -= 1;
+                    false
+                }
+                _ => false,
+            });
+            rest = close.map(|(j, _)| &target[j + 1..]).unwrap_or("");
+        }
+        out.push_str(rest);
+        if !out.contains("http") && !out.contains("www.") {
+            lines.push(out);
+            continue;
+        }
+        let words: Vec<String> = out
+            .split(' ')
+            .filter_map(|w| {
+                if !is_url_word(w) {
+                    return Some(w.to_string());
+                }
+                let keep: String = w.chars().rev().take_while(|c| matches!(c, '.' | ',' | ';' | '!' | '?')).collect();
+                (!keep.is_empty()).then(|| keep.chars().rev().collect())
+            })
+            .collect();
+        // A URL's kept full stop belongs to the word before it.
+        let mut joined = String::with_capacity(out.len());
+        for w in words {
+            if !joined.is_empty() && !w.chars().all(|c| matches!(c, '.' | ',' | ';' | '!' | '?')) {
+                joined.push(' ');
+            }
+            joined.push_str(&w);
+        }
+        lines.push(joined);
+    }
+    lines.join("\n")
+}
+
 const YOU: [&str; 9] = ["you", "your", "yours", "yourself", "yourselves", "you're", "you've", "you'll", "you'd"];
 const WE: [&str; 9] = ["we", "us", "our", "ours", "ourselves", "we're", "we've", "we'll", "we'd"];
 const THIRD_PERSON: [&str; 21] = [
@@ -764,14 +835,16 @@ pub fn measure(paragraphs: &[String], function_words: &[String]) -> Vec<f64> {
 /// `measure` with short-form sentence splitting (every line break and
 /// every terminal mark ends a sentence, whatever the next letter's case).
 /// Headings and code fences are counted as structure and kept out of the
-/// prose measures.
+/// prose measures; links are counted, then stripped (`strip_links`), so the
+/// draft and the author's windows are measured on the same prose.
 pub fn measure_for(all_paragraphs: &[String], function_words: &[String], short_form: bool) -> Vec<f64> {
     let (mut headings, mut fences, mut quotes, mut bullets, mut numbered, mut other_paras) =
         (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
     let (mut bold, mut italic, mut links) = (0usize, 0usize, 0usize);
     let mut prose_paras: Vec<String> = Vec::with_capacity(all_paragraphs.len());
     for p in all_paragraphs {
-        match block_kind(p) {
+        let kind = block_kind(p);
+        match kind {
             Block::Heading => {
                 headings += 1;
                 continue;
@@ -780,19 +853,27 @@ pub fn measure_for(all_paragraphs: &[String], function_words: &[String], short_f
                 fences += 1;
                 continue;
             }
+            _ => {}
+        }
+        let (b, i, l) = inline_markup(p);
+        bold += b;
+        italic += i;
+        links += l;
+        let prose = strip_links(p);
+        // A paragraph that was only a link is no paragraph of prose.
+        if prose.trim().is_empty() {
+            continue;
+        }
+        match kind {
             Block::Quote => {
                 quotes += 1;
                 other_paras += 1;
             }
             Block::Bullets(n) => bullets += n,
             Block::Numbered(n) => numbered += n,
-            Block::Prose => other_paras += 1,
+            _ => other_paras += 1,
         }
-        let (b, i, l) = inline_markup(p);
-        bold += b;
-        italic += i;
-        links += l;
-        prose_paras.push(p.clone());
+        prose_paras.push(prose);
     }
     let paragraphs = &prose_paras[..];
     let style = StyleCounts::of_paragraphs(paragraphs);
@@ -1281,6 +1362,27 @@ mod tests {
     fn get(v: &[f64], key: &str) -> f64 {
         let d = defs(&[]);
         v[d.iter().position(|d| d.key == key).unwrap()]
+    }
+
+    #[test]
+    fn links_are_counted_but_not_measured_as_prose() {
+        assert_eq!(
+            strip_links("See [this essay](https://x.com/a:b_(c)/2021.html) and https://t.co/9x for more.\nhttps://x.com."),
+            "See this essay and for more.\n."
+        );
+        assert_eq!(strip_links("No links: here (none)."), "No links: here (none).");
+        let plain = "I said it twice: once here. See this essay and for more.";
+        let linked = "I said it twice: once here. See [this essay](https://example.com/2021/taste:aesthetics.html) and \
+                      https://en.wikipedia.org/wiki/Taste_(sociology) for more.";
+        let (a, b) = (measure(&paras(plain), &[]), measure(&paras(linked), &[]));
+        for key in ["colons_per_1k", "parentheses_per_1k", "digits_per_1k", "word_letters_mean", "sentence_words_mean"] {
+            assert_eq!(get(&a, key), get(&b, key), "{key} moved when links were added");
+        }
+        assert_eq!(get(&a, "links_per_1k"), 0.0);
+        assert!(get(&b, "links_per_1k") > 0.0, "links still counted");
+        // A paragraph that is only a link is not a paragraph of prose.
+        let with_link_para = format!("{plain}\n\nhttps://example.com/x");
+        assert_eq!(get(&measure(&paras(&with_link_para), &[]), "paragraph_words_mean"), get(&a, "paragraph_words_mean"));
     }
 
     #[test]

@@ -189,6 +189,41 @@ fn markup_the_corpus_never_uses_is_unmeasured() {
     assert!(!j["data"]["findings"].to_string().contains("italic"), "never 'remove italics' against plain text");
 }
 
+#[test]
+fn adding_links_does_not_move_punctuation_rates_or_point_at_url_lines() {
+    let data = tempfile::tempdir().unwrap();
+    let corpus = tempfile::tempdir().unwrap();
+    build_fiction(data.path(), corpus.path());
+
+    let base = author_prose(17, 700);
+    let mut plain = String::new();
+    let mut linked = String::new();
+    for (i, para) in base.split("\n\n").filter(|p| !p.trim().is_empty()).enumerate() {
+        plain.push_str(para);
+        linked.push_str(para);
+        if i % 3 == 0 {
+            plain.push_str(" See this essay and for more.");
+            linked.push_str(
+                " See [this essay](https://example.com/2021/taste:aesthetics-03.html) and \
+                 https://en.wikipedia.org/wiki/Taste_(sociology) for more.",
+            );
+        }
+        plain.push_str("\n\n");
+        linked.push_str("\n\n");
+    }
+    let rows = |t: &str| {
+        let j = check_text(data.path(), "ann", t, &[]);
+        let m = j["data"]["metrics"].as_array().unwrap().clone();
+        (m, j["data"]["plan"].to_string())
+    };
+    let ((a, _), (b, plan)) = (rows(&plain), rows(&linked));
+    for key in ["colons_per_1k", "parentheses_per_1k", "digits_per_1k", "echo_phrases_per_1k"] {
+        let v = |m: &[Value]| m.iter().find(|r| r["key"] == key).unwrap()["value"].as_f64().unwrap();
+        assert_eq!(v(&a), v(&b), "{key}: links must not count as prose");
+    }
+    assert!(!plan.contains("colons"), "no colon step from 'https:': {plan}");
+}
+
 // ── Short-form ───────────────────────────────────────────────────────────────
 
 /// 120 plain posts: no hashtags, no emoji, mostly one line, ending in '.'.
