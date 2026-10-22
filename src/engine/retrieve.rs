@@ -29,13 +29,17 @@
 //! at most to weak). On 8 essay and post tasks labelled by hand before JEV
 //! saw them, the top five went from NDCG@5 0.54 to 0.73 and precision@3
 //! 0.38 to 0.67. Fiction keeps the word and shape ranking: on 4 scene tasks
-//! short excerpts did no better (0.50 both). Any failure keeps the word
-//! ranking.
+//! short excerpts did no better (0.50 both). Any failure, or no answer for
+//! the whole pool within `JEV_BUDGET`, keeps the word ranking, and the rest
+//! of the run skips JEV.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, mpsc};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::engine::jev::Jev;
 use crate::engine::metrics;
@@ -82,6 +86,16 @@ const JEV_LEXICAL: f64 = 0.25;
 /// whose two best passages were labelled similar but fit 0.98 and 0.71.
 const FIT_STRONG: f64 = 1.5;
 const FIT_WEAK: f64 = 0.8;
+/// How long JEV gets to judge a whole pool, every request together (24
+/// passages take about 1-1.5 s uncached, nothing cached). Without it a slow
+/// or hanging API held `examples` for the per-request timeout once per wave
+/// of requests (25 s) and a brief, which retrieves several times, for 58 s.
+const JEV_BUDGET: Duration = Duration::from_millis(3000);
+
+/// Set once JEV failed or ran out of time in this process, so later
+/// retrievals (a brief retrieves several times) keep the word ranking
+/// without asking again.
+static JEV_FAILED: AtomicBool = AtomicBool::new(false);
 
 /// What ordered the picks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -699,29 +713,78 @@ fn excerpt(p: &Profile, c: &Cand, q_tf: &HashMap<String, f64>, idf: &HashMap<Str
 /// JEV's fit to the task for the candidates in `pool`, judged on their
 /// `excerpts` (None for the rest). Err carries why not: None when JEV is
 /// off or has no key (the word ranking is then the normal path, not a
-/// failure), a note when it was asked and did not answer for every one.
+/// failure), a note when it was asked and did not answer for every one in
+/// time; that also turns JEV off for the rest of the run.
 fn judge_fit(n_cands: usize, pool: &[usize], excerpts: &[String], task: &str) -> Result<Vec<Option<f64>>, Option<String>> {
     if pool.is_empty() {
         return Err(None);
     }
-    let jev = Jev::load().map_err(|_| None)?;
+    if JEV_FAILED.load(Ordering::Relaxed) {
+        return Err(Some("JEV did not answer earlier in this run: ranked by shared words instead".into()));
+    }
+    let cfg = crate::config::load().map(|c| c.jev).unwrap_or_default();
+    let jev = Jev::from_config(&cfg).map_err(|_| None)?;
     let task = texture::normalize(task);
-    let states: Vec<serde_json::Value> = excerpts
+    let states: Vec<Value> = excerpts
         .iter()
         .map(|x| json!({ "piece_to_write": task, "author_passage": x }))
         .collect();
-    let answers = jev.ask_all(&states, &crate::engine::jev::questions("relevance"));
-    let got: Vec<Option<f64>> = answers.iter().map(|a| a.as_ref().and_then(|a| a.score("fit"))).collect();
-    let failed = got.iter().filter(|f| f.is_none()).count();
-    if failed > 0 {
-        return Err(Some(format!(
-            "JEV did not judge {failed} of {} passages (timeout, bad answer or no connection): ranked by shared words instead",
-            pool.len()
-        )));
-    }
+    let got = fits_within(jev, states, cfg.workers, JEV_BUDGET).map_err(|why| {
+        JEV_FAILED.store(true, Ordering::Relaxed);
+        Some(why)
+    })?;
     let mut fits = vec![None; n_cands];
     for (&i, f) in pool.iter().zip(got) {
-        fits[i] = f.map(|f| f.min(3.0));
+        fits[i] = Some(f);
+    }
+    Ok(fits)
+}
+
+/// Each state's fit, asked `workers` at a time. All or nothing (one
+/// unjudged passage sends the pool back to the word ranking), so the first
+/// failure ends the batch, and when `budget` runs out the requests still
+/// out are left to finish or time out in the background (an answer that
+/// lands is cached for the next run).
+fn fits_within(jev: Jev, states: Vec<Value>, workers: usize, budget: Duration) -> Result<Vec<f64>, String> {
+    let n = states.len();
+    let shared = Arc::new((jev, states, crate::engine::jev::questions("relevance")));
+    let next = Arc::new(AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let (tx, rx) = mpsc::channel();
+    for _ in 0..workers.clamp(1, 12).min(n) {
+        let (shared, next, stop, tx) = (shared.clone(), next.clone(), stop.clone(), tx.clone());
+        std::thread::spawn(move || {
+            let (jev, states, questions) = &*shared;
+            while !stop.load(Ordering::Relaxed) {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                if i >= states.len() {
+                    break;
+                }
+                let fit = jev.ask(&states[i], questions).and_then(|a| a.score("fit"));
+                if tx.send((i, fit)).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+    drop(tx);
+    let deadline = Instant::now() + budget;
+    let mut fits = vec![0.0; n];
+    for _ in 0..n {
+        let why = match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok((i, Some(f))) => {
+                fits[i] = f.min(3.0);
+                continue;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                format!("JEV did not judge the passages within {} s (slow or no connection)", budget.as_secs())
+            }
+            Ok((_, None)) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                "JEV did not judge every passage (bad answer or no connection)".to_string()
+            }
+        };
+        stop.store(true, Ordering::Relaxed);
+        return Err(format!("{why}: ranked by shared words instead"));
     }
     Ok(fits)
 }

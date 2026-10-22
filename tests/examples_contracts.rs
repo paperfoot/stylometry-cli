@@ -10,7 +10,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
 use serde_json::Value;
@@ -28,6 +28,8 @@ enum Mode {
     BadJson,
     /// Answers after the client's timeout.
     Slow,
+    /// Takes the request and answers after 30 s (a hanging API).
+    Hang,
 }
 
 /// Fit the mock gives a passage: by which essay's topic word it holds.
@@ -102,6 +104,10 @@ fn answer(mut s: TcpStream, mode: Mode, count: &AtomicUsize, longest: &AtomicUsi
             format!(r#"{{"answers":{{"fit":{{"type":"score","score":{fit}}}}}}}"#)
         }
         Mode::BadJson => "not json".to_string(),
+        Mode::Hang => {
+            std::thread::sleep(Duration::from_secs(30));
+            String::new()
+        }
         Mode::Slow => {
             std::thread::sleep(Duration::from_millis(2500));
             r#"{"answers":{"fit":{"type":"score","score":3}}}"#.to_string()
@@ -144,9 +150,10 @@ fn json_of(mut c: Command, data: &Path, args: &[&str]) -> Value {
     serde_json::from_slice(&out.stdout).unwrap()
 }
 
-/// Eight short essays, each on its own subject: a few topic nouns used in
-/// every paragraph and nowhere else, around shared plain sentences.
-fn essays(dir: &Path) {
+/// Eight essays of `paras` paragraphs (7: one window each), each on its own
+/// subject: a few topic nouns used in every paragraph and nowhere else,
+/// around shared plain sentences.
+fn essays(dir: &Path, paras: usize) {
     let topics: [(&str, [&str; 3]); 8] = [
         ("gardening", ["compost", "seedlings", "trowel"]),
         ("sailing", ["harbor", "mainsail", "tiller"]),
@@ -158,7 +165,7 @@ fn essays(dir: &Path) {
         ("baking", ["sourdough", "starter", "crust"]),
     ];
     for (name, [a, b, c]) in topics {
-        let paras: Vec<String> = (0..7)
+        let paras: Vec<String> = (0..paras)
             .map(|i| {
                 format!(
                     "I keep coming back to the {a}. Most people think the {b} is the hard part, but it is the {c} that \
@@ -173,9 +180,13 @@ fn essays(dir: &Path) {
 }
 
 fn blog_profile(data: &Path) {
+    blog_profile_of(data, 7);
+}
+
+fn blog_profile_of(data: &Path, paras: usize) {
     let corpus = data.join("corpus");
     std::fs::create_dir_all(&corpus).unwrap();
-    essays(&corpus);
+    essays(&corpus, paras);
     json_of(
         bin_offline(),
         data,
@@ -311,7 +322,7 @@ fn fails_open_on_bad_json() {
     let m = mock(Mode::BadJson);
     let v = json_of(bin_jev(&m.url), tmp.path(), &["examples", "ess", "--about", TASK, "-n", "3"]);
     assert_lexical(&v);
-    assert!(notes(&v).contains("JEV did not judge 8 of 8"), "{}", notes(&v));
+    assert!(notes(&v).contains("JEV did not judge every passage"), "{}", notes(&v));
 }
 
 #[test]
@@ -322,6 +333,37 @@ fn fails_open_on_timeout() {
     let v = json_of(bin_jev(&m.url), tmp.path(), &["examples", "ess", "--about", TASK, "-n", "3"]);
     assert_lexical(&v);
     assert!(notes(&v).contains("JEV did not judge"), "{}", notes(&v));
+}
+
+#[test]
+fn a_hanging_server_costs_one_budget_per_run() {
+    // A full pool (24 candidates) and the default 8 s per-request timeout:
+    // without an overall deadline that is three waves of 8 s, and a brief
+    // paid it once per retrieval.
+    let tmp = tempfile::tempdir().unwrap();
+    blog_profile_of(tmp.path(), 28);
+    let m = mock(Mode::Hang);
+    let jev_default_timeout = || {
+        let mut c = bin_jev(&m.url);
+        c.env_remove("STYLOMETRY_JEV__TIMEOUT_MS");
+        c
+    };
+    let start = Instant::now();
+    let v = json_of(jev_default_timeout(), tmp.path(), &["examples", "ess", "--about", TASK, "-n", "3"]);
+    let took = start.elapsed();
+    assert!(v["data"]["candidates"].as_u64().unwrap() >= 24, "{v}");
+    assert_lexical(&v);
+    assert!(notes(&v).contains("within 3 s"), "{}", notes(&v));
+    assert!(took < Duration::from_secs(7), "examples took {took:?}");
+    assert!(m.requests.load(Ordering::SeqCst) <= 8, "one wave of workers, then give up");
+    // The brief retrieves several times; after the first gives up, the rest
+    // of the run keeps the word ranking without asking again.
+    let before = m.requests.load(Ordering::SeqCst);
+    let start = Instant::now();
+    json_of(jev_default_timeout(), tmp.path(), &["guide", "ess", "--about", TASK]);
+    let took = start.elapsed();
+    assert!(took < Duration::from_secs(7), "guide took {took:?}");
+    assert!(m.requests.load(Ordering::SeqCst) - before <= 8, "guide asked again after JEV gave up");
 }
 
 #[test]
