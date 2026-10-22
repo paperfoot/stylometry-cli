@@ -47,6 +47,14 @@ pub struct ReferenceModel {
     /// which mean `k` x 250). Read it through `band_words`.
     #[serde(default)]
     pub words: usize,
+    /// The other posters a short-form voice's model was fit on, when it was
+    /// fit on posts alone (see `calibrate::reference_pool`); empty when it
+    /// was fit on every profile, books included, and in artifacts from
+    /// before form matching. Frozen with a calibration, so scoring knows
+    /// what P(same author) separates the voice from: these posters, or
+    /// merely books.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub posters: Vec<String>,
     /// Word and trigram -> vector position, built on first use (not stored).
     #[serde(skip)]
     index: OnceLock<(HashMap<String, usize>, HashMap<String, usize>)>,
@@ -92,6 +100,7 @@ impl ReferenceModel {
             vocab,
             k: (words / BASE_CHUNK_WORDS).max(1),
             words: words.max(1),
+            posters: Vec::new(),
             index: OnceLock::new(),
         };
 

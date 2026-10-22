@@ -329,31 +329,88 @@ fn social_profile_calibrates_on_pooled_posts_and_compare_pools_a_batch() {
     assert!(second > 1 && second % 2 == 1, "second window starts on a post's first line: {second}");
 }
 
+/// A short-form imposter: `n` posts in `vocab` (offset by `seed`).
+fn build_poster(data: &Path, corpus: &Path, name: &str, vocab: &[&str], n: usize, seed: usize) {
+    let f = corpus.join(format!("{name}.txt"));
+    std::fs::write(&f, posts(vocab, n, seed)).unwrap();
+    bin()
+        .env("STYLOMETRY_DATA_DIR", data)
+        .args(["profile", "build", name, "--register", "social", "--background", "--corpus"])
+        .arg(&f)
+        .assert()
+        .success();
+}
+
+/// Three posters, in the books' vocabularies B, C, D.
+fn three_posters(data: &Path, corpus: &Path) {
+    for (name, vocab) in [("pb", &VOCAB_B), ("pc", &VOCAB_C), ("pd", &VOCAB_D)] {
+        build_poster(data, corpus, name, vocab, 120, 3);
+    }
+}
+
 #[test]
 fn other_posters_as_imposters_allow_a_same_author_verdict() {
     let data = tempfile::tempdir().unwrap();
     let corpus = tempfile::tempdir().unwrap();
     social_and_imposters(data.path(), corpus.path());
-    for (name, vocab) in [("pb", &VOCAB_B), ("pc", &VOCAB_C), ("pd", &VOCAB_D)] {
-        let f = corpus.path().join(format!("{name}.txt"));
-        std::fs::write(&f, posts(vocab, 120, 3)).unwrap();
-        bin()
-            .env("STYLOMETRY_DATA_DIR", data.path())
-            .args(["profile", "build", name, "--register", "social", "--background", "--corpus"])
-            .arg(&f)
-            .assert()
-            .success();
-    }
+    three_posters(data.path(), corpus.path());
     // Fit against the three posters only (books are not this voice's rivals).
     let j = run_json(data.path(), &["calibrate", "x"], None);
     assert_eq!(j["data"]["imposters"], 3);
-    assert!(!j["data"]["warnings"].to_string().contains("short-form imposter"));
+    let warnings = j["data"]["warnings"].to_string();
+    assert!(!warnings.contains("separates posts from books"), "{warnings}");
 
     let j = run_json(data.path(), &["compare", "-", "--profile", "x"], Some(posts(&VOCAB_A, 10, 7)));
     assert_eq!(j["data"]["verdict"], "same_author", "{}", j["data"]);
+    assert_eq!(j["data"]["nearest_profile"], "x");
     let j = run_json(data.path(), &["compare", "-", "--profile", "x"], Some(posts(&VOCAB_C, 10, 7)));
     assert_eq!(j["data"]["verdict"], "different_author");
     assert_eq!(j["data"]["nearest_profile"], "pc");
+}
+
+#[test]
+fn a_books_only_calibration_stays_guarded_after_posters_are_added() {
+    // Calibrated before any other poster existed, P(same author) separates
+    // posts from books. Adding posters without re-calibrating must not turn
+    // that into same_author (it did: 18 of 19 batches of an unseen X author).
+    let data = tempfile::tempdir().unwrap();
+    let corpus = tempfile::tempdir().unwrap();
+    social_and_imposters(data.path(), corpus.path());
+    run_json(data.path(), &["calibrate", "x"], None);
+    three_posters(data.path(), corpus.path());
+
+    let j = run_json(data.path(), &["compare", "-", "--profile", "x"], Some(posts(&VOCAB_A, 10, 7)));
+    let d = &j["data"];
+    assert!(d["p_same_author"].as_f64().unwrap() > 0.65, "{d}");
+    assert_eq!(d["calibration_stale"], true);
+    assert_eq!(d["verdict"], "inconclusive", "{d}");
+    assert!(d["warnings"].to_string().contains("calibrated against books only"), "{d}");
+    let next = j["metadata"]["next"].to_string();
+    assert!(next.contains("calibrate x"), "{next}");
+
+    // Re-calibrated against the posters, the same batch verifies.
+    run_json(data.path(), &["calibrate", "x"], None);
+    let j = run_json(data.path(), &["compare", "-", "--profile", "x"], Some(posts(&VOCAB_A, 10, 7)));
+    assert_eq!(j["data"]["verdict"], "same_author", "{}", j["data"]);
+}
+
+#[test]
+fn a_posts_calibration_gone_stale_withholds_same_author() {
+    // A poster added after calibrating was never an imposter: until
+    // re-calibration, a batch that passes is reported inconclusive.
+    let data = tempfile::tempdir().unwrap();
+    let corpus = tempfile::tempdir().unwrap();
+    social_and_imposters(data.path(), corpus.path());
+    three_posters(data.path(), corpus.path());
+    run_json(data.path(), &["calibrate", "x"], None);
+    build_poster(data.path(), corpus.path(), "pe", &VOCAB_B, 120, 11);
+
+    let j = run_json(data.path(), &["compare", "-", "--profile", "x"], Some(posts(&VOCAB_A, 10, 7)));
+    let d = &j["data"];
+    assert_eq!(d["calibration_stale"], true);
+    assert!(d["p_same_author"].as_f64().unwrap() > 0.65, "{d}");
+    assert_eq!(d["verdict"], "inconclusive", "{d}");
+    assert!(d["warnings"].to_string().contains("pe added since calibration, never an imposter"), "{d}");
 }
 
 #[test]

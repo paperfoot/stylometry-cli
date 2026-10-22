@@ -13,6 +13,12 @@
 //! scored as one text (one 40-word post says nothing about authorship; ten
 //! of them, ~400 words, start to), the same way calibration pools a
 //! short-form profile's posts into windows.
+//!
+//! A posts voice is told apart from other posters, not from books, and
+//! that is weak at batch length (AUC ~0.8 at 250 words). So same_author
+//! needs a calibration fit against 3+ other posters (the frozen model
+//! records them) and still current; otherwise the verdict is
+//! inconclusive.
 
 use serde::Serialize;
 
@@ -165,10 +171,14 @@ pub fn voice_match(target: &Profile, all: &[Profile], text: &str) -> Result<Voic
                 .filter(|&w| target.windows(w).len() >= 3)
                 .collect();
             let bw = pick_band(&lens, words);
-            live = ReferenceModel::build(&calibrate::reference_pool(target, &refs), DEFAULT_MFW, DEFAULT_TRIGRAMS, bw);
+            live = calibrate::reference_model(target, &refs, bw);
             (&live, None, None)
         }
     };
+    // Fit on posts alone (3+ other posters): the verifier separates this
+    // person from other posters. Otherwise, for a posts voice, merely posts
+    // from books.
+    let posts_only = !model.posters.is_empty();
     let band_words = model.band_words();
     if words < band_words {
         warnings.push(format!(
@@ -273,18 +283,47 @@ pub fn voice_match(target: &Profile, all: &[Profile], text: &str) -> Result<Voic
                 target.name
             ));
         }
-        let posters = calibrate::short_form_imposters(target, &refs);
-        let books_only = short_form && posters < MIN_SHORT_FORM_IMPOSTERS;
+        // A posts voice earns same_author only when the verifier was fit
+        // against other posters and still matches the profile set; any
+        // reason left here turns same_author into inconclusive.
+        let mut withheld: Vec<String> = Vec::new();
+        let books_only = short_form && !posts_only;
         if books_only {
-            warnings.push(format!(
-                "{} is a short-form voice verified against {posters} other poster(s): P(same author) here separates posts from books, not this person from other posters, so same_author is reported as inconclusive; add 3+ other writers' posts with `{bin} profile build <name> --corpus <their-posts.json> --background`, then `{bin} calibrate {}`",
-                target.name, target.name
-            ));
-        } else if short_form && c.imposters < MIN_IMPOSTERS {
-            warnings.push(format!(
-                "calibrated against only {} other poster(s): unseen posters may pass as same_author; add more with `{bin} profile build <name> --corpus <their-posts.json> --background`, then `{bin} calibrate {}`",
-                c.imposters, target.name
-            ));
+            let posters = calibrate::short_form_imposters(target, &refs);
+            warnings.push(if posters >= MIN_SHORT_FORM_IMPOSTERS {
+                format!(
+                    "{} was calibrated against books only, before {posters} other posters were added: P(same author) here separates posts from books, not this person from other posters, so same_author is reported as inconclusive; re-run `{bin} calibrate {}`",
+                    target.name, target.name
+                )
+            } else {
+                format!(
+                    "{} is a short-form voice verified against {posters} other poster(s): P(same author) here separates posts from books, not this person from other posters, so same_author is reported as inconclusive; add 3+ other writers' posts with `{bin} profile build <name> --corpus <their-posts.json> --background`, then `{bin} calibrate {}`",
+                    target.name, target.name
+                )
+            });
+        } else if short_form {
+            if calibration_stale {
+                let unseen: Vec<&str> = refs
+                    .iter()
+                    .filter(|p| p.name != target.name && p.register.is_short_form() && !model.posters.contains(&p.name))
+                    .map(|p| p.name.as_str())
+                    .collect();
+                withheld.push(if unseen.is_empty() {
+                    format!("the profiles changed since calibration: same_author is withheld until `{bin} calibrate {}`", target.name)
+                } else {
+                    format!(
+                        "{} added since calibration, never an imposter: same_author is withheld until `{bin} calibrate {}`",
+                        unseen.join(", "),
+                        target.name
+                    )
+                });
+            }
+            if c.imposters < MIN_IMPOSTERS {
+                warnings.push(format!(
+                    "calibrated against only {} other poster(s): unseen posters may pass as same_author; add more with `{bin} profile build <name> --corpus <their-posts.json> --background`, then `{bin} calibrate {}`",
+                    c.imposters, target.name
+                ));
+            }
         } else if c.imposters < MIN_IMPOSTERS {
             warnings.push(format!(
                 "calibrated against only {} imposter(s): unseen authors may pass as same_author; run `{bin} background fetch` then `{bin} calibrate {}`",
@@ -297,7 +336,10 @@ pub fn voice_match(target: &Profile, all: &[Profile], text: &str) -> Result<Voic
             ));
         }
         match verdict_from_p(p) {
-            "same_author" if books_only => "inconclusive".to_string(),
+            "same_author" if books_only || !withheld.is_empty() => {
+                warnings.extend(withheld);
+                "inconclusive".to_string()
+            }
             v => v.to_string(),
         }
     } else if names.len() < 2 {

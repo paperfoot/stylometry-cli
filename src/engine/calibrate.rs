@@ -536,10 +536,23 @@ pub fn reference_pool(target: &Profile, refs: &[Profile]) -> Vec<Profile> {
     }
 }
 
+/// The reference model a target is fit and scored in at `words`, built from
+/// `reference_pool`. A posts-only model records its posters, so a frozen
+/// calibration still knows it was matched to posts after profiles change.
+pub fn reference_model(target: &Profile, refs: &[Profile], words: usize) -> ReferenceModel {
+    let mut model = ReferenceModel::build(&reference_pool(target, refs), DEFAULT_MFW, DEFAULT_TRIGRAMS, words);
+    if form_matched(target, refs) {
+        let mut posters: Vec<String> = imposter_pool(target, refs).iter().map(|p| p.name.clone()).collect();
+        posters.sort();
+        model.posters = posters;
+    }
+    model
+}
+
 /// Fit one length band. `refs` are the non-blend profiles (target included)
 /// that define the reference model and supply the imposters.
 pub fn fit_band(target: &Profile, refs: &[Profile], words: usize) -> Option<(BandCalibration, BandReport)> {
-    let model = ReferenceModel::build(&reference_pool(target, refs), DEFAULT_MFW, DEFAULT_TRIGRAMS, words);
+    let model = reference_model(target, refs, words);
     let own = own_deltas(&model, target);
     let centroid = weighted_centroid(&model, target);
     // Negatives per imposter author, so whole authors can be held out.
