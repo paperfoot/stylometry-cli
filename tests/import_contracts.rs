@@ -372,3 +372,32 @@ fn email_txt_files_stay_whole_without_separators() {
     assert_eq!(it.len(), 22, "one item per email file");
     assert!(it.iter().all(|i| i.1.starts_with("Hi Tom,") && i.1.ends_with("Best,\nB")));
 }
+
+/// Casual X-style posts: lowercase start, no final period. Paragraph repair
+/// for broken conversions must not glue them into one item.
+fn casual_posts(n: usize) -> Vec<String> {
+    (0..n)
+        .map(|i| format!("day {i} of {} and honestly it keeps teaching me stuff 🚀", TOPICS[i % TOPICS.len()]))
+        .collect()
+}
+
+#[test]
+fn separated_lowercase_posts_stay_separate_items() {
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("social_sep.txt");
+    std::fs::write(&f, casual_posts(24).join("\n\n---\n\n")).unwrap();
+    let p = build(&tmp.path().join("store"), &f, "sep", &["--register", "social"]);
+    let it = items(&p);
+    assert_eq!(it.len(), 24);
+    assert!(it.iter().all(|i| i.1.starts_with("day ") && !i.1.contains("---")), "{:?}", it.iter().map(|i| &i.1).collect::<Vec<_>>());
+}
+
+#[test]
+#[ignore = "needs commands/profile.rs to call import::read_corpus_as(&corpus, register) (integrator)"]
+fn blank_line_lowercase_posts_stay_separate_items() {
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("social_blank.txt");
+    std::fs::write(&f, casual_posts(24).join("\n\n")).unwrap();
+    let p = build(&tmp.path().join("store"), &f, "blank", &["--register", "social"]);
+    assert_eq!(items(&p).len(), 24);
+}

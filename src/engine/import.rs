@@ -104,7 +104,8 @@ pub fn read_corpus(path: &Path) -> Result<Corpus, AppError> {
 
 /// Read a corpus for a requested register. `Some(Register::Message)` on an
 /// X archive reads the owner's direct messages instead of their posts; any
-/// other register reads posts and leaves DMs out.
+/// other register reads posts and leaves DMs out. A short-form register also
+/// keeps the blank-line boundaries of .md/.txt files (see `clean_plain`).
 pub fn read_corpus_as(path: &Path, register: Option<Register>) -> Result<Corpus, AppError> {
     let single = path.is_file();
     let files = list_files(path)?;
@@ -135,6 +136,7 @@ pub fn read_corpus_as(path: &Path, register: Option<Register>) -> Result<Corpus,
 
     let has_dm_files = files.iter().any(|f| is_dm_file(&base_name(f)));
     let want_dms = has_dm_files && (register == Some(Register::Message) || (single && is_dm_file(&base_name(path))));
+    let short_form = register.is_some_and(Register::is_short_form);
 
     let mut report = ImportReport {
         account: account.as_ref().and_then(|a| a.username.as_ref().map(|u| format!("@{u}"))),
@@ -156,7 +158,7 @@ pub fn read_corpus_as(path: &Path, register: Option<Register>) -> Result<Corpus,
                     let raw = std::fs::read_to_string(f)?;
                     docs.push(Doc {
                         name: name.clone(),
-                        text: text::clean(&raw),
+                        text: clean_plain(&raw, short_form),
                         items: Vec::new(),
                     });
                     None
@@ -466,6 +468,60 @@ fn median_words(items: &[Item]) -> usize {
 }
 
 // ── Splitting plain text into items ─────────────────────────────────────
+
+/// Clean a plain-text file without letting paragraph repair cross an item
+/// boundary. `text::clean` rejoins a block to the one before when that one
+/// lacks final punctuation and this one starts in lowercase (a conversion's
+/// page break). Two boundaries must survive it. Separator lines (`---`,
+/// `***`, `===`) always mark items or scene breaks, so each piece between
+/// them is cleaned on its own and the line itself is kept. For a short-form
+/// register, blank lines too: a casual post with no final period followed
+/// by one starting in lowercase is two posts, not a broken paragraph.
+pub fn clean_plain(raw: &str, short_form: bool) -> String {
+    let clean_piece = |piece: &str| -> String {
+        if short_form {
+            raw_blocks(piece)
+                .iter()
+                .map(|b| text::clean(b).trim().to_string())
+                .filter(|b| !b.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        } else {
+            text::clean(piece).trim().to_string()
+        }
+    };
+    let mut out: Vec<String> = Vec::new();
+    let mut piece: Vec<&str> = Vec::new();
+    for line in raw.lines() {
+        if is_separator_line(line) {
+            out.push(clean_piece(&piece.join("\n")));
+            out.push(line.trim().to_string());
+            piece.clear();
+        } else {
+            piece.push(line);
+        }
+    }
+    out.push(clean_piece(&piece.join("\n")));
+    out.retain(|p| !p.is_empty());
+    out.join("\n\n") + "\n"
+}
+
+/// Blocks of raw text between blank (or whitespace-only) lines.
+fn raw_blocks(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur: Vec<&str> = Vec::new();
+    for line in text.lines().chain(std::iter::once("")) {
+        if line.trim().is_empty() {
+            if !cur.is_empty() {
+                out.push(cur.join("\n"));
+                cur.clear();
+            }
+        } else {
+            cur.push(line);
+        }
+    }
+    out
+}
 
 /// A line of three or more `-`, `*` or `=`: an explicit item boundary.
 pub fn is_separator_line(l: &str) -> bool {
@@ -1398,5 +1454,57 @@ mod tests {
         assert_eq!(split_items_for(email, Register::Message).len(), 1);
         assert_eq!(split_on_separators(blank).len(), 1);
         assert_eq!(split_items(blank).len(), 2, "the register-blind wrapper keeps the old behaviour");
+    }
+
+    /// Casual posts: lowercase start, no final period. `text::clean` alone
+    /// would glue each one onto the one before as a "broken paragraph".
+    fn casual_posts(n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("day {i} of shipping small tools and honestly it keeps teaching me stuff 🚀")).collect()
+    }
+
+    #[test]
+    fn separators_are_hard_boundaries_for_paragraph_repair() {
+        let t = clean_plain(&casual_posts(4).join("\n\n---\n\n"), false);
+        let items = split_items_for(&t, Register::Social);
+        assert_eq!(items.len(), 4, "{t}");
+        assert!(items.iter().all(|i| i.text.starts_with("day ") && !i.text.contains("---")), "{items:?}", items = texts_of(&items));
+        // An email separated by --- whose next one starts in lowercase.
+        let mail = "Hi Tom,\n\nThe draft is attached\n\n---\n\nthanks again for the call, B\n";
+        assert_eq!(split_items_for(&clean_plain(mail, false), Register::Email).len(), 2);
+    }
+
+    #[test]
+    fn short_form_keeps_blank_line_boundaries_long_form_repairs_them() {
+        let raw = casual_posts(24).join("\n\n");
+        assert_eq!(split_items_for(&clean_plain(&raw, true), Register::Social).len(), 24);
+        // Long-form keeps the conversion repair inside each piece.
+        let book = "It was a dark and stormy\n\nnight, and the rain fell.\n\n***\n\nmorning came late.\n";
+        let t = clean_plain(book, false);
+        assert!(t.contains("It was a dark and stormy night, and the rain fell."), "{t}");
+        assert!(t.contains("***\n\nmorning came late."), "a scene break is never glued over: {t}");
+        // Debris is still cleaned in short-form blocks.
+        assert_eq!(clean_plain("it\\'s fine {#id}\n\nok then friend\n", true), "it's fine\n\nok then friend\n");
+    }
+
+    fn texts_of(items: &[Item]) -> Vec<&str> {
+        items.iter().map(|i| i.text.as_str()).collect()
+    }
+
+    fn write(dir: &Path, name: &str, body: &str) -> PathBuf {
+        let p = dir.join(name);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, body).unwrap();
+        p
+    }
+
+    #[test]
+    fn requested_short_form_register_reaches_txt_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = write(tmp.path(), "posts.txt", &casual_posts(24).join("\n\n"));
+        let c = read_corpus_as(&f, Some(Register::Social)).unwrap();
+        assert_eq!(split_items_for(&c.docs[0].text, Register::Social).len(), 24);
+        // Without a register a .txt is prose, and broken paragraphs are repaired.
+        let c = read_corpus(&f).unwrap();
+        assert_eq!(text::paragraphs(&c.docs[0].text).len(), 1);
     }
 }
