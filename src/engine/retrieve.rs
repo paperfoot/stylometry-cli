@@ -37,7 +37,7 @@ pub enum TopicMatch {
 /// novel blend and an X account: below 0.05 the "best" match is shared
 /// stopword-like vocabulary.
 const WEAK: f64 = 0.05;
-const STRONG: f64 = 0.15;
+const STRONG: f64 = 0.12;
 /// MMR trade-off between relevance and novelty.
 const LAMBDA: f64 = 0.7;
 
@@ -442,7 +442,7 @@ pub fn kind_label(k: ItemKind) -> &'static str {
 fn long_candidates(p: &Profile, req: &Request) -> Vec<Cand> {
     let fiction = p.register == Register::Fiction;
     let blog = p.register == Register::Blog;
-    let windows = p.windows(req.window_words);
+    let windows = units(p, req.window_words);
     let defs = metrics::defs(&[]);
     let idx: Vec<usize> = SHAPE_KEYS
         .iter()
@@ -484,6 +484,42 @@ fn long_candidates(p: &Profile, req: &Request) -> Vec<Cand> {
             date: None,
             group: format!("src{src}"),
         });
+    }
+    out
+}
+
+/// Exemplar units of about `words` words that never cross a work (an
+/// exemplar straddling the end of one post and the start of the next
+/// teaches a seam, not a voice): consecutive passages of one source until
+/// the length is reached; a short remainder joins the unit before it, and a
+/// work shorter than the length is one unit on its own.
+fn units(p: &Profile, words: usize) -> Vec<Vec<usize>> {
+    let words = words.max(1) as u32;
+    let mut out: Vec<Vec<usize>> = Vec::new();
+    let mut i = 0;
+    while i < p.chunks.len() {
+        let src = p.chunks[i].source;
+        let mut j = i;
+        while j < p.chunks.len() && p.chunks[j].source == src {
+            j += 1;
+        }
+        let first = out.len();
+        let (mut cur, mut n) = (Vec::new(), 0u32);
+        for k in i..j {
+            cur.push(k);
+            n += p.chunks[k].n_words;
+            if n >= words {
+                out.push(std::mem::take(&mut cur));
+                n = 0;
+            }
+        }
+        if !cur.is_empty() {
+            match out.get_mut(first..).and_then(|w| w.last_mut()) {
+                Some(last) if n * 2 < words => last.extend(cur),
+                _ => out.push(cur),
+            }
+        }
+        i = j;
     }
     out
 }
@@ -635,6 +671,31 @@ fn mix_dialogue(cands: &[Cand], score: &[f64], picks: &mut [usize]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn units_never_cross_works() {
+        let doc = |name: &str, n: usize| crate::engine::text::Doc {
+            name: name.into(),
+            text: (0..n)
+                .map(|i| format!("Paragraph {i} is a plain sentence with some words in it, and then another clause follows here."))
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+            items: Vec::new(),
+        };
+        let reg = Some((Register::Blog, "test".to_string()));
+        let p = Profile::build_with(
+            "t",
+            &[doc("a.md", 60), doc("b.md", 14), doc("c.md", 60)],
+            crate::engine::profile::ProfileKind::Author,
+            reg,
+            1,
+        )
+        .unwrap();
+        let us = units(&p, 500);
+        assert!(us.iter().all(|u| u.iter().all(|&i| p.chunks[i].source == p.chunks[u[0]].source)));
+        // The short work is one unit of its own.
+        assert!(us.iter().any(|u| p.chunks[u[0]].source == 1));
+    }
 
     #[test]
     fn stems_meet() {

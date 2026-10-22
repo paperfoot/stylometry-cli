@@ -753,8 +753,12 @@ fn is_list(para: &str) -> bool {
     t.starts_with("- ") || t.starts_with("* ") || t.split_once(". ").is_some_and(|(n, _)| !n.is_empty() && n.len() <= 2 && n.chars().all(|ch| ch.is_ascii_digit()))
 }
 
+/// A piece's prose paragraphs: no headings, list blocks or title lines.
 fn prose_paras<'a>(w: &[&'a String]) -> Vec<&'a String> {
-    w.iter().copied().filter(|para| !is_heading(para) && !is_list(para)).collect()
+    w.iter()
+        .copied()
+        .filter(|para| !is_heading(para) && !is_list(para) && count(para) >= 8)
+        .collect()
 }
 
 fn first_sentences(para: &str, n: usize) -> String {
@@ -764,7 +768,9 @@ fn first_sentences(para: &str, n: usize) -> String {
 fn openings_closings(c: &Ctxt) -> Vec<Section> {
     let ws = works(c.p);
     let mut out = Vec::new();
-    if ws.len() < 3 {
+    // Openings need several real pieces; a book split into a few
+    // sections has none worth averaging.
+    if ws.len() < 5 {
         return out;
     }
     let firsts: Vec<&String> = ws.iter().filter_map(|w| prose_paras(w).first().copied()).collect();
