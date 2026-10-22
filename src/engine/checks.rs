@@ -691,7 +691,7 @@ fn word_hits(d: &Draft, target: &Profile, concepts: &[Concept], avoided: &[voice
             h.excerpt = d.excerpt_at(i, 1);
             h.severity = if mixes { 40.0 } else { 50.0 };
             h.alt = Some(c.preferred.clone());
-            h.strong = s == 0.0 && c.total >= 20.0;
+            h.strong = s == 0.0 && c.total >= MIN_CONCEPT_USES;
             out.push(h);
             continue;
         }
@@ -705,6 +705,18 @@ fn word_hits(d: &Draft, target: &Profile, concepts: &[Concept], avoided: &[voice
         }
     }
     out
+}
+
+/// A word finding needs two hits in the draft, or an author who never uses
+/// the word where they had every chance to. One rare-but-used word is what
+/// an unseen piece by the author contains anyway (measured: a dozen per
+/// 3,000-word Hoover chapter), so alone it is noise.
+fn with_evidence(hits: Vec<Hit>) -> Vec<Hit> {
+    let mut per_word: HashMap<String, usize> = HashMap::new();
+    for h in &hits {
+        *per_word.entry(h.key.clone()).or_insert(0) += 1;
+    }
+    hits.into_iter().filter(|h| h.strong || per_word[&h.key] >= 2).collect()
 }
 
 fn off_voice(d: &Draft, i: usize, w: &str, observed: u64, expected: f64, instead: Option<&str>) -> Hit {
@@ -721,7 +733,7 @@ fn off_voice(d: &Draft, i: usize, w: &str, observed: u64, expected: f64, instead
     h.excerpt = d.excerpt_at(i, 1);
     h.severity = 45.0;
     h.alt = instead.map(str::to_string);
-    h.strong = observed == 0 && expected >= 20.0;
+    h.strong = observed == 0 && expected >= 15.0;
     h
 }
 
@@ -1277,7 +1289,7 @@ fn check_long(target: &Profile, guards: &[&Profile], avoid: &[String], draft_tex
     hits.extend(avoid_hits(&d, avoid, &lx.concepts));
     hits.extend(metric_hits(&rows, &ranges.defs, words));
     hits.extend(tell_hits(&d, &lx.rates, &lx.concepts));
-    hits.extend(word_hits(&d, target, &lx.concepts, &lx.avoided));
+    hits.extend(with_evidence(word_hits(&d, target, &lx.concepts, &lx.avoided)));
     hits.extend(structure_hits(&d, &rows));
     // Tense drift: a long draft that sits between the author's modes.
     // Only when the author keeps to one tense per stretch: a dual-timeline
@@ -1540,13 +1552,7 @@ fn check_short(target: &Profile, guards: &[&Profile], avoid: &[String], draft_te
     hits.extend(copy_hits(&d, &guarded, COPY_NGRAM_SHORT, &|len, line| len >= 10 || len as f64 >= 0.5 * item_words_at(line)));
     hits.extend(avoid_hits(&d, avoid, &lx.concepts));
     hits.extend(tell_hits(&d, &lx.rates, &lx.concepts));
-    // Short drafts: a word finding needs two hits or strong author evidence.
-    let wh = word_hits(&d, target, &lx.concepts, &lx.avoided);
-    let mut per_word: HashMap<String, usize> = HashMap::new();
-    for h in &wh {
-        *per_word.entry(h.key.clone()).or_insert(0) += 1;
-    }
-    hits.extend(wh.into_iter().filter(|h| words >= SHORT_DRAFT_WORDS || h.strong || per_word[&h.key] >= 2));
+    hits.extend(with_evidence(word_hits(&d, target, &lx.concepts, &lx.avoided)));
 
     // A batch of posts should vary the way the author's do.
     let mut batch = None;

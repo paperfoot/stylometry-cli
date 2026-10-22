@@ -2075,8 +2075,8 @@ pub fn item_habits(p: &Profile, kind: crate::engine::profile::ItemKind) -> ItemH
 // ── Item typicality (surprisal) ──────────────────────────────────────────────
 
 /// Feature names in `ItemModel::bins` order, for habit rows.
-pub const ITEM_FEATURES: [&str; 15] = [
-    "item_words", "first_line_words", "item_lines", "emoji_per_item", "hashtags_per_item",
+pub const ITEM_FEATURES: [&str; 14] = [
+    "item_words", "first_line_words", "emoji_per_item", "hashtags_per_item",
     "mentions_per_item", "links_per_item", "exclaims_per_item", "questions_per_item",
     "all_caps_words_per_item", "lowercase_start", "ending", "layout", "greeting", "signoff",
 ];
@@ -2114,7 +2114,8 @@ fn bin_of(v: f64, edges: &[f64]) -> usize {
 impl ItemModel {
     pub fn new(items: &[ItemMeasure], weights: &[f64], with_greetings: bool) -> ItemModel {
         let mut words: Vec<f64> = items.iter().map(|m| m.get("item_words")).collect();
-        let mut first: Vec<f64> = items.iter().map(|m| m.get("first_line_words")).collect();
+        // The hook only counts for multi-line items: a one-liner's first line is its length.
+        let mut first: Vec<f64> = items.iter().filter(|m| m.get("item_lines") > 1.0).map(|m| m.get("first_line_words")).collect();
         let mut model = ItemModel {
             word_edges: edges(&mut words, 10),
             line_edges: edges(&mut first, 5),
@@ -2138,8 +2139,8 @@ impl ItemModel {
     fn sizes(&self) -> Vec<usize> {
         let mut s = vec![
             self.word_edges.len() + 1,
-            self.line_edges.len() + 1,
-            4, 4, 4, 4, 3, 4, 3, 3, 2,
+            self.line_edges.len() + 2,
+            4, 4, 4, 3, 4, 3, 3, 2,
             ENDINGS.len(),
             LAYOUTS.len(),
         ];
@@ -2164,8 +2165,7 @@ impl ItemModel {
         };
         let mut b = vec![
             bin_of(m.get("item_words"), &self.word_edges),
-            bin_of(m.get("first_line_words"), &self.line_edges),
-            (m.get("item_lines").max(1.0) as usize - 1).min(3),
+            if m.get("item_lines") > 1.0 { 1 + bin_of(m.get("first_line_words"), &self.line_edges) } else { 0 },
             c("emoji_per_item", 3),
             c("hashtags_per_item", 3),
             c("mentions_per_item", 3),
