@@ -371,11 +371,13 @@ fn plural_kind(k: ItemKind) -> &'static str {
 /// 5–7 numeric targets from the register's headline measures. A measure
 /// at zero across the author's whole range says "never": it goes on one
 /// line instead of taking a row a real target could use, and unmeasured
-/// markup is no target at all.
+/// markup is no target at all. An email's final mark is its sign-off's,
+/// so "ends with . ? ! or …" says nothing about how it is punctuated.
 fn targets(c: &Ctxt, ranges: &metrics::Ranges, title: String) -> Option<Section> {
     let keys = metrics::headline_keys(c.register);
     let (zero, rows): (Vec<&Band>, Vec<&Band>) = keys
         .iter()
+        .filter(|k| **k != "ends_with_punct_share" || ending_is_the_writers(c.p.register))
         .filter_map(|k| ranges.bands.iter().find(|b| b.key == *k))
         .filter(|b| !b.unmeasured)
         .partition(|b| b.low == 0.0 && b.high == 0.0);
@@ -691,6 +693,13 @@ struct Hand {
     loose: Vec<String>,
 }
 
+/// Whether an item's last mark is the writer's: an email ends on its
+/// sign-off ("Best,\nBoris"), so "no final full stop" there is the name,
+/// not a loose hand.
+fn ending_is_the_writers(register: Register) -> bool {
+    register != Register::Email
+}
+
 const DOUBLED: [&str; 4] = ["..", "!!", "??", "?!"];
 
 /// Doubled marks in a text, in `DOUBLED` order. A run of three or more dots
@@ -755,7 +764,7 @@ fn hand_of(c: &Ctxt, habits: Option<&ItemHabits>) -> Hand {
         if lower >= 0.08 {
             loose.push(format!("lowercase starts ({})", pct(lower)));
         }
-        let bare = habits.map_or(0.0, |h| share_of(&h.endings, "none"));
+        let bare = habits.filter(|_| ending_is_the_writers(p.register)).map_or(0.0, |h| share_of(&h.endings, "none"));
         if bare >= 0.08 {
             loose.push(format!("no final full stop ({} of {})", pct(bare), item_noun(c)));
         }

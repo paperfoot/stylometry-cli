@@ -303,6 +303,35 @@ fn briefs_carry_typography_mechanics_and_giveaways() {
     }
 }
 
+/// Edited emails: every sentence ends on a full stop, every email on
+/// "Best,\nBoris". The item ends on the name, so its missing full stop is
+/// the sign-off's, not a loose hand: the brief must not call the writer
+/// informal for it, nor list "ends with . ? ! or …" as a zero.
+#[test]
+fn email_sign_offs_are_not_a_missing_full_stop() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (data, corpus) = (tmp.path().join("data"), tmp.path().join("mail"));
+    std::fs::create_dir_all(&corpus).unwrap();
+    let names = ["Sam", "Priya", "Tom", "Lena", "Marco", "Ada"];
+    let mails: Vec<String> = (0..60)
+        .map(|i| {
+            format!(
+                "Hi {},\n\nThank you for sending the {} over. I have read it carefully and the terms look fine to me. \
+                 Could you confirm the date before Friday? I would like to tell the team. Reference {i}.\n\nBest,\nBoris",
+                names[i % names.len()],
+                NOUNS[i % NOUNS.len()]
+            )
+        })
+        .collect();
+    std::fs::write(corpus.join("mail.txt"), mails.join("\n---\n")).unwrap();
+    build(&data, "mailer", &corpus, "email");
+    let md = markdown(&run_json(&data, &["guide", "mailer"]));
+    assert!(md.contains("Sign-offs:"), "{md}");
+    assert!(!md.contains("no final full stop"), "{md}");
+    assert!(!md.contains("ends with . ? ! or"), "{md}");
+    assert!(!md.contains("Polish: informal"), "{md}");
+}
+
 // ── examples ────────────────────────────────────────────────────────────────
 
 #[test]
