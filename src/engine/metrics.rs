@@ -908,6 +908,26 @@ pub fn apostrophes_at(t: &str) -> Vec<(usize, bool)> {
         .collect()
 }
 
+/// The ellipsis starting at char `i`, if any: its form and its length in
+/// chars. A single "." is a full stop.
+fn ellipsis_at(cs: &[(usize, char)], i: usize) -> Option<(&'static str, usize)> {
+    match cs[i].1 {
+        '\u{2026}' => Some(("\u{2026}", 1)),
+        '.' => {
+            let run = cs[i..].iter().take_while(|x| x.1 == '.').count();
+            let spaced = run == 1
+                && cs.get(i + 1..i + 5).is_some_and(|w| w[0].1 == ' ' && w[1].1 == '.' && w[2].1 == ' ' && w[3].1 == '.');
+            match run {
+                _ if spaced => Some((". . .", 5)),
+                2 => Some(("..", 2)),
+                r if r >= 3 => Some(("...", r)),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Ellipsis forms in a text, in order, with byte offsets: "…", "...",
 /// ". . ." or ".." (the two-dot joiner of casual posts).
 pub fn ellipsis_forms(t: &str) -> Vec<(&'static str, usize)> {
@@ -915,30 +935,77 @@ pub fn ellipsis_forms(t: &str) -> Vec<(&'static str, usize)> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < cs.len() {
+        match ellipsis_at(&cs, i) {
+            Some((form, len)) => {
+                out.push((form, cs[i].0));
+                i += len;
+            }
+            None => i += 1,
+        }
+    }
+    out
+}
+
+/// `t` with every ellipsis set as "…", and for each byte of the result the
+/// byte of `t` it stands for (plus one past the end). UAX#29 ends a sentence
+/// after "..." but not after "…", so the same words typed with dots would
+/// split into more, shorter sentences: a glyph counted again as rhythm and
+/// as tidy beats. The typography finding reports the glyph; the sentence
+/// measures see one form.
+pub fn unify_ellipses(t: &str) -> (String, Vec<usize>) {
+    let cs: Vec<(usize, char)> = t.char_indices().collect();
+    let mut out = String::with_capacity(t.len());
+    let mut map = Vec::with_capacity(t.len() + 1);
+    let mut i = 0;
+    while i < cs.len() {
         let (at, c) = cs[i];
-        if c == '\u{2026}' {
-            out.push(("\u{2026}", at));
-            i += 1;
-            continue;
+        match ellipsis_at(&cs, i) {
+            Some((_, len)) => {
+                out.push('\u{2026}');
+                map.extend([at; 3]);
+                i += len;
+            }
+            None => {
+                out.push(c);
+                map.extend(at..at + c.len_utf8());
+                i += 1;
+            }
         }
-        if c != '.' {
-            i += 1;
-            continue;
+    }
+    map.push(t.len());
+    (out, map)
+}
+
+fn has_dotted_ellipsis(p: &str) -> bool {
+    p.contains("..") || p.contains(". . .")
+}
+
+/// A paragraph's sentences as the measures split them: `text::sentences_for`
+/// with ellipses unified, so "..." and "…" give the same sentences.
+pub fn sentences_of(p: &str, short_form: bool) -> Vec<String> {
+    if has_dotted_ellipsis(p) {
+        text::sentences_for(&unify_ellipses(p).0, short_form)
+    } else {
+        text::sentences_for(p, short_form)
+    }
+}
+
+/// `sentences_of`, each sentence as written in `p` with its byte offset
+/// there (a draft's findings quote and locate the draft's own text).
+pub fn sentences_at(p: &str, short_form: bool) -> Vec<(usize, String)> {
+    let (u, map) = unify_ellipses(p);
+    let mut cursor = 0;
+    let mut out = Vec::new();
+    for s in text::sentences_for(&u, short_form) {
+        match u[cursor..].find(s.as_str()) {
+            Some(o) => {
+                let (start, end) = (cursor + o, cursor + o + s.len());
+                out.push((map[start], p[map[start]..map[end]].to_string()));
+                cursor = end;
+            }
+            // Glued across a run of spaces: keep the unified text.
+            None => out.push((map[cursor], s)),
         }
-        let run = cs[i..].iter().take_while(|x| x.1 == '.').count();
-        let spaced = run == 1
-            && cs.get(i + 1..i + 5).is_some_and(|w| w[0].1 == ' ' && w[1].1 == '.' && w[2].1 == ' ' && w[3].1 == '.');
-        if spaced {
-            out.push((". . .", at));
-            i += 5;
-            continue;
-        }
-        match run {
-            2 => out.push(("..", at)),
-            r if r >= 3 => out.push(("...", at)),
-            _ => {}
-        }
-        i += run;
     }
     out
 }
@@ -1197,7 +1264,7 @@ pub fn measure_named(all_paragraphs: &[String], function_words: &[String], short
     let mut seq: Vec<Vec<String>> = Vec::new();
 
     for p in paragraphs {
-        let sents = text::sentences_for(p, short_form);
+        let sents = sentences_of(p, short_form);
         // No polish run crosses a paragraph (a change of speaker, a new post).
         if !seq.is_empty() {
             seq.push(Vec::new());
@@ -1242,7 +1309,7 @@ pub fn measure_named(all_paragraphs: &[String], function_words: &[String], short
         }
         let narr = narration(p);
         narr_q += narr.matches('?').count();
-        for s in text::sentences_for(&narr, short_form) {
+        for s in sentences_of(&narr, short_form) {
             let st = text::word_tokens(&s);
             let Some(first) = st.first() else { continue };
             narr_sents += 1;
@@ -1806,6 +1873,28 @@ mod tests {
         assert_eq!((joined.triplets.len(), joined.anaphora.len()), (1, 1));
         let split = polish(&[toks(&["Same booth.", "Same dinner."]), vec![Vec::new()], toks(&["Same kiss."])].concat());
         assert_eq!(split, Polish::default());
+    }
+
+    #[test]
+    fn the_ellipsis_glyph_does_not_change_the_sentences() {
+        let dots = "\u{201C}I don\u{2019}t know... Maybe it\u{2019}s fine... Maybe it isn\u{2019}t. . . We\u{2019}ll see.. He\u{2019}s late.\u{201D}\n\n\
+                    I stare at him for a long moment, and the room feels smaller than it did a minute ago.";
+        let glyph = dots.replace("...", "\u{2026}").replace(". . .", "\u{2026}").replace("..", "\u{2026}");
+        let (a, b) = (measure(&paras(dots), &[]), measure(&paras(&glyph), &[]));
+        for key in ["sentence_words_mean", "short_sentence_share", "short_triplets_per_1k", "anaphora_runs_per_1k", "opener_i_share"] {
+            assert_eq!(get(&a, key), get(&b, key), "{key} moved with the glyph");
+        }
+        assert_eq!(get(&a, "short_triplets_per_1k"), 0.0, "one trailing line of speech is not a run of beats");
+        assert_eq!(sentences_of(dots, false), sentences_of(&glyph, false));
+        // Located and quoted as written in the draft.
+        let p = "Wait... Who is it? Fine. . . ok";
+        let at = sentences_at(p, true);
+        assert_eq!(at.iter().map(|s| s.1.as_str()).collect::<Vec<_>>(), vec!["Wait...", "Who is it?", "Fine. . .", "ok"]);
+        assert_eq!(at.iter().map(|s| s.0).collect::<Vec<_>>(), vec![0, 8, 19, 29]);
+        let (u, map) = unify_ellipses("a...b. . .c..d\u{2026}e");
+        assert_eq!(u, "a\u{2026}b\u{2026}c\u{2026}d\u{2026}e");
+        assert_eq!(map.len(), u.len() + 1);
+        assert_eq!([map[1], map[4], map[5], map[8], map[9], map[12], map[13], map[16], map[17]], [1, 4, 5, 10, 11, 13, 14, 17, 18]);
     }
 
     #[test]

@@ -431,21 +431,17 @@ impl<'a> Draft<'a> {
         (0..self.paragraphs.len()).flat_map(|pi| self.paragraph_sentences(pi, short_form)).collect()
     }
 
-    /// Paragraph `pi`'s sentences, as the measures split them, each as
-    /// (1-based line, words, text). Headings and code have none.
+    /// Paragraph `pi`'s sentences, as the measures split them (ellipses
+    /// unified), each as written: (1-based line, words, text). Headings and
+    /// code have none.
     fn paragraph_sentences(&self, pi: usize, short_form: bool) -> Vec<(usize, usize, String)> {
         let para = &self.paragraphs[pi].0;
         if matches!(metrics::block_kind(para), metrics::Block::Heading | metrics::Block::Fence) {
             return Vec::new();
         }
-        let mut cursor = 0;
-        text::sentences_for(para, short_form)
+        metrics::sentences_at(para, short_form)
             .into_iter()
-            .map(|s| {
-                let off = para[cursor..].find(s.as_str()).map(|o| o + cursor).unwrap_or(cursor);
-                cursor = off;
-                (self.line_of(pi, off), text::count_words(&metrics::strip_links(&s)), s)
-            })
+            .map(|(off, s)| (self.line_of(pi, off), text::count_words(&metrics::strip_links(&s)), s))
             .collect()
     }
 

@@ -687,3 +687,25 @@ fn polish_runs_stop_at_paragraphs_so_speakers_and_posts_are_never_one_run() {
     let j = check_text(data.path(), "bo", &own.join("\n---\n"), &[]);
     assert_eq!(row(&j, "short_triplets_per_1k")["value"], 0.0, "two beats a post at most: {}", row(&j, "short_triplets_per_1k"));
 }
+
+#[test]
+fn the_ellipsis_glyph_is_typography_not_rhythm() {
+    let data = tempfile::tempdir().unwrap();
+    let corpus = tempfile::tempdir().unwrap();
+    build_fiction(data.path(), corpus.path());
+
+    let speech = "\"I don't know... Maybe it's fine... Maybe it isn't... We'll see what happens when he gets home.\"\n\n";
+    let mut dots = String::new();
+    for k in 0..4 {
+        dots.push_str(speech);
+        dots.push_str(&author_prose(1100 + k, 120));
+    }
+    let glyph = dots.replace("...", "\u{2026}");
+    let (a, b) = (check_text(data.path(), "ann", &dots, &[]), check_text(data.path(), "ann", &glyph, &[]));
+    for key in ["sentence_words_mean", "short_sentence_share", "short_triplets_per_1k", "anaphora_runs_per_1k"] {
+        assert_eq!(row(&a, key)["value"], row(&b, key)["value"], "{key} moved with the glyph");
+    }
+    for j in [&a, &b] {
+        assert!(!findings_of(j, "structure").iter().any(|f| f["excerpts"].to_string().contains("Maybe it")), "{}", j["data"]["findings"]);
+    }
+}
