@@ -126,12 +126,6 @@ pub struct ItemMeta {
     pub media: bool,
 }
 
-impl ItemMeta {
-    pub fn is_reply(&self) -> bool {
-        self.kind == ItemKind::Reply
-    }
-}
-
 /// Below this many within-work windows, `windows` pools across works.
 pub const MIN_WINDOWS: usize = 20;
 
@@ -268,6 +262,7 @@ impl Profile {
         Profile::build_with(name, docs, kind, None, MIN_CHUNKS)
     }
 
+    #[cfg(test)]
     /// `build` with a custom minimum passage count. Ad-hoc analysis of a
     /// single draft (never saved, never calibrated) accepts one passage.
     pub fn build_min(
@@ -340,7 +335,7 @@ impl Profile {
             for (wname, wtext) in works {
                 let sections: Vec<Vec<String>> = split_sections(&wtext)
                     .iter()
-                    .map(|sec| text::paragraphs(sec))
+                    .map(|sec| text::paragraphs_with(sec, register == Register::Blog))
                     .filter(|p| !p.is_empty())
                     .collect();
                 let words: usize = sections.iter().flatten().map(|p| text::count_words(p)).sum();
@@ -403,7 +398,13 @@ impl Profile {
         let mut metas: Vec<Origin> = Vec::with_capacity(raw_chunks.len());
         for (source, paragraphs, origin) in raw_chunks {
             metas.push(origin);
-            let joined = paragraphs.join("\n\n");
+            // Headings (kept for blogs) are structure, not vocabulary.
+            let joined = paragraphs
+                .iter()
+                .filter(|p| !text::is_heading(p))
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n\n");
             let wc = features::word_counts(&joined);
             let tc = features::trigram_counts(&joined);
             for (k, v) in &wc {
@@ -413,7 +414,7 @@ impl Profile {
             for (k, v) in &tc {
                 *trigram_counts.entry(k.clone()).or_insert(0) += v;
             }
-            for p in &paragraphs {
+            for p in paragraphs.iter().filter(|p| !text::is_heading(p)) {
                 for s in text::sentences(p) {
                     let cased = text::word_tokens_cased(&s);
                     if cased.is_empty() {
@@ -641,6 +642,7 @@ impl Profile {
         t
     }
 
+    #[cfg(test)]
     /// Spans of `k` consecutive base chunks within one source (never across
     /// sources), non-overlapping, in corpus order. Each span is a list of
     /// chunk indices. A source with fewer than `k` chunks yields no span.
@@ -713,6 +715,7 @@ impl Profile {
         out
     }
 
+    #[cfg(test)]
     /// Relative-frequency maps (words, trigrams) of a span of chunks.
     pub fn span_freqs(&self, span: &[usize]) -> (HashMap<String, f64>, HashMap<String, f64>) {
         let mut wc: HashMap<&str, u64> = HashMap::new();

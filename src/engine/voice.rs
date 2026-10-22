@@ -27,7 +27,13 @@ impl<'a> Corpus<'a> {
         let passages = profile
             .chunks
             .iter()
-            .map(|c| c.paragraphs.iter().flat_map(|p| text::word_tokens(p)).collect())
+            .map(|c| {
+                c.paragraphs
+                    .iter()
+                    .filter(|p| !text::is_heading(p))
+                    .flat_map(|p| text::word_tokens(p))
+                    .collect()
+            })
             .collect();
         Corpus { profile, passages }
     }

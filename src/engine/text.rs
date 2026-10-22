@@ -372,9 +372,31 @@ pub fn char_trigrams(text: &str) -> Vec<String> {
 /// blocks (under 5 words) with no sentence-final punctuation ("CHAPTER IV",
 /// "Part Two"), since they are not prose and would distort rhythm stats.
 pub fn paragraphs(text: &str) -> Vec<String> {
+    paragraphs_with(text, false)
+}
+
+/// A markdown heading paragraph ("## Why it matters"), as kept by
+/// `paragraphs_with(.., true)`. Prose measures, vocabulary and sentence
+/// statistics skip these; structure measures count them.
+pub fn is_heading(p: &str) -> bool {
+    let t = p.trim_start();
+    t.starts_with('#') && t.trim_start_matches('#').starts_with(' ')
+}
+
+/// `paragraphs`, optionally keeping markdown headings as their own
+/// paragraphs (one line each): blogs' section structure is part of the
+/// voice and can only be measured if it survives.
+pub fn paragraphs_with(text: &str, keep_headings: bool) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur: Vec<&str> = Vec::new();
-    let mut flush = |cur: &mut Vec<&str>, out: &mut Vec<String>| {
+    let flush = |cur: &mut Vec<&str>, out: &mut Vec<String>| {
+        if cur.is_empty() {
+            return;
+        }
+        if keep_headings && is_heading(cur[0]) {
+            out.push(cur[0].trim().to_string());
+            cur.remove(0);
+        }
         if cur.is_empty() {
             return;
         }

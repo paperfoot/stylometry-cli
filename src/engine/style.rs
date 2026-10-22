@@ -78,7 +78,7 @@ impl StyleCounts {
     /// Count the habits of a passage given as prose paragraphs.
     pub fn of_paragraphs(paragraphs: &[String]) -> StyleCounts {
         let mut c = StyleCounts::default();
-        for p in paragraphs {
+        for p in paragraphs.iter().filter(|p| !text::is_heading(p)) {
             c.paragraphs += 1;
             c.dialogue_words += text::dialogue_words(p) as u64;
             for s in text::sentences(p) {
@@ -114,6 +114,7 @@ impl StyleCounts {
         c
     }
 
+    #[cfg(test)]
     fn per_1k(&self, n: u64) -> f64 {
         if self.words == 0 {
             0.0
@@ -122,6 +123,7 @@ impl StyleCounts {
         }
     }
 
+    #[cfg(test)]
     /// Named rates for reports and comparisons. Punctuation is per 1,000
     /// words; shares are fractions in [0, 1].
     pub fn rates(&self) -> StyleRates {
@@ -156,6 +158,7 @@ impl StyleCounts {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StyleRates {
     pub words: u64,

@@ -1124,27 +1124,6 @@ fn weighted_quantile(pairs: &[(f64, f64)], q: f64) -> f64 {
     pairs[pairs.len() - 1].0
 }
 
-/// Legacy: spans of k = round(window / 250) consecutive passages within one
-/// work, each measured, paired with `p.spans(k)`. Kept for callers that zip
-/// rows with spans; new code uses `window_rows`, which follows
-/// `Profile::windows` (pooling short works, lengths in words).
-pub fn window_measures(p: &Profile, window: usize, function_words: &[String]) -> (usize, Vec<(Vec<f64>, f64)>) {
-    let k = ((window as f64 / crate::engine::profile::BASE_CHUNK_WORDS as f64).round() as usize).max(1);
-    let short = p.register.is_short_form();
-    let rows = p
-        .spans(k)
-        .iter()
-        .map(|span| {
-            let paras: Vec<String> = span
-                .iter()
-                .flat_map(|&i| p.chunks[i].paragraphs.iter().cloned())
-                .collect();
-            let w: f64 = span.iter().map(|&i| p.chunks[i].weight as f64).sum();
-            (measure_for(&paras, function_words, short), w)
-        })
-        .collect();
-    (k, rows)
-}
 
 /// One measured window of the author's text.
 #[derive(Debug, Clone)]
