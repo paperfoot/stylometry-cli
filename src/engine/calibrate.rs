@@ -1,14 +1,18 @@
 //! Turn a Cosine-Delta value into a calibrated P(same author), and measure how
 //! well the verifier separates same-author from different-author samples.
 //!
-//! Calibration is per length band (250 to 4,000 words): Delta's spread
-//! shrinks as passages grow, so a mapping fit on one length is wrong at
-//! another. Per band, labelled data is:
-//! - positives: the target's own passages, each scored against a centroid
-//!   that never saw it — built from the target's OTHER works when it has
-//!   several (a new book is the real use case), else excluding the passage
-//!   and its two neighbours on each side (adjacent passages share topic);
-//! - negatives: every other non-blend profile's passages (background authors
+//! Calibration is per length band (250 to 4,000 words; 250 to 1,000 for
+//! posts and messages): Delta's spread shrinks as passages grow, so a mapping
+//! fit on one length is wrong at another. A band's samples are the profiles'
+//! `windows(words)`: passages of one work for long-form, pooled consecutive
+//! items for short-form (a 500-word window of posts is ~12 posts). Per band,
+//! labelled data is:
+//! - positives: the target's own windows, each scored against a centroid
+//!   that never saw it — built from windows sharing none of its sources when
+//!   the target has several (a new book, or a later quarter of posts, is the
+//!   real use case), else excluding the window and its two neighbours on
+//!   each side (adjacent windows share topic);
+//! - negatives: every other non-blend profile's windows (background authors
 //!   and other voices) against the target's full centroid.
 //!
 //! The logistic is class-balanced (thousands of negatives must not drown a
@@ -21,12 +25,20 @@ use std::collections::HashMap;
 
 use crate::engine::delta::cosine_delta;
 use crate::engine::model::ReferenceModel;
-use crate::engine::profile::{BandCalibration, Calibration, Profile, ProfileKind, now_unix};
+use crate::engine::profile::{BandCalibration, Calibration, Profile, ProfileKind, Register, now_unix};
 use crate::engine::{DEFAULT_MFW, DEFAULT_TRIGRAMS, model};
 use crate::error::AppError;
 
-/// Analysis lengths in base chunks (x 250 words = 250 .. 4,000 words).
-pub const BAND_KS: [usize; 5] = [1, 2, 4, 8, 16];
+/// Analysis lengths in words for long-form writing.
+pub const BAND_WORDS: [usize; 5] = [250, 500, 1000, 2000, 4000];
+/// Short-form bands: pooled windows of posts. A batch an agent checks is
+/// rarely over 1,000 words, and longer pools leave too few windows.
+pub const SHORT_BAND_WORDS: [usize; 3] = [250, 500, 1000];
+
+/// The band lengths a profile of this register is calibrated and scored at.
+pub fn bands_for(register: Register) -> &'static [usize] {
+    if register.is_short_form() { &SHORT_BAND_WORDS } else { &BAND_WORDS }
+}
 /// A band is fit only with at least this much labelled data.
 pub const MIN_POSITIVES: usize = 6;
 pub const MIN_NEGATIVES: usize = 20;
@@ -245,36 +257,57 @@ pub fn probability(delta: f64, slope: f64, intercept: f64) -> f64 {
     sigmoid(intercept + slope * delta)
 }
 
-/// A profile's own passages at one length, each scored against a centroid
-/// that never saw it. `deltas[i]` belongs to `works[i]` (source index) and
-/// carries `weights[i]` (1.0, or the passage's blend weight).
+/// A profile's own windows at one length, each scored against a centroid
+/// that never saw it. `deltas[i]` belongs to `works[i]` (the source holding
+/// most of the window's words) and carries `weights[i]` (1.0, or the
+/// window's blend weight).
 pub struct OwnDeltas {
     pub deltas: Vec<f64>,
     pub works: Vec<u32>,
     pub weights: Vec<f64>,
-    /// True when centroids excluded the passage's whole work.
+    /// True when centroids excluded every window sharing a source with the
+    /// scored one (other works, or other quarters of posts).
     pub cross_work: bool,
 }
 
-/// Passage weights (mean chunk weight per span) and source per span.
-fn span_meta(p: &Profile, k: usize) -> (Vec<f64>, Vec<u32>) {
-    p.spans(k)
-        .iter()
-        .map(|s| {
-            let w = s.iter().map(|&i| p.chunks[i].weight as f64).sum::<f64>() / s.len() as f64;
-            (w, p.chunks[s[0]].source)
-        })
-        .unzip()
+/// One window's weight (mean chunk weight), main source (most words) and
+/// every source it touches (pooled windows can span several).
+struct WindowMeta {
+    weight: f64,
+    work: u32,
+    sources: Vec<u32>,
 }
 
-/// Weighted centroid of a profile's passages in a model's z-space (a blend's
-/// passages count by their share; everyone else's equally).
+fn window_meta(p: &Profile, windows: &[Vec<usize>]) -> Vec<WindowMeta> {
+    windows
+        .iter()
+        .map(|win| {
+            let weight = win.iter().map(|&i| p.chunks[i].weight as f64).sum::<f64>() / win.len().max(1) as f64;
+            let mut by_src: Vec<(u32, u32)> = Vec::new();
+            for &i in win {
+                let c = &p.chunks[i];
+                match by_src.iter_mut().find(|(s, _)| *s == c.source) {
+                    Some(e) => e.1 += c.n_words,
+                    None => by_src.push((c.source, c.n_words)),
+                }
+            }
+            let work = by_src.iter().max_by_key(|(s, n)| (*n, std::cmp::Reverse(*s))).map(|e| e.0).unwrap_or(0);
+            let mut sources: Vec<u32> = by_src.into_iter().map(|e| e.0).collect();
+            sources.sort_unstable();
+            WindowMeta { weight, work, sources }
+        })
+        .collect()
+}
+
+/// Weighted centroid of a profile's windows in a model's z-space (a blend's
+/// windows count by their share; everyone else's equally).
 pub fn weighted_centroid(model: &ReferenceModel, p: &Profile) -> Vec<f64> {
     if p.kind != ProfileKind::Blend {
         return model.centroid(p);
     }
-    let z = model.passage_zvectors(p);
-    let (w, _) = span_meta(p, model.k);
+    let wins = model.windows(p);
+    let z: Vec<Vec<f64>> = wins.iter().map(|w| model.zscore(&model.window_vector(p, w))).collect();
+    let w: Vec<f64> = window_meta(p, &wins).iter().map(|m| m.weight).collect();
     weighted_mean(&z, &w, model.vocab.dim())
 }
 
@@ -293,65 +326,107 @@ fn weighted_mean(z: &[Vec<f64>], w: &[f64], dim: usize) -> Vec<f64> {
     m
 }
 
-/// Held-out deltas of a profile's own passages at the model's length. With
-/// at least two works that each have two or more passages, a passage is
-/// scored against the centroid of the other works; otherwise against the
-/// centroid without it and its `NEIGHBOURS` on each side.
+/// Held-out deltas of a profile's own windows at the model's length.
+///
+/// With at least two works (sources: books, posts' quarters) that each hold
+/// two or more windows, a window is scored against the centroid of the
+/// windows that share none of its sources, so a window pooled across two
+/// blog posts never meets either post again. Otherwise (one work, or the
+/// exclusion leaves too few scored windows) against the centroid without it
+/// and its `NEIGHBOURS` on each side.
 pub fn own_deltas(model: &ReferenceModel, p: &Profile) -> OwnDeltas {
-    let z = model.passage_zvectors(p);
-    let (weights, works) = span_meta(p, model.k);
-    let dim = model.vocab.dim();
-    let n = z.len();
+    let wins = model.windows(p);
+    let z: Vec<Vec<f64>> = wins.iter().map(|w| model.zscore(&model.window_vector(p, w))).collect();
+    let meta = window_meta(p, &wins);
     let mut per_work: HashMap<u32, usize> = HashMap::new();
-    for w in &works {
-        *per_work.entry(*w).or_insert(0) += 1;
+    for m in &meta {
+        *per_work.entry(m.work).or_insert(0) += 1;
     }
-    let cross_work = per_work.values().filter(|&&c| c >= 2).count() >= 2;
-
-    // Weighted sums let each held-out centroid be total minus a part.
-    let mut total = vec![0.0; dim];
-    let mut total_w = 0.0;
-    let mut by_work: HashMap<u32, (Vec<f64>, f64)> = HashMap::new();
-    for i in 0..n {
-        let e = by_work.entry(works[i]).or_insert_with(|| (vec![0.0; dim], 0.0));
-        for j in 0..dim {
-            let x = z[i][j] * weights[i];
-            total[j] += x;
-            e.0[j] += x;
+    if per_work.values().filter(|&&c| c >= 2).count() >= 2 {
+        let out = cross_work_deltas(&z, &meta, model.vocab.dim());
+        if out.deltas.len() >= MIN_POSITIVES {
+            return out;
         }
-        total_w += weights[i];
-        e.1 += weights[i];
     }
+    neighbour_deltas(&z, &meta, model.vocab.dim())
+}
 
-    let mut out = OwnDeltas {
-        deltas: Vec::new(),
-        works: Vec::new(),
-        weights: Vec::new(),
-        cross_work,
-    };
+/// Cross-work held-out deltas: windows are grouped by the exact set of
+/// sources they touch, and each group's centroid is the total minus every
+/// group it shares a source with (few groups, so this stays O(windows)).
+fn cross_work_deltas(z: &[Vec<f64>], meta: &[WindowMeta], dim: usize) -> OwnDeltas {
+    let mut groups: Vec<(&[u32], Vec<f64>, f64)> = Vec::new();
+    let mut group_of = Vec::with_capacity(z.len());
+    let (mut total, mut total_w) = (vec![0.0; dim], 0.0);
+    for (v, m) in z.iter().zip(meta) {
+        let g = match groups.iter().position(|g| g.0 == m.sources.as_slice()) {
+            Some(g) => g,
+            None => {
+                groups.push((&m.sources, vec![0.0; dim], 0.0));
+                groups.len() - 1
+            }
+        };
+        group_of.push(g);
+        for j in 0..dim {
+            let x = v[j] * m.weight;
+            groups[g].1[j] += x;
+            total[j] += x;
+        }
+        groups[g].2 += m.weight;
+        total_w += m.weight;
+    }
+    let shares = |a: &[u32], b: &[u32]| a.iter().any(|s| b.binary_search(s).is_ok());
+    let held_out: Vec<Option<Vec<f64>>> = groups
+        .iter()
+        .map(|g| {
+            let (mut sum, mut sw) = (total.clone(), total_w);
+            for h in groups.iter().filter(|h| shares(g.0, h.0)) {
+                for j in 0..dim {
+                    sum[j] -= h.1[j];
+                }
+                sw -= h.2;
+            }
+            (sw > 1e-9).then(|| sum.iter().map(|x| x / sw).collect())
+        })
+        .collect();
+    let mut out = OwnDeltas { deltas: Vec::new(), works: Vec::new(), weights: Vec::new(), cross_work: true };
+    for (i, v) in z.iter().enumerate() {
+        if let Some(c) = &held_out[group_of[i]] {
+            out.deltas.push(cosine_delta(v, c));
+            out.works.push(meta[i].work);
+            out.weights.push(meta[i].weight);
+        }
+    }
+    out
+}
+
+/// Within-work held-out deltas: each window against the centroid without it
+/// and its `NEIGHBOURS` on each side.
+fn neighbour_deltas(z: &[Vec<f64>], meta: &[WindowMeta], dim: usize) -> OwnDeltas {
+    let n = z.len();
+    let (mut total, mut total_w) = (vec![0.0; dim], 0.0);
+    for (v, m) in z.iter().zip(meta) {
+        for j in 0..dim {
+            total[j] += v[j] * m.weight;
+        }
+        total_w += m.weight;
+    }
+    let mut out = OwnDeltas { deltas: Vec::new(), works: Vec::new(), weights: Vec::new(), cross_work: false };
     for i in 0..n {
         let (mut sum, mut sw) = (total.clone(), total_w);
-        if cross_work {
-            let (ws, ww) = &by_work[&works[i]];
+        for o in i.saturating_sub(NEIGHBOURS)..(i + NEIGHBOURS + 1).min(n) {
             for j in 0..dim {
-                sum[j] -= ws[j];
+                sum[j] -= z[o][j] * meta[o].weight;
             }
-            sw -= ww;
-        } else {
-            for o in i.saturating_sub(NEIGHBOURS)..(i + NEIGHBOURS + 1).min(n) {
-                for j in 0..dim {
-                    sum[j] -= z[o][j] * weights[o];
-                }
-                sw -= weights[o];
-            }
+            sw -= meta[o].weight;
         }
         if sw <= 1e-9 {
             continue;
         }
         let c: Vec<f64> = sum.iter().map(|x| x / sw).collect();
         out.deltas.push(cosine_delta(&z[i], &c));
-        out.works.push(works[i]);
-        out.weights.push(weights[i]);
+        out.works.push(meta[i].work);
+        out.weights.push(meta[i].weight);
     }
     out
 }
@@ -391,8 +466,13 @@ fn labelled(pos: &[f64], neg: &[f64]) -> Vec<(f64, bool)> {
 /// contiguous tail (adjacent passages share topic; interleaving would leak).
 fn split_positives(own: &OwnDeltas) -> (Vec<f64>, Vec<f64>) {
     if own.cross_work {
-        let mut order: Vec<u32> = own.works.clone();
-        order.dedup();
+        // Works in first-appearance order (pooled windows can interleave).
+        let mut order: Vec<u32> = Vec::new();
+        for w in &own.works {
+            if !order.contains(w) {
+                order.push(*w);
+            }
+        }
         let want = (own.deltas.len() as f64 * TEST_FRACTION).ceil() as usize;
         let mut test_works: Vec<u32> = Vec::new();
         let mut count = 0;
@@ -414,8 +494,8 @@ fn split_positives(own: &OwnDeltas) -> (Vec<f64>, Vec<f64>) {
 
 /// Fit one length band. `refs` are the non-blend profiles (target included)
 /// that define the reference model and supply the imposters.
-pub fn fit_band(target: &Profile, refs: &[Profile], k: usize) -> Option<(BandCalibration, BandReport)> {
-    let model = ReferenceModel::build(refs, DEFAULT_MFW, DEFAULT_TRIGRAMS, k);
+pub fn fit_band(target: &Profile, refs: &[Profile], words: usize) -> Option<(BandCalibration, BandReport)> {
+    let model = ReferenceModel::build(refs, DEFAULT_MFW, DEFAULT_TRIGRAMS, words);
     let own = own_deltas(&model, target);
     let centroid = weighted_centroid(&model, target);
     // Negatives per imposter author, so whole authors can be held out.
@@ -461,7 +541,7 @@ pub fn fit_band(target: &Profile, refs: &[Profile], k: usize) -> Option<(BandCal
     let (slope, intercept) = fit_logistic(&labelled(&own.deltas, &neg));
     let auc = auc(&own.deltas, &neg);
     let band = BandCalibration {
-        words: k * crate::engine::profile::BASE_CHUNK_WORDS,
+        words,
         slope,
         intercept,
         auc,
@@ -518,16 +598,21 @@ pub fn calibrate(target: &Profile, refs: &[Profile]) -> Result<(Calibration, Vec
     }
     let mut bands = Vec::new();
     let mut reports = Vec::new();
-    for k in BAND_KS {
-        if let Some((b, r)) = fit_band(target, refs, k) {
+    for &words in bands_for(target.register) {
+        if let Some((b, r)) = fit_band(target, refs, words) {
             bands.push(b);
             reports.push(r);
         }
     }
     if bands.is_empty() {
+        let unit = if target.register.is_short_form() {
+            "250-word windows of pooled posts (about 1,500+ words of posts in all)"
+        } else {
+            "passages"
+        };
         return Err(AppError::input(
             format!(
-                "not enough text to calibrate '{}': every length band needs {MIN_POSITIVES}+ of its passages and {MIN_NEGATIVES}+ imposter passages",
+                "not enough text to calibrate '{}': every length band needs {MIN_POSITIVES}+ of its {unit} and {MIN_NEGATIVES}+ imposter windows",
                 target.name
             ),
             format!("Add more of the author's writing: {bin} profile build {} --corpus <folder> --force", target.name),
