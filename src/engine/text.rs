@@ -275,6 +275,54 @@ pub fn sentences(paragraph: &str) -> Vec<String> {
     out
 }
 
+/// Sentences for a register: long-form uses `sentences`; short-form (posts,
+/// messages) splits on every line break and on terminal punctuation followed
+/// by whitespace whatever the next letter's case, because casual writers
+/// type in lowercase ("i think so. tbh it works.") and UAX#29 would glue
+/// those into one sentence. The `"Why?" he asked` repair is kept: a split
+/// right after a closing quote is undone when the next word is lowercase.
+pub fn sentences_for(paragraph: &str, short_form: bool) -> Vec<String> {
+    if !short_form {
+        return sentences(paragraph);
+    }
+    let mut out: Vec<String> = Vec::new();
+    for line in paragraph.lines() {
+        let chars: Vec<char> = line.chars().collect();
+        let mut cur = String::new();
+        let mut i = 0;
+        while i < chars.len() {
+            let c = chars[i];
+            cur.push(c);
+            if matches!(c, '.' | '!' | '?' | '\u{2026}') {
+                // absorb runs of terminal punctuation and closing quotes
+                while i + 1 < chars.len() && matches!(chars[i + 1], '.' | '!' | '?' | '\u{2026}' | '"' | '\u{201D}' | '\u{2019}' | ')') {
+                    i += 1;
+                    cur.push(chars[i]);
+                }
+                let at_ws = i + 1 >= chars.len() || chars[i + 1].is_whitespace();
+                let after_quote = cur.ends_with(['"', '\u{201D}']);
+                let next_lower = chars[i + 1..]
+                    .iter()
+                    .find(|ch| !ch.is_whitespace())
+                    .is_some_and(|ch| ch.is_lowercase());
+                if at_ws && !(after_quote && next_lower) && !ends_with_abbreviation(&cur) {
+                    let t = cur.trim().to_string();
+                    if !t.is_empty() {
+                        out.push(t);
+                    }
+                    cur.clear();
+                }
+            }
+            i += 1;
+        }
+        let t = cur.trim().to_string();
+        if !t.is_empty() {
+            out.push(t);
+        }
+    }
+    out
+}
+
 fn ends_with_abbreviation(s: &str) -> bool {
     let t = s.trim_end();
     if !t.ends_with('.') {
@@ -439,6 +487,14 @@ mod tests {
         assert_eq!(s.len(), 3, "{s:?}");
         assert!(s[0].starts_with("Mr. Smith"));
         assert!(s[1].contains("he asked"));
+    }
+
+    #[test]
+    fn short_form_sentences_split_lowercase_and_lines() {
+        let s = sentences_for("i think so. tbh it works. ok.\nnew line here", true);
+        assert_eq!(s, vec!["i think so.", "tbh it works.", "ok.", "new line here"]);
+        let q = sentences_for("\"why?\" he asked. fine.", true);
+        assert_eq!(q.len(), 2, "{q:?}");
     }
 
     #[test]

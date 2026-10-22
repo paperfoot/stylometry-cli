@@ -603,3 +603,12 @@ mod tests {
         assert!(!tells.contains(&"deep breath"), "bigram inside a trigram hit: {tells:?}");
     }
 }
+
+/// Recurring formulas: word runs of 4+ words the author repeats across at
+/// least 3 distinct items or passages ("new episode of the pod is out").
+/// They are signature phrasing: the brief lists them, and the copy guard
+/// exempts them. FOUNDATION STUB: the GUIDE lane implements it.
+pub fn signature_formulas(p: &Profile, limit: usize) -> Vec<Phrase> {
+    let _ = (p, limit);
+    Vec::new()
+}

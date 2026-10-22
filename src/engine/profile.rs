@@ -86,19 +86,50 @@ impl Register {
     }
 }
 
+/// What a short-form item is in its conversation. Replies, thread parts
+/// and standalone posts are written differently (replies are short and
+/// start mid-thought; thread parts carry an argument; posts have hooks), so
+/// ranges, habits and examples are computed per kind.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ItemKind {
+    #[default]
+    Post,
+    Reply,
+    /// A self-reply continuing the author's own thread.
+    ThreadPart,
+    Quote,
+}
+
 /// Metadata a short-form item may carry from its source export.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ItemMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// The item this one replies to, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    #[serde(default)]
+    pub kind: ItemKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub likes: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reposts: Option<f64>,
+    /// None when the source doesn't report impressions (0 is treated as unknown).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub impressions: Option<f64>,
+    /// ISO-8601 date when parseable, else the source's string.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub date: Option<String>,
+    /// The post carried media (image/video): its engagement isn't the text's.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub reply: bool,
+    pub media: bool,
+}
+
+impl ItemMeta {
+    pub fn is_reply(&self) -> bool {
+        self.kind == ItemKind::Reply
+    }
 }
 
 /// Minimum items for a short-form profile.
@@ -132,9 +163,13 @@ pub struct Chunk {
     /// component's passages sum to its share of the blend.
     #[serde(default = "unit_weight")]
     pub weight: f32,
-    /// Short-form only: the item's source metadata (engagement, date, reply).
+    /// Short-form only: the item's source metadata (kind, engagement, date).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub meta: Option<ItemMeta>,
+    /// Long-form only: index of the chapter/section within its source, so
+    /// per-section modes (POV, tense) can be told apart in dual narratives.
+    #[serde(default)]
+    pub section: u32,
 }
 
 fn unit_weight() -> f32 {
@@ -442,6 +477,7 @@ impl Profile {
                 style: f.style,
                 weight: 1.0,
                 meta,
+                section: 0,
             })
             .collect();
 

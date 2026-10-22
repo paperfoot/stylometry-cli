@@ -919,3 +919,67 @@ mod tests {
         assert_eq!(status(0.5, &b, 1000), Status::OutOfRange);
     }
 }
+
+// ── v0.4 cross-lane contract (CHECK lane owns the bodies) ───────────────────
+
+/// The 6–14 measures a brief and a revision plan lead with for a register.
+/// FOUNDATION STUB: the CHECK lane fills in per-register sets.
+pub fn headline_keys(register: crate::engine::profile::Register) -> &'static [&'static str] {
+    let _ = register;
+    &[
+        "sentence_words_median",
+        "short_sentence_share",
+        "one_sentence_paragraph_share",
+        "dialogue_word_share",
+        "questions_per_1k",
+        "contractions_per_1k",
+    ]
+}
+
+/// A habit the author (almost) never shows: "hashtags: 2 of 640 posts".
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct NeverHabit {
+    pub key: String,
+    pub label: String,
+    pub count: usize,
+    pub of: usize,
+}
+
+/// Per-item habits of a short-form profile for one kind of item: shares of
+/// each form, most common first.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ItemHabits {
+    pub items: usize,
+    pub top_emojis: Vec<(String, f64)>,
+    pub top_hashtags: Vec<(String, f64)>,
+    /// How items end: none, ".", "?", "!", "…", emoji, link.
+    pub endings: Vec<(String, f64)>,
+    /// First one or two words of items.
+    pub openers: Vec<(String, f64)>,
+    /// single_line, one_sentence_per_line, blank_line_blocks, paragraph.
+    pub layouts: Vec<(String, f64)>,
+    pub greetings: Vec<(String, f64)>,
+    pub signoffs: Vec<(String, f64)>,
+    pub never: Vec<NeverHabit>,
+}
+
+/// p15 / p50 / p85 of per-item measures over the author's items of `kind`.
+/// FOUNDATION STUB: the CHECK lane implements it.
+pub fn item_ranges(p: &crate::engine::profile::Profile, kind: crate::engine::profile::ItemKind) -> Ranges {
+    let _ = (p, kind);
+    Ranges {
+        window_words: 0,
+        passages_per_window: 1,
+        windows: 0,
+        directional: true,
+        bands: Vec::new(),
+        defs: Vec::new(),
+    }
+}
+
+/// Habits of the author's items of `kind`.
+/// FOUNDATION STUB: the CHECK lane implements it.
+pub fn item_habits(p: &crate::engine::profile::Profile, kind: crate::engine::profile::ItemKind) -> ItemHabits {
+    let _ = (p, kind);
+    ItemHabits::default()
+}

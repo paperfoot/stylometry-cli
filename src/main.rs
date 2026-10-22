@@ -68,9 +68,20 @@ fn main() {
                 name,
                 corpus,
                 register,
+                since,
                 background,
                 force,
-            } => commands::profile::build(ctx, name, corpus, register.map(Into::into), background, force),
+            } => commands::profile::build(
+                ctx,
+                commands::profile::BuildArgs {
+                    name,
+                    corpus,
+                    register: register.map(Into::into),
+                    since,
+                    background,
+                    force,
+                },
+            ),
             ProfileAction::Blend { name, from, force } => {
                 commands::profile::blend(ctx, name, from, force)
             }
@@ -92,6 +103,7 @@ fn main() {
             for_file,
             about,
             register,
+            as_kind,
             limit,
             window,
             out,
@@ -103,6 +115,7 @@ fn main() {
                 for_file,
                 about,
                 register: register.map(Into::into),
+                as_kind: as_kind.into(),
                 limit,
                 window,
                 out,
@@ -113,7 +126,8 @@ fn main() {
             like,
             about,
             limit,
-        } => commands::examples::run(ctx, profile, like, about, limit),
+            as_kind,
+        } => commands::examples::run(ctx, profile, like, about, limit, as_kind.into()),
         Commands::Check {
             file,
             profile,
@@ -122,6 +136,8 @@ fn main() {
             avoid,
             guard,
             strict,
+            verify,
+            as_kind,
         } => commands::check::run(
             ctx,
             commands::check::CheckArgs {
@@ -132,6 +148,8 @@ fn main() {
                 avoid,
                 guard,
                 strict,
+                verify,
+                as_kind: as_kind.into(),
             },
         ),
         Commands::Export {

@@ -62,21 +62,29 @@ fn print_built(ctx: Ctx, data: &BuiltProfile, verb: &str) -> Result<(), AppError
     })
 }
 
-pub fn build(
-    ctx: Ctx,
-    name: String,
-    corpus: PathBuf,
-    register: Option<Register>,
-    background: bool,
-    force: bool,
-) -> Result<(), AppError> {
+/// Arguments of `profile build`.
+pub struct BuildArgs {
+    pub name: String,
+    pub corpus: PathBuf,
+    pub register: Option<Register>,
+    /// Keep only items dated on/after this ISO day.
+    pub since: Option<String>,
+    pub background: bool,
+    pub force: bool,
+}
+
+pub fn build(ctx: Ctx, a: BuildArgs) -> Result<(), AppError> {
+    let BuildArgs { name, corpus, register, since, background, force } = a;
     if store::exists(&name) && !force {
         return Err(AppError::input(
             format!("profile '{name}' already exists"),
             format!("Pass --force to overwrite: {BIN} profile build {name} --corpus <path> --force"),
         ));
     }
-    let corpus_in = import::read_corpus(&corpus)?;
+    let mut corpus_in = import::read_corpus(&corpus)?;
+    if let Some(day) = &since {
+        import::keep_since(&mut corpus_in, day)?;
+    }
     let kind = if background {
         ProfileKind::Background
     } else {

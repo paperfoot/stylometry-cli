@@ -9,7 +9,7 @@ use std::path::Path;
 use serde_json::Value;
 use walkdir::WalkDir;
 
-use crate::engine::profile::{ItemMeta, Register};
+use crate::engine::profile::{ItemKind, ItemMeta, Register};
 use crate::engine::text::{self, Doc, Item};
 use crate::error::AppError;
 
@@ -123,6 +123,18 @@ pub fn read_corpus(path: &Path) -> Result<Corpus, AppError> {
     Ok(out)
 }
 
+/// Drop dated items before `day` (YYYY-MM-DD). Undated items are kept.
+pub fn keep_since(c: &mut Corpus, day: &str) -> Result<(), AppError> {
+    if day.len() != 10 || day.as_bytes()[4] != b'-' || day.as_bytes()[7] != b'-' {
+        return Err(AppError::input(format!("--since '{day}' is not YYYY-MM-DD"), "Example: --since 2025-01-01"));
+    }
+    for d in &mut c.docs {
+        d.items.retain(|i| i.meta.date.as_deref().is_none_or(|dt| dt.get(..10).is_none_or(|x| x >= day)));
+    }
+    c.docs.retain(|d| !d.items.is_empty() || !d.text.is_empty());
+    Ok(())
+}
+
 fn median_words(items: &[Item]) -> usize {
     let mut w: Vec<usize> = items.iter().map(|i| text::count_words(&i.text)).collect();
     w.sort_unstable();
@@ -196,7 +208,8 @@ fn item_of(o: &Value) -> Option<Item> {
     let reply = o.get("in_reply_to_status_id_str").is_some_and(|v| !v.is_null())
         || o.get("in_reply_to_status_id").is_some_and(|v| !v.is_null())
         || o.get("reply_to").is_some_and(|v| !v.is_null())
-        || o.get("is_reply").and_then(|v| v.as_bool()).unwrap_or(false);
+        || o.get("is_reply").and_then(|v| v.as_bool()).unwrap_or(false)
+        || text.trim_start().starts_with('@');
     Some(Item {
         text: unescape_html(text),
         meta: ItemMeta {
@@ -204,7 +217,8 @@ fn item_of(o: &Value) -> Option<Item> {
             reposts: first_num(metrics, &["retweets", "reposts", "retweet_count", "repost_count", "shares"]),
             impressions: first_num(metrics, &["impressions", "impression_count", "views"]),
             date: first_str(o, &["created_at", "date", "timestamp"]).map(str::to_string),
-            reply,
+            kind: if reply { ItemKind::Reply } else { ItemKind::Post },
+            ..ItemMeta::default()
         },
     })
 }
@@ -326,7 +340,7 @@ mod tests {
         assert_eq!(items[0].text, "Shipping the new build today & it's fast");
         assert_eq!(items[0].meta.likes, Some(12.0));
         assert_eq!(items[0].meta.reposts, Some(3.0));
-        assert!(items[1].meta.reply);
+        assert!(items[1].meta.is_reply());
     }
 
     #[test]

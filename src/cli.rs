@@ -80,6 +80,9 @@ pub enum Commands {
         /// Write the brief for this kind of writing (default: the profile's own register)
         #[arg(long, value_enum)]
         register: Option<RegisterArg>,
+        /// Short-form: brief for posts, replies or threads
+        #[arg(long = "as", value_enum, default_value = "post")]
+        as_kind: KindArg,
         /// Items per word list
         #[arg(short = 'n', long, default_value_t = 30)]
         limit: usize,
@@ -112,6 +115,12 @@ pub enum Commands {
         /// Gate mode: exit 5 with the report in error.details when the check fails
         #[arg(long)]
         strict: bool,
+        /// Also run authorship verification (voice_match; loads every profile, slower): use on the final pass
+        #[arg(long)]
+        verify: bool,
+        /// Short-form: what the draft is (default post); compared against the author's items of that kind
+        #[arg(long = "as", value_enum, default_value = "post")]
+        as_kind: KindArg,
     },
     /// The author's own passages or posts most like what you're writing: few-shot examples for an agent
     Examples {
@@ -126,6 +135,9 @@ pub enum Commands {
         /// How many examples
         #[arg(short = 'n', long, default_value_t = 5)]
         limit: usize,
+        /// Short-form: posts, replies or thread parts
+        #[arg(long = "as", value_enum, default_value = "post")]
+        as_kind: KindArg,
     },
     /// Contrast two voices: what each uses that the other doesn't
     Diff {
@@ -214,6 +226,9 @@ pub enum ProfileAction {
         /// Kind of writing (default: detected from the corpus format and content)
         #[arg(long, value_enum)]
         register: Option<RegisterArg>,
+        /// Only items dated on/after this day (YYYY-MM-DD): keep a long archive to the current voice
+        #[arg(long, value_name = "DATE")]
+        since: Option<String>,
         /// Mark as a background (reference) author rather than a voice to write in
         #[arg(long)]
         background: bool,
@@ -446,6 +461,26 @@ impl From<RegisterArg> for crate::engine::profile::Register {
             RegisterArg::Social => R::Social,
             RegisterArg::Email => R::Email,
             RegisterArg::Message => R::Message,
+        }
+    }
+}
+
+/// Kind of short-form item a command targets.
+#[derive(Clone, Copy, ValueEnum)]
+pub enum KindArg {
+    Post,
+    Reply,
+    /// A part of the author's own thread
+    Thread,
+}
+
+impl From<KindArg> for crate::engine::profile::ItemKind {
+    fn from(k: KindArg) -> Self {
+        use crate::engine::profile::ItemKind as K;
+        match k {
+            KindArg::Post => K::Post,
+            KindArg::Reply => K::Reply,
+            KindArg::Thread => K::ThreadPart,
         }
     }
 }

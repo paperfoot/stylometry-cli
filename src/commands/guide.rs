@@ -67,6 +67,8 @@ pub struct GuideArgs {
     pub about: Option<String>,
     /// Template override (default: the profile's register).
     pub register: Option<crate::engine::profile::Register>,
+    /// Short-form: which kind of item the brief is for.
+    pub as_kind: crate::engine::profile::ItemKind,
     pub limit: usize,
     pub window: usize,
     pub out: Option<PathBuf>,

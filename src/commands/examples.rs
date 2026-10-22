@@ -9,6 +9,13 @@ use crate::error::AppError;
 use crate::output::Ctx;
 
 #[allow(unused_variables)]
-pub fn run(ctx: Ctx, profile: String, like: Option<PathBuf>, about: Option<String>, limit: usize) -> Result<(), AppError> {
+pub fn run(
+    ctx: Ctx,
+    profile: String,
+    like: Option<PathBuf>,
+    about: Option<String>,
+    limit: usize,
+    as_kind: crate::engine::profile::ItemKind,
+) -> Result<(), AppError> {
     Err(AppError::InvalidInput("`examples` is not implemented yet".into()))
 }

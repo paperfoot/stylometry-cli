@@ -27,6 +27,10 @@ pub struct CheckArgs {
     pub guard: Vec<String>,
     /// Gate mode: a failed check returns `AppError::CheckFailed(report)`.
     pub strict: bool,
+    /// Run voice_match (loads every profile); off while iterating.
+    pub verify: bool,
+    /// Short-form: the kind of item the draft is.
+    pub as_kind: crate::engine::profile::ItemKind,
 }
 
 /// Out-of-range metrics allowed before the draft fails.
