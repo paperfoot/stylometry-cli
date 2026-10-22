@@ -140,7 +140,7 @@ pub fn unavailable_reason(cfg: &JevConfig) -> Option<String> {
     }
     if resolve_key(cfg).is_none() {
         return Some(format!(
-            "no key: set {} or jev.key_command in `stylometry config path`",
+            "no key: set {}, store it in AKM as TYPESAFE_API_KEY, or set jev.key_command in `stylometry config path`",
             cfg.key_env
         ));
     }
@@ -351,18 +351,38 @@ fn answers_of(body: &str, questions: &Value) -> Option<Answers> {
     ids.keys().all(|id| a.value(id).is_some() || a.0.get(id).and_then(|x| x.get("choice")).is_some()).then_some(a)
 }
 
-/// The key from the configured variable, else the configured command.
+/// This tool's own key, read before the general one (one key per product).
+const PRODUCT_KEY_ENV: &str = "STYLOMETRY_TYPESAFE_API_KEY";
+
+/// The key from this tool's variable or the configured one, else the
+/// configured command.
 fn resolve_key(cfg: &JevConfig) -> Option<String> {
-    if let Ok(k) = std::env::var(&cfg.key_env) {
-        let k = k.trim().to_string();
-        if !k.is_empty() {
-            return Some(k);
+    for var in [PRODUCT_KEY_ENV, cfg.key_env.as_str()] {
+        if let Ok(k) = std::env::var(var) {
+            let k = k.trim().to_string();
+            if !k.is_empty() {
+                return Some(k);
+            }
         }
     }
     if cfg.key_command.trim().is_empty() {
         return None;
     }
-    let out = std::process::Command::new("sh").arg("-c").arg(&cfg.key_command).output().ok()?;
+    // One run per command per process: a brief builds several clients.
+    static RUN: Mutex<Option<(String, Option<String>)>> = Mutex::new(None);
+    let mut run = RUN.lock().ok()?;
+    if let Some((cmd, key)) = run.as_ref() {
+        if *cmd == cfg.key_command {
+            return key.clone();
+        }
+    }
+    let key = key_from_command(&cfg.key_command);
+    *run = Some((cfg.key_command.clone(), key.clone()));
+    key
+}
+
+fn key_from_command(command: &str) -> Option<String> {
+    let out = std::process::Command::new("sh").arg("-c").arg(command).output().ok()?;
     if !out.status.success() {
         return None;
     }

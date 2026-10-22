@@ -29,10 +29,13 @@ pub struct JevConfig {
     pub model: String,
     /// API endpoint (tests point this at a local mock server).
     pub endpoint: String,
-    /// Environment variable holding the API key.
+    /// Environment variable holding the API key (`STYLOMETRY_TYPESAFE_API_KEY`
+    /// is read first when set).
     pub key_env: String,
     /// Command whose output is the key, when the variable is unset (run
     /// with `sh -c`; plain text, or JSON with `data.value` as `akm` prints).
+    /// By default the key is read from AKM when it is installed, so JEV is
+    /// on without any setup; set "" to use the variable only.
     pub key_command: String,
     /// Parallel requests.
     pub workers: usize,
@@ -45,6 +48,10 @@ pub struct JevConfig {
     pub budget_ms: u64,
 }
 
+/// AKM's copy of the key when `akm` is on the PATH, this tool's own key
+/// first (one key per product), then the general one; nothing otherwise.
+pub const DEFAULT_KEY_COMMAND: &str = "command -v akm >/dev/null 2>&1 && { akm get STYLOMETRY_TYPESAFE_API_KEY --raw 2>/dev/null || akm get TYPESAFE_API_KEY --raw; }";
+
 impl Default for JevConfig {
     fn default() -> Self {
         Self {
@@ -52,7 +59,7 @@ impl Default for JevConfig {
             model: "jev-1.13.0".into(),
             endpoint: "https://api.typesafe.ai/v1/systemone".into(),
             key_env: "TYPESAFE_API_KEY".into(),
-            key_command: String::new(),
+            key_command: DEFAULT_KEY_COMMAND.into(),
             workers: 8,
             timeout_ms: 4000,
             budget_ms: 30_000,
