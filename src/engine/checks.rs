@@ -306,7 +306,11 @@ pub fn tell_findings(d: &Draft, rates: &HashMap<&'static str, f64>, concepts: &[
             let author = rates.get(h.tell).copied().unwrap_or(0.0);
             let expected = author * words / 1000.0;
             let n = by_tell[h.tell];
-            if (n as f64) <= 2.0 * expected + 0.5 {
+            // Flag only counts the author's own rate can't explain: about
+            // three Poisson SDs above expectation, and never a lone hit.
+            // Without this, a genuine passage of the author's trips dozens
+            // of tells through ordinary sampling noise.
+            if n < 2 || (n as f64) < expected + 3.0 * expected.sqrt() + 1.0 {
                 return None;
             }
             let alt = preferred_for(h.tell, concepts);
@@ -412,7 +416,7 @@ pub fn structure_findings(d: &Draft, rows: &[MetricRow]) -> Vec<Finding> {
     let above = |key: &str| {
         rows.iter()
             .find(|r| r.key == key)
-            .is_some_and(|r| r.status != Status::InRange && r.value > r.high)
+            .is_some_and(|r| r.status == Status::OutOfRange && r.value > r.high)
     };
     let (chains, not_but, ing, echoes) = (
         above("and_chains_per_1k_sentences"),
