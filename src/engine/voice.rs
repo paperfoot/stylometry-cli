@@ -757,33 +757,44 @@ pub struct ModeLabel {
     pub tense: &'static str,
 }
 
-const FIRST_NARRATOR: [&str; 9] = ["i", "me", "my", "mine", "myself", "i'm", "i'd", "i've", "i'll"];
+/// The narrator's own words: I and we (a first-person narrator is often one
+/// of a party: "we got up early").
+const FIRST_NARRATOR: [&str; 18] = [
+    "i", "me", "my", "mine", "myself", "i'm", "i'd", "i've", "i'll", "we", "us", "our", "ours", "ourselves", "we're",
+    "we'd", "we've", "we'll",
+];
 const THIRD_NARRATOR: [&str; 10] = ["he", "she", "him", "her", "his", "hers", "himself", "herself", "he's", "she's"];
 
-/// POV from the narration (dialogue removed): first person when the
-/// narrator's I/me/my are at least half as many as he/she/him/her. Tense from the present share
-/// of narration verbs: present at 0.6 or more, past at 0.3 or less, else
-/// mixed. None when the stretch has too little narration to tell.
+/// POV from the narration (dialogue removed) and tense from the present
+/// share of narration verbs: present at 0.6 or more, past at 0.3 or less,
+/// else mixed. None when the stretch has too little narration to tell.
+///
+/// First person when at least 30% of the narration paragraphs (15+ words)
+/// use I/me/my or we/us/our: a first-person narrator recounting what others
+/// did says "he" far more than "I", but is present across the text, while
+/// third-person narration keeps I and we to dialogue, so an unquoted speech
+/// or a song leaks into a few paragraphs only. Stretches with fewer than six
+/// such paragraphs (retrieval windows) fall back to the count: I/we at
+/// least half as many as he/she.
 pub fn mode_of(paragraphs: &[String]) -> Option<ModeLabel> {
-    let (mut first, mut third) = (0usize, 0usize);
+    let (mut first, mut third, mut paras, mut with_first) = (0usize, 0usize, 0usize, 0usize);
     for para in paragraphs {
-        for t in text::word_tokens(&crate::engine::metrics::narration(para)) {
-            if FIRST_NARRATOR.contains(&t.as_str()) {
-                first += 1;
-            } else if THIRD_NARRATOR.contains(&t.as_str()) {
-                third += 1;
-            }
+        let toks = text::word_tokens(&crate::engine::metrics::narration(para));
+        let mine = toks.iter().filter(|t| FIRST_NARRATOR.contains(&t.as_str())).count();
+        first += mine;
+        third += toks.iter().filter(|t| THIRD_NARRATOR.contains(&t.as_str())).count();
+        if toks.len() >= 15 {
+            paras += 1;
+            with_first += usize::from(mine > 0);
         }
     }
     if first + third < 5 {
         return None;
     }
+    let first_person = if paras >= 6 { with_first * 10 >= paras * 3 } else { first * 2 >= third };
     let present = present_share(paragraphs)?;
     Some(ModeLabel {
-        // A first-person narrator still says "he" about everyone else, so
-        // I/me/my at half the he/she count already marks first person;
-        // third-person narration keeps I/me/my almost entirely to dialogue.
-        pov: if first * 2 >= third { "first" } else { "third" },
+        pov: if first_person { "first" } else { "third" },
         tense: if present >= 0.6 {
             "present"
         } else if present <= 0.3 {
@@ -1042,5 +1053,22 @@ mod tests {
         let third = vec!["He walked to the door. He was tired and his hands shook. She had gone and he looked away.".to_string(); 3];
         assert_eq!(mode_of(&first), Some(ModeLabel { pov: "first", tense: "present" }));
         assert_eq!(mode_of(&third), Some(ModeLabel { pov: "third", tense: "past" }));
+    }
+
+    /// Three Men in a Boat: an "I" narrator telling anecdotes about George
+    /// says "he" seven times for each "I", and is still first person.
+    #[test]
+    fn an_i_narrator_recounting_others_is_first_person() {
+        let anecdote = "George got up early that morning. He said he would make the tea, and he went down to the river with his towel, and he stood there for a long time while his breakfast went cold. I watched him from the boat.";
+        let paras = vec![anecdote.to_string(); 8];
+        assert_eq!(mode_of(&paras).map(|m| m.pov), Some("first"));
+        // A party narrator: "we" is the narrator too.
+        let party = "We got up at six and pulled the boat out. Harris said he would cook, and he burnt the eggs, and he blamed the stove for it, and he sulked until noon while his coffee went cold.";
+        assert_eq!(mode_of(&vec![party.to_string(); 8]).map(|m| m.pov), Some("first"));
+        // Third person with one unquoted line of speech in eight paragraphs.
+        let told = "He walked to the door and looked out at the rain. He was tired, and his hands shook as he turned the key, and she watched him from the stairs without a word.";
+        let mut paras = vec![told.to_string(); 8];
+        paras[3] = "I will not go back, he thought, and he said it again to himself as he walked, and his voice was low and she did not hear him.".into();
+        assert_eq!(mode_of(&paras).map(|m| m.pov), Some("third"));
     }
 }
