@@ -286,6 +286,57 @@ fn examples_one_shared_word_is_not_a_strong_topic() {
     assert!(d["exemplars"].as_array().unwrap().iter().all(|e| e["topic"].as_f64().is_some()), "{d}");
 }
 
+/// One long work on gardens and two short ones on other subjects: every
+/// window that matches a garden task belongs to the long work.
+fn dominant_corpus(dir: &Path) {
+    const COMMON: [&str; 12] = ["the", "man", "went", "out", "to", "see", "how", "the", "day", "would", "turn", "and"];
+    let work = |topic: &[&str], paras: usize| -> String {
+        (0..paras)
+            .map(|i| {
+                let mut words: Vec<String> = Vec::new();
+                for j in 0..60 {
+                    words.push(if j % 7 == 3 { topic[(i * 5 + j) % topic.len()].to_string() } else { COMMON[(i + j) % COMMON.len()].to_string() });
+                    if j % 12 == 11 {
+                        words.last_mut().unwrap().push('.');
+                    }
+                }
+                let mut t = words.join(" ");
+                t[..1].make_ascii_uppercase();
+                t.replace(". t", ". T").replace(". m", ". M").replace(". a", ". A")
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    };
+    std::fs::create_dir_all(dir).unwrap();
+    let garden = ["garden", "roses", "pruning", "compost", "hedge", "bulbs", "greenhouse", "mulch"];
+    std::fs::write(dir.join("a_garden.txt"), work(&garden, 800)).unwrap();
+    std::fs::write(dir.join("b_sea.txt"), work(&["harbour", "ships", "tide", "anchor", "gulls"], 60)).unwrap();
+    std::fs::write(dir.join("c_rail.txt"), work(&["railway", "engine", "platform", "signal", "tunnel"], 60)).unwrap();
+}
+
+/// A dominant work fills the shortlist; one-per-work must not stop at one
+/// pick waiting for works that are not in it, and the guide keeps its
+/// warm-up passage.
+#[test]
+fn examples_fill_n_when_one_work_dominates() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (data, corpus) = (tmp.path().join("data"), tmp.path().join("garden"));
+    dominant_corpus(&corpus);
+    build(&data, "garden", &corpus, "nonfiction");
+    let v = run_json(&data, &["examples", "garden", "--about", "pruning roses in the garden", "-n", "3"]);
+    let ex = v["data"]["examples"].as_array().unwrap();
+    assert_eq!(ex.len(), 3, "{}", v["data"]);
+    assert!(ex.iter().all(|e| e["source"] == "a_garden.txt"), "{ex:?}");
+    let v = run_json(&data, &["guide", "garden", "--about", "pruning roses in the garden"]);
+    assert_eq!(v["data"]["exemplars"].as_array().unwrap().len(), 3);
+    assert!(sections(&v).iter().any(|s| s.starts_with("Warm-up")), "{:?}", sections(&v));
+    // Without a task, one per work still comes first.
+    let v = run_json(&data, &["examples", "garden", "-n", "3"]);
+    let mut srcs: Vec<&str> = v["data"]["examples"].as_array().unwrap().iter().map(|e| e["source"].as_str().unwrap()).collect();
+    srcs.sort_unstable();
+    assert_eq!(srcs, ["a_garden.txt", "b_sea.txt", "c_rail.txt"]);
+}
+
 #[test]
 fn examples_long_form_returns_passages_with_shape() {
     let tmp = tempfile::tempdir().unwrap();

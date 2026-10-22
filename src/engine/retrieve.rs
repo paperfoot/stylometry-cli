@@ -549,8 +549,7 @@ pub fn retrieve(p: &Profile, req: &Request) -> Retrieval {
         })
         .collect();
 
-    let picks = mmr(&cands, &vecs, &score, req.n, short, p.sources.len());
-    let mut picks = picks;
+    let mut picks = mmr(&cands, &vecs, &score, req.n, short, topic_match != TopicMatch::None);
     if req.mix_dialogue && !short {
         mix_dialogue(&cands, &score, &mut picks);
     }
@@ -792,22 +791,30 @@ fn length_typicality(cands: &[Cand]) -> Vec<f64> {
 /// Maximal marginal relevance: relevance minus similarity to what is
 /// already picked, at most one piece per thread (short-form) and one per
 /// work until every work has given one (long-form).
-fn mmr(cands: &[Cand], vecs: &[HashMap<String, f64>], score: &[f64], n: usize, short: bool, n_src: usize) -> Vec<usize> {
+///
+/// With a topic in play, "every work" means every work in the shortlist:
+/// a dominant work can fill it, and the rest are off topic, so waiting for
+/// them would stop at one pick or pad the list with unrelated passages.
+/// Without one, it means every work, found past the shortlist if need be.
+/// A shortlist with nothing admissible left widens to every candidate, so
+/// `n` picks come back whenever `n` threads exist.
+fn mmr(cands: &[Cand], vecs: &[HashMap<String, f64>], score: &[f64], n: usize, short: bool, topical: bool) -> Vec<usize> {
     let mut order: Vec<usize> = (0..cands.len()).collect();
     order.sort_by(|a, b| score[*b].total_cmp(&score[*a]));
     // MMR over a shortlist keeps it cheap on big corpora.
-    order.truncate((n * 20).max(60));
+    let shortlist = &order[..order.len().min((n * 20).max(60))];
+    let pool = if topical { shortlist } else { &order[..] };
+    let works: HashSet<&str> = pool.iter().map(|&i| cands[i].group.as_str()).collect();
     let mut picked: Vec<usize> = Vec::new();
     let mut groups: HashSet<&str> = HashSet::new();
-    while picked.len() < n {
+    let best_in = |pool: &[usize], picked: &[usize], groups: &HashSet<&str>| {
         let mut best: Option<(f64, usize)> = None;
-        for &i in &order {
+        for &i in pool {
             if picked.contains(&i) {
                 continue;
             }
-            let g = cands[i].group.as_str();
-            let group_used = groups.contains(g);
-            if group_used && (short || groups.len() < n_src) {
+            let group_used = groups.contains(cands[i].group.as_str());
+            if group_used && (short || groups.len() < works.len()) {
                 continue;
             }
             let redundancy = picked.iter().map(|&j| cosine(&vecs[i], &vecs[j])).fold(0.0, f64::max);
@@ -816,7 +823,11 @@ fn mmr(cands: &[Cand], vecs: &[HashMap<String, f64>], score: &[f64], n: usize, s
                 best = Some((m, i));
             }
         }
-        let Some((_, i)) = best else { break };
+        best.map(|(_, i)| i)
+    };
+    while picked.len() < n {
+        let next = best_in(shortlist, &picked, &groups).or_else(|| best_in(&order, &picked, &groups));
+        let Some(i) = next else { break };
         groups.insert(cands[i].group.as_str());
         picked.push(i);
     }
