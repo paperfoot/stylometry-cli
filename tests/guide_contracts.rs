@@ -256,6 +256,36 @@ fn examples_match_the_task_or_say_none() {
     assert_eq!(v["data"]["examples"].as_array().unwrap().len(), 5);
 }
 
+/// One shared word is never a strong topic, however much one work dwells on
+/// it, and an off-topic task's "best" pieces never read as near-perfect
+/// matches; a task that shares several of a work's words is strong.
+#[test]
+fn examples_one_shared_word_is_not_a_strong_topic() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (data, corpus) = (tmp.path().join("data"), tmp.path().join("fic"));
+    fiction_corpus(&corpus);
+    build(&data, "fic", &corpus, "fiction");
+    for task in ["a recipe for sourdough bread in the kitchen", "people", "a recipe for sourdough bread"] {
+        let v = run_json(&data, &["examples", "fic", "--about", task, "-n", "3"]);
+        let d = &v["data"];
+        assert_ne!(d["topic_match"], "strong", "{task}: {d}");
+        assert!(d["notes"][0].as_str().is_some_and(|n| !n.is_empty()), "{task}: no note: {d}");
+        for e in d["examples"].as_array().unwrap() {
+            assert!(e["similarity"].as_f64().unwrap() < 0.9, "{task}: {e}");
+        }
+    }
+    let v = run_json(&data, &["examples", "fic", "--about", "the starship captain in the galaxy", "-n", "3"]);
+    assert_eq!(v["data"]["topic_match"], "strong", "{}", v["data"]);
+    assert_eq!(v["data"]["examples"][0]["source"], "one.txt");
+
+    // The guide says the same, with the topic overlap on every exemplar row.
+    let v = run_json(&data, &["guide", "fic", "--about", "a recipe for sourdough bread"]);
+    let d = &v["data"];
+    assert_ne!(d["topic_match"], "strong");
+    assert!(d["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("typical pieces")), "{d}");
+    assert!(d["exemplars"].as_array().unwrap().iter().all(|e| e["topic"].as_f64().is_some()), "{d}");
+}
+
 #[test]
 fn examples_long_form_returns_passages_with_shape() {
     let tmp = tempfile::tempdir().unwrap();

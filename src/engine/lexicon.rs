@@ -24,7 +24,9 @@ fn lines(src: &str) -> impl Iterator<Item = &str> {
 static FUNCTION_SET: LazyLock<HashSet<&'static str>> =
     LazyLock::new(|| lines(FUNCTION_WORDS).collect());
 
-static ZIPF: LazyLock<HashMap<&'static str, f32>> = LazyLock::new(|| {
+/// The frequency table in file order (most frequent first): a stable order
+/// matters wherever words are sampled from it.
+static ZIPF_LIST: LazyLock<Vec<(&'static str, f32)>> = LazyLock::new(|| {
     lines(ENGLISH_ZIPF)
         .filter_map(|l| {
             let (w, z) = l.split_once('\t')?;
@@ -32,6 +34,8 @@ static ZIPF: LazyLock<HashMap<&'static str, f32>> = LazyLock::new(|| {
         })
         .collect()
 });
+
+static ZIPF: LazyLock<HashMap<&'static str, f32>> = LazyLock::new(|| ZIPF_LIST.iter().copied().collect());
 
 static GROUPS: LazyLock<Vec<Vec<&'static str>>> = LazyLock::new(|| {
     lines(SYNONYMS)
@@ -73,6 +77,12 @@ pub fn is_function_word(w: &str) -> bool {
 /// 50k-word table, i.e. rarer than about Zipf 2.5.
 pub fn zipf(w: &str) -> Option<f32> {
     ZIPF.get(w).copied()
+}
+
+/// Every word of the frequency table with its Zipf value, most frequent
+/// first.
+pub fn zipf_table() -> &'static [(&'static str, f32)] {
+    &ZIPF_LIST
 }
 
 /// Expected occurrences per million words in general English. Words outside

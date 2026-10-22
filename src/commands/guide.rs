@@ -48,6 +48,9 @@ struct Section {
 struct ExemplarRow {
     source: String,
     similarity: f64,
+    /// Vocabulary overlap with the task (0 without one): read with
+    /// `topic_match`, since `similarity` also counts style nearness.
+    topic: f64,
     words: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     engagement_pct: Option<f64>,
@@ -105,6 +108,9 @@ struct Ctxt<'a> {
     /// The `--for` file's text (a previous chapter or a draft).
     for_text: Option<String>,
     exemplars: usize,
+    /// What retrieval said about the exemplars' fit to the task (a weak or
+    /// missing topic match): surfaced as warnings.
+    notes: std::cell::RefCell<Vec<String>>,
 }
 
 pub fn run(ctx: Ctx, a: GuideArgs) -> Result<(), AppError> {
@@ -153,6 +159,7 @@ pub fn run(ctx: Ctx, a: GuideArgs) -> Result<(), AppError> {
         query,
         for_text,
         exemplars: a.exemplars,
+        notes: Default::default(),
     };
     let (sections, picks, topic_match) = match register {
         Register::Social => social(&c),
@@ -160,6 +167,7 @@ pub fn run(ctx: Ctx, a: GuideArgs) -> Result<(), AppError> {
         Register::Fiction => fiction(&c),
         Register::Nonfiction | Register::Blog => prose(&c),
     };
+    warnings.extend(c.notes.take());
     let markdown = render(&sections);
     let brief_words: usize = sections.iter().filter(|s| !s.exemplar).map(|s| count(&s.heading) + count(&s.body)).sum();
     let exemplar_words: usize = sections.iter().filter(|s| s.exemplar).map(|s| count(&s.body)).sum();
@@ -185,6 +193,7 @@ pub fn run(ctx: Ctx, a: GuideArgs) -> Result<(), AppError> {
             .map(|e| ExemplarRow {
                 source: e.source.clone(),
                 similarity: e.similarity,
+                topic: e.topic,
                 words: e.words,
                 engagement_pct: e.engagement_pct,
             })
@@ -562,13 +571,17 @@ fn loop_long(c: &Ctxt, what: &str) -> Section {
     sec("Loop", body)
 }
 
-/// Retrieve and shape exemplars. Long-form passes `extra` for the warm-up.
+/// Retrieve and shape exemplars, keeping retrieval's notes on the task fit
+/// (blog openings are a side sample, so theirs are not kept).
 fn pick(c: &Ctxt, n: usize, mix_dialogue: bool, openings_only: bool) -> (Vec<Example>, TopicMatch) {
     let mut req = Request::new(c.query.as_deref(), n, c.kind);
     req.window_words = EXEMPLAR_WINDOW;
     req.mix_dialogue = mix_dialogue;
     req.openings_only = openings_only;
     let r = retrieve::retrieve(c.p, &req);
+    if !openings_only {
+        c.notes.borrow_mut().extend(r.notes.iter().cloned());
+    }
     (examples::rows(c.p, &r), r.topic_match)
 }
 

@@ -10,9 +10,15 @@
 //! - short-form: topic, then engagement (percentile within kind and calendar
 //!   quarter, so follower growth and replies' structurally lower counts
 //!   don't decide), never a media post or a sub-6-word item as "best".
-//! Picks are diversified with MMR (one per thread, one per work first), and
-//! when nothing shares the task's vocabulary the result says
-//! `topic_match: none` and falls back to typical pieces.
+//! Picks are diversified with MMR (one per thread, one per work first).
+//!
+//! `topic_match` is judged against chance, not a fixed cosine: random tasks
+//! of the same length, drawn from general English by frequency, set the
+//! lines for this corpus (a shared word in a 20-word post scores far higher
+//! than in a 500-word passage, and short tasks score higher than long ones).
+//! Strong also needs two of the task's terms in one piece; the task's words
+//! the corpus never uses count against the match. Weak and none come with a
+//! note, and none falls back to typical pieces.
 
 use std::collections::{HashMap, HashSet};
 
@@ -33,11 +39,13 @@ pub enum TopicMatch {
     None,
 }
 
-/// Cosine thresholds for `TopicMatch`, tuned on a blog, an essay book, a
-/// novel blend and an X account: below 0.05 the "best" match is shared
-/// stopword-like vocabulary.
+/// Floors under the calibrated cosine lines for `TopicMatch` (see
+/// `null_cosines`): below 0.05 the "best" match is shared stopword-like
+/// vocabulary whatever random tasks reach.
 const WEAK: f64 = 0.05;
 const STRONG: f64 = 0.12;
+/// Random tasks drawn per retrieval to place the strong/weak lines.
+const NULL_TASKS: usize = 200;
 /// MMR trade-off between relevance and novelty.
 const LAMBDA: f64 = 0.7;
 
@@ -140,11 +148,14 @@ fn terms_of(p: &Profile, txt: &str, names_ok: bool) -> HashMap<String, f64> {
     out
 }
 
-/// Sublinear TF-IDF vector, L2-normalised.
-fn tfidf(tf: &HashMap<String, f64>, idf: &HashMap<String, f64>) -> HashMap<String, f64> {
+/// Sublinear TF-IDF vector, L2-normalised. With `unseen`, terms the corpus
+/// never uses stay in the vector at that IDF (they can match nothing but
+/// count in the norm): used for the task, so a task whose words the corpus
+/// mostly lacks cannot read as a perfect match on the one word it shares.
+fn tfidf(tf: &HashMap<String, f64>, idf: &HashMap<String, f64>, unseen: Option<f64>) -> HashMap<String, f64> {
     let mut v: HashMap<String, f64> = tf
         .iter()
-        .filter_map(|(t, c)| idf.get(t).map(|i| (t.clone(), (1.0 + c.ln()) * i)))
+        .filter_map(|(t, c)| idf.get(t).copied().or(unseen).map(|i| (t.clone(), (1.0 + c.ln()) * i)))
         .collect();
     let norm = v.values().map(|x| x * x).sum::<f64>().sqrt();
     if norm > 0.0 {
@@ -156,6 +167,130 @@ fn tfidf(tf: &HashMap<String, f64>, idf: &HashMap<String, f64>) -> HashMap<Strin
 fn cosine(a: &HashMap<String, f64>, b: &HashMap<String, f64>) -> f64 {
     let (small, big) = if a.len() <= b.len() { (a, b) } else { (b, a) };
     small.iter().filter_map(|(t, x)| big.get(t).map(|y| x * y)).sum()
+}
+
+/// Content words of general English with their frequency, cumulative, for
+/// drawing random tasks: the same filters as `term` bar the profile's names.
+static NULL_WORDS: std::sync::LazyLock<(Vec<&'static str>, Vec<f64>)> = std::sync::LazyLock::new(|| {
+    let mut words = Vec::new();
+    let mut cum = Vec::new();
+    let mut total = 0.0;
+    for &(w, z) in lexicon::zipf_table() {
+        if w.len() < 3
+            || !w.bytes().all(|b| b.is_ascii_lowercase())
+            || matches!(w, "url" | "user")
+            || lexicon::is_function_word(w)
+            || lexicon::is_stopword(w)
+        {
+            continue;
+        }
+        total += 10f64.powf(f64::from(z));
+        words.push(w);
+        cum.push(total);
+    }
+    (words, cum)
+});
+
+/// SplitMix64: a fixed-seed generator, so the same task against the same
+/// profile always gets the same verdict.
+struct Rng(u64);
+
+impl Rng {
+    fn unit(&mut self) -> f64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        (z >> 11) as f64 / (1u64 << 53) as f64
+    }
+}
+
+/// Best cosine reached by random tasks of `tokens` content words drawn from
+/// general English by frequency, sorted. A task beats chance when its own
+/// best cosine clears these: what a cosine means depends on the corpus
+/// (one shared word in a 20-word post scores far higher than in a
+/// 500-word passage) and on the task's length, and a fixed line can't
+/// follow either.
+fn null_cosines(
+    p: &Profile,
+    vecs: &[HashMap<String, f64>],
+    tfs: &[&HashMap<String, f64>],
+    idf: &HashMap<String, f64>,
+    idf_unseen: f64,
+    tokens: usize,
+    names_ok: bool,
+) -> (Vec<f64>, Vec<f64>) {
+    let (words, cum) = &*NULL_WORDS;
+    let Some(&total) = cum.last() else { return (Vec::new(), Vec::new()) };
+    let mut postings: HashMap<&str, Vec<(usize, f64)>> = HashMap::new();
+    for (ci, v) in vecs.iter().enumerate() {
+        for (t, w) in v {
+            postings.entry(t.as_str()).or_default().push((ci, *w));
+        }
+    }
+    let tokens = tokens.clamp(1, 400);
+    let mut rng = Rng(0x5EED ^ tokens as u64);
+    let mut scores = vec![(0.0, 0usize); vecs.len()];
+    let (mut any, mut two) = (Vec::with_capacity(NULL_TASKS), Vec::with_capacity(NULL_TASKS));
+    for _ in 0..NULL_TASKS {
+        let mut tf: HashMap<String, f64> = HashMap::new();
+        let mut drawn = 0;
+        for _ in 0..tokens * 4 {
+            if drawn == tokens {
+                break;
+            }
+            let x = rng.unit() * total;
+            let w = words[cum.partition_point(|&c| c <= x).min(words.len() - 1)];
+            if let Some(t) = term(p, w, names_ok) {
+                *tf.entry(t).or_insert(0.0) += 1.0;
+                drawn += 1;
+            }
+        }
+        let q = tfidf(&tf, idf, Some(idf_unseen));
+        let single = tf.len() == 1;
+        let mut touched = Vec::new();
+        for (t, qw) in &q {
+            for &(ci, dw) in postings.get(t.as_str()).map(Vec::as_slice).unwrap_or(&[]) {
+                if scores[ci].1 == 0 {
+                    touched.push(ci);
+                }
+                scores[ci].0 += qw * dw;
+                scores[ci].1 += 1;
+            }
+        }
+        any.push(touched.iter().map(|&ci| scores[ci].0).fold(0.0, f64::max));
+        two.push(
+            touched
+                .iter()
+                .filter(|&&ci| evidence(&tf, tfs[ci], single) >= 2)
+                .map(|&ci| scores[ci].0)
+                .fold(0.0, f64::max),
+        );
+        for ci in touched {
+            scores[ci] = (0.0, 0);
+        }
+    }
+    any.sort_by(|a, b| a.total_cmp(b));
+    two.sort_by(|a, b| a.total_cmp(b));
+    (any, two)
+}
+
+/// How many pieces of topic evidence a candidate holds for a task: the
+/// task's distinct terms it uses, or for a one-word task its uses of the
+/// word (capped at 2).
+fn evidence(q_tf: &HashMap<String, f64>, d_tf: &HashMap<String, f64>, single: bool) -> usize {
+    q_tf.keys()
+        .filter_map(|t| d_tf.get(t))
+        .map(|&c| if single { (c as usize).min(2) } else { 1 })
+        .sum()
+}
+
+fn quantile(sorted: &[f64], q: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    sorted[((sorted.len() - 1) as f64 * q).round() as usize]
 }
 
 /// Short-form kinds a request draws from: posts include quote posts.
@@ -299,11 +434,13 @@ pub fn retrieve(p: &Profile, req: &Request) -> Retrieval {
         .iter()
         .map(|(t, d)| (t.to_string(), (1.0 + (n - d + 0.5) / (d + 0.5)).ln()))
         .collect();
-    let vecs: Vec<HashMap<String, f64>> = cands.iter().map(|c| tfidf(&c.tf, &idf)).collect();
+    let vecs: Vec<HashMap<String, f64>> = cands.iter().map(|c| tfidf(&c.tf, &idf, None)).collect();
 
     let q_tf = req.query.map(|q| terms_of(p, q, names_ok)).unwrap_or_default();
     let query_terms = q_tf.keys().filter(|t| idf.contains_key(*t)).count();
-    let q_vec = tfidf(&q_tf, &idf);
+    // A term no candidate uses gets the IDF of document frequency zero.
+    let idf_unseen = (1.0 + (n + 0.5) / 0.5).ln();
+    let q_vec = tfidf(&q_tf, &idf, Some(idf_unseen));
     let avg_len = cands.iter().map(|c| c.tf.values().sum::<f64>()).sum::<f64>() / n;
     let bm25: Vec<f64> = cands
         .iter()
@@ -320,21 +457,62 @@ pub fn retrieve(p: &Profile, req: &Request) -> Retrieval {
         .collect();
     let topic: Vec<f64> = vecs.iter().map(|v| cosine(&q_vec, v)).collect();
     let best_topic = topic.iter().copied().fold(0.0, f64::max);
-    let topic_match = if best_topic >= STRONG {
+    // Strong needs a piece with two pieces of evidence (two of the task's
+    // terms, or a one-word task's word twice: a single shared word, "bread"
+    // in a novel or "team" in a post, is never a topic) and a cosine beyond
+    // what 95% of random tasks reach under the same rule; weak, a best
+    // cosine beyond the median random task's.
+    let single = q_tf.len() == 1;
+    let tfs: Vec<&HashMap<String, f64>> = cands.iter().map(|c| &c.tf).collect();
+    let best_need = (0..n_cands)
+        .filter(|&i| evidence(&q_tf, tfs[i], single) >= 2)
+        .map(|i| topic[i])
+        .fold(0.0, f64::max);
+    let (weak_line, strong_line) = if q_tf.is_empty() {
+        (WEAK, STRONG)
+    } else {
+        let (any, two) = null_cosines(p, &vecs, &tfs, &idf, idf_unseen, q_tf.values().sum::<f64>() as usize, names_ok);
+        (WEAK.max(quantile(&any, 0.5)), STRONG.max(quantile(&two, 0.95)))
+    };
+    let topic_match = if best_need >= strong_line {
         TopicMatch::Strong
-    } else if best_topic >= WEAK {
+    } else if best_topic >= weak_line {
         TopicMatch::Weak
     } else {
         TopicMatch::None
     };
-    if req.query.is_some() && topic_match == TopicMatch::None {
-        notes.push("nothing in the corpus shares the task's vocabulary: these are typical pieces instead".into());
+    if req.query.is_some() {
+        // A word in a quarter of the pieces or more is the corpus's own
+        // subject, so no single piece stands out on it.
+        let everywhere = q_tf.keys().any(|t| df.get(t.as_str()).is_some_and(|d| *d >= 0.25 * n));
+        let note = match (topic_match, single, everywhere) {
+            (TopicMatch::Strong, ..) => None,
+            (TopicMatch::None, _, true) => Some(
+                "the task's words run through much of the corpus, so no piece stands out on them: these are typical pieces instead",
+            ),
+            (TopicMatch::None, _, false) => Some("nothing in the corpus is about the task: these are typical pieces instead"),
+            (TopicMatch::Weak, true, _) => Some(
+                "one word is thin evidence of a topic: these pieces use it, but describe the task in a few words for a firmer match",
+            ),
+            (TopicMatch::Weak, false, _) => Some(
+                "no piece is clearly about the task (its words are rare in the corpus or spread thinly across it): take these pieces' voice, not their subject",
+            ),
+        };
+        notes.extend(note.map(String::from));
     }
+    // BM25 relative to the best candidate, scaled by how far the evidence
+    // goes: 1 for a strong match, at most 0.5 for a weak one, so a loosely
+    // related piece cannot read as a 0.95 match.
     let max_bm = bm25.iter().copied().fold(0.0, f64::max);
-    let topic_n: Vec<f64> = if topic_match == TopicMatch::None || max_bm <= 0.0 {
+    let confidence = match topic_match {
+        TopicMatch::Strong => 1.0,
+        TopicMatch::Weak => 0.5 * (best_topic / strong_line).min(1.0),
+        TopicMatch::None => 0.0,
+    };
+    let topic_n: Vec<f64> = if confidence <= 0.0 || max_bm <= 0.0 {
         vec![0.0; n_cands]
     } else {
-        bm25.iter().map(|b| b / max_bm).collect()
+        bm25.iter().map(|b| confidence * b / max_bm).collect()
     };
 
     // Style nearness (long-form): to the draft's own shape when one was
@@ -343,26 +521,30 @@ pub fn retrieve(p: &Profile, req: &Request) -> Retrieval {
     let recency = recency_ranks(&cands);
     let length_typ = length_typicality(&cands);
 
+    // Topic's share of the score by register; the rest is engagement and
+    // length (short-form) or style nearness (long-form). With a task, the
+    // topic share stays in even when nothing matches, so a typical piece
+    // offered for an unmatched task never reads as a near-perfect match.
+    let has_eng = cands.iter().any(|c| c.engagement.is_some());
+    let w_topic = match (short, has_eng, fiction) {
+        (true, true, _) => 0.75,
+        (true, false, _) => 0.8,
+        (false, _, true) => 0.2,
+        (false, _, false) => 0.5,
+    };
     let score: Vec<f64> = (0..n_cands)
         .map(|i| {
-            let t = topic_n[i];
-            let base = if short {
+            let rest = if short {
                 let eng = if cands[i].best_ok { cands[i].engagement.unwrap_or(0.5) } else { 0.0 };
-                let has_eng = cands.iter().any(|c| c.engagement.is_some());
                 match (topic_match, has_eng) {
                     (TopicMatch::None, true) => 0.6 * eng + 0.4 * length_typ[i],
-                    (TopicMatch::None, false) => length_typ[i],
-                    (_, true) => 0.75 * t + 0.25 * eng,
-                    (_, false) => 0.8 * t + 0.2 * length_typ[i],
+                    (_, true) => eng,
+                    (_, false) => length_typ[i],
                 }
             } else {
-                let s = shape_sim[i].unwrap_or(0.5);
-                match (fiction, topic_match) {
-                    (true, TopicMatch::None) | (false, TopicMatch::None) => s,
-                    (true, _) => 0.2 * t + 0.8 * s,
-                    (false, _) => 0.5 * t + 0.5 * s,
-                }
+                shape_sim[i].unwrap_or(0.5)
             };
+            let base = if req.query.is_some() { w_topic * topic_n[i] + (1.0 - w_topic) * rest } else { rest };
             base + 0.02 * recency[i]
         })
         .collect();
@@ -695,6 +877,29 @@ mod tests {
         assert!(us.iter().all(|u| u.iter().all(|&i| p.chunks[i].source == p.chunks[u[0]].source)));
         // The short work is one unit of its own.
         assert!(us.iter().any(|u| p.chunks[u[0]].source == 1));
+    }
+
+    #[test]
+    fn unseen_task_words_dilute_the_match() {
+        let tf = |ws: &[&str]| ws.iter().map(|w| (w.to_string(), 1.0)).collect::<HashMap<_, _>>();
+        let idf: HashMap<String, f64> = [("bread", 3.0), ("door", 1.0)].iter().map(|(w, i)| (w.to_string(), *i)).collect();
+        let doc = tfidf(&tf(&["bread", "door"]), &idf, None);
+        let task = tf(&["recipe", "sourdough", "bread"]);
+        // Dropping the corpus's unknown words turns the task into "bread".
+        let blind = cosine(&tfidf(&task, &idf, None), &doc);
+        let seen = cosine(&tfidf(&task, &idf, Some(6.0)), &doc);
+        assert!(blind > 0.9 && seen < 0.4, "blind {blind} seen {seen}");
+    }
+
+    #[test]
+    fn one_word_tasks_need_the_word_twice() {
+        let tf = |ws: &[(&str, f64)]| ws.iter().map(|(w, c)| (w.to_string(), *c)).collect::<HashMap<_, _>>();
+        let task = tf(&[("hiring", 1.0)]);
+        assert_eq!(evidence(&task, &tf(&[("hiring", 1.0)]), true), 1);
+        assert_eq!(evidence(&task, &tf(&[("hiring", 5.0)]), true), 2);
+        let task = tf(&[("recipe", 1.0), ("bread", 1.0)]);
+        assert_eq!(evidence(&task, &tf(&[("bread", 4.0)]), false), 1);
+        assert_eq!(evidence(&task, &tf(&[("bread", 1.0), ("recipe", 1.0)]), false), 2);
     }
 
     #[test]
