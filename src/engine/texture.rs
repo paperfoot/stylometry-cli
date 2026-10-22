@@ -586,9 +586,17 @@ fn round3(v: f64) -> f64 {
 // ── Counted keys ─────────────────────────────────────────────────────────────
 
 const HEDGES: &str = include_str!("data/hedges.txt");
-/// "kind of" and "sort of" after these are nouns ("what kind of car").
-const DETERMINERS: [&str; 14] =
-    ["a", "the", "what", "this", "that", "these", "those", "some", "any", "every", "each", "one", "no", "which"];
+/// "kind of" and "sort of" hedge after these ("it was kind of fine", "I
+/// sort of knew"), at a clause's edge ("Kind of, yes", "fine, sort of,").
+/// After anything else they are nouns: "a certain kind of person", "what
+/// kind of car", "an exacting sort of purity".
+const HEDGE_BEFORE: [&str; 44] = [
+    "i", "you", "he", "she", "it", "we", "they", "it's", "that's", "i'm", "you're", "we're", "they're", "i've", "i'd",
+    "was", "is", "are", "were", "be", "been", "am", "feel", "feels", "felt", "seem", "seems", "seemed", "look", "looks",
+    "looked", "sound", "sounds", "sounded", "get", "got", "just", "really", "also", "still", "and", "but", "so", "actually",
+];
+/// Clause punctuation, as one token: hedges never match across it.
+const STOP: &str = ",";
 /// One hedge is never "piling them on": too many needs at least this many.
 const MIN_HEDGES_HIGH: usize = 2;
 
@@ -601,34 +609,55 @@ fn hedge_list() -> Vec<Vec<String>> {
         .collect()
 }
 
-/// A line's words, lowercased, apostrophes straightened (and dropped at
-/// the ends of words, where they are quote marks).
-fn words(line: &str) -> Vec<String> {
-    line.to_lowercase()
-        .replace('\u{2019}', "'")
-        .split(|c: char| !(c.is_alphanumeric() || c == '\''))
-        .map(|w| w.trim_matches('\''))
-        .filter(|w| !w.is_empty())
-        .map(str::to_string)
-        .collect()
+/// Lowercased words (apostrophes straightened, and dropped at the ends of
+/// words, where they are quote marks), with clause punctuation as `STOP`.
+fn tokens(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let flush = |cur: &mut String, out: &mut Vec<String>| {
+        let w = cur.trim_matches('\'');
+        if !w.is_empty() {
+            out.push(w.to_string());
+        }
+        cur.clear();
+    };
+    for c in text.to_lowercase().replace('\u{2019}', "'").chars() {
+        if c.is_alphanumeric() || c == '\'' {
+            cur.push(c);
+            continue;
+        }
+        flush(&mut cur, &mut out);
+        if ",.;:!?\u{2026}\u{2014}\u{2013}()\"\u{201C}\u{201D}\n".contains(c) && out.last().is_some_and(|t| t != STOP) {
+            out.push(STOP.into());
+        }
+    }
+    flush(&mut cur, &mut out);
+    out
 }
 
-/// Where filler hedges start in a run of words.
-fn hedges_at(ws: &[String], list: &[Vec<String>]) -> Vec<(usize, String)> {
+/// Filler hedges in a token run: (word index, hedge) per hit, and the
+/// number of words (`STOP` tokens are not words).
+fn hedges_at(ts: &[String], list: &[Vec<String>]) -> (Vec<(usize, String)>, usize) {
     let mut out = Vec::new();
-    for i in 0..ws.len() {
-        for h in list {
-            if !ws[i..].starts_with(h) {
-                continue;
-            }
-            let noun = (h[0] == "kind" || h[0] == "sort") && i > 0 && DETERMINERS.contains(&ws[i - 1].as_str());
-            if !noun {
-                out.push((i, h.join(" ")));
+    let mut word = 0;
+    for i in 0..ts.len() {
+        if ts[i] == STOP {
+            continue;
+        }
+        for h in list.iter().filter(|h| ts[i..].starts_with(h)) {
+            let edge = |t: Option<&String>| t.is_none_or(|t| t == STOP);
+            let hedge = !(h[0] == "kind" || h[0] == "sort")
+                || edge(i.checked_sub(1).and_then(|j| ts.get(j)))
+                || edge(ts.get(i + h.len()))
+                || HEDGE_BEFORE.contains(&ts[i - 1].as_str());
+            if hedge {
+                out.push((word, h.join(" ")));
             }
             break;
         }
+        word += 1;
     }
-    out
+    (out, word)
 }
 
 /// Filler hedges in a draft: (1-based line, the hedge, the line) per hit,
@@ -637,9 +666,9 @@ pub fn draft_hedges(draft: &str) -> (Vec<(usize, String, String)>, usize) {
     let list = hedge_list();
     let (mut hits, mut n) = (Vec::new(), 0);
     for (i, line) in draft.lines().enumerate() {
-        let ws = words(line);
-        n += ws.len();
-        hits.extend(hedges_at(&ws, &list).into_iter().map(|(_, h)| (i + 1, h, line.trim().to_string())));
+        let (found, words) = hedges_at(&tokens(line), &list);
+        n += words;
+        hits.extend(found.into_iter().map(|(_, h)| (i + 1, h, line.trim().to_string())));
     }
     (hits, n)
 }
@@ -651,20 +680,20 @@ pub fn hedge_band(p: &Profile, words_per_window: usize) -> Option<[f64; 3]> {
     let w = words_per_window.max(100);
     let mut rates = Vec::new();
     for (_, text, _) in author_works(p) {
-        let ws = words(&text);
-        if ws.len() < w {
+        let (found, n) = hedges_at(&tokens(&text), &list);
+        if n < w {
             continue;
         }
-        let mut prefix = vec![0usize; ws.len() + 1];
-        for (i, _) in hedges_at(&ws, &list) {
+        let mut prefix = vec![0usize; n + 1];
+        for (i, _) in found {
             prefix[i + 1] += 1;
         }
-        for i in 0..ws.len() {
+        for i in 0..n {
             prefix[i + 1] += prefix[i];
         }
-        let mut starts: Vec<usize> = (0..=ws.len() - w).step_by(w / 2).collect();
-        if starts.last() != Some(&(ws.len() - w)) {
-            starts.push(ws.len() - w);
+        let mut starts: Vec<usize> = (0..=n - w).step_by(w / 2).collect();
+        if starts.last() != Some(&(n - w)) {
+            starts.push(n - w);
         }
         rates.extend(starts.into_iter().map(|s| ((prefix[s + w] - prefix[s]) as f64 * 1000.0 / w as f64, 1.0)));
     }
@@ -692,7 +721,8 @@ fn sentences_of(lines: &[&str], p: &PassageRow, short: bool) -> Vec<(usize, Stri
     let mut out: Vec<(usize, String, bool)> = Vec::new();
     for l in p.lines[0]..=p.lines[1] {
         let Some(line) = lines.get(l - 1) else { continue };
-        if line.trim().is_empty() {
+        // Blank lines end paragraphs; `---` lines end posts and scenes.
+        if !line.chars().any(char::is_alphanumeric) {
             if let Some(last) = out.last_mut() {
                 last.2 = true;
             }
@@ -1134,11 +1164,11 @@ mod tests {
     }
 
     #[test]
-    fn hedges_are_counted_by_line_and_kind_of_after_a_determiner_is_a_noun() {
-        let (hits, words) = draft_hedges("I guess it was kind of fine.\nWhat kind of car?\nSort of, I dunno\u{2019}.");
+    fn hedges_are_counted_by_line_and_kind_of_as_a_noun_is_not_one() {
+        let (hits, words) = draft_hedges("I guess it was kind of fine.\nWhat kind of car?\nSort of, I dunno\u{2019}.\nA certain kind of person, an exacting sort of purity.");
         let found: Vec<(usize, &str)> = hits.iter().map(|h| (h.0, h.1.as_str())).collect();
         assert_eq!(found, [(1, "i guess"), (1, "kind of"), (3, "sort of"), (3, "i dunno")]);
-        assert_eq!(words, 15);
+        assert_eq!(words, 25);
         assert!(!jev_questions().as_object().unwrap().contains_key("hedge"), "counted keys never go to JEV");
         assert!(!jev_questions().as_object().unwrap().contains_key("oneliner"));
         assert_eq!(jev_keys().count(), 7);

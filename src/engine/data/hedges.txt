@@ -1,6 +1,7 @@
 # Filler hedges and softeners, counted per 1,000 words and held to the
 # author's own rate (texture `hedge`). One per line, lowercase; "kind of"
-# and "sort of" don't count after a determiner ("what kind of car").
+# and "sort of" count only after a pronoun or verb or at a clause edge, so
+# "a certain kind of person" and "what kind of car" are not hedges.
 i guess
 i suppose
 kind of
@@ -13,6 +14,5 @@ or whatever
 or something
 i don't know
 i dunno
-in a way
 somewhat
 basically
