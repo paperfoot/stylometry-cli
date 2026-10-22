@@ -112,7 +112,15 @@ pub fn read_corpus_as(path: &Path, register: Option<Register>) -> Result<Corpus,
 
     // Archive context: the owner's account and the full text of long posts
     // live in sibling files of tweets.js.
-    let context_files: Vec<PathBuf> = if single { list_files(root).unwrap_or_default() } else { files.clone() };
+    // A file passed alone looks only at its direct siblings (not a walk of
+    // the whole folder it happens to sit in).
+    let context_files: Vec<PathBuf> = if single {
+        std::fs::read_dir(root)
+            .map(|rd| rd.filter_map(Result::ok).map(|e| e.path()).filter(|p| p.is_file()).collect())
+            .unwrap_or_default()
+    } else {
+        files.clone()
+    };
     let account = context_files
         .iter()
         .find(|f| base_name(f) == "account.js")
@@ -826,7 +834,8 @@ impl NotePool {
 
     /// The full text for a post whose archive text is a truncated prefix of
     /// a note (matched on the first 40+ characters, ignoring whitespace,
-    /// the trailing "…" and link; the closest creation time wins).
+    /// the trailing "…" and link; same day when both dates are known, the
+    /// closest creation time wins).
     fn full_text(&mut self, shown: &str, date: Option<&str>) -> Option<String> {
         if self.notes.is_empty() {
             return None;
@@ -846,6 +855,9 @@ impl NotePool {
         };
         let best = (0..self.notes.len())
             .filter(|&i| !self.used[i])
+            // A note is posted with its tweet: a match from another day is a
+            // different post that happens to open the same way.
+            .filter(|&i| gap(&self.notes[i]) < 2)
             .filter(|&i| {
                 let full = squash(strip_leading_handles(&self.notes[i].text));
                 full.len() > prefix.len() && full.starts_with(&prefix)
@@ -919,7 +931,8 @@ fn x_archive(raw: &str, account: Option<&Account>, notes: &mut NotePool) -> Resu
         body = unescape_html(&drop_links(&body, &[media_links.clone(), quote_links].concat()));
         let date = first_str(o, &["created_at"]).map(iso_date);
         if let Some(t) = notes.full_text(&body, date.as_deref()) {
-            body = drop_links(strip_leading_handles(&t), &media_links);
+            let t = if matches!(kind, ItemKind::Reply | ItemKind::ThreadPart) { strip_leading_handles(&t) } else { &t };
+            body = drop_links(t, &media_links);
         }
         items.push(Raw {
             item: Item {
@@ -1258,6 +1271,15 @@ mod tests {
         let (items, _) = x_archive(raw, None, &mut notes).unwrap();
         assert_eq!(items[0].item.text, full);
         assert_eq!(notes.merged, 1);
+
+        // A short post from another day that opens the same way keeps its text.
+        let mut notes = NotePool::new(vec![Note {
+            created: Some("2024-03-09T10:00:00.000Z".into()),
+            text: full.into(),
+        }]);
+        let (items, _) = x_archive(raw, None, &mut notes).unwrap();
+        assert!(items[0].item.text.ends_with("https://t.co/N1"));
+        assert_eq!(notes.merged, 0);
     }
 
     #[test]

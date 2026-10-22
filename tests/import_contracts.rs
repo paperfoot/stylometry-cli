@@ -149,7 +149,7 @@ fn write_archive(root: &Path) {
         data.join("note-tweet.js"),
         ytd(
             "note_tweet",
-            &json!([{"noteTweet": {"noteTweetId": "1", "createdAt": "2018-10-11T20:19:24.000Z", "core": {"text": "Long note on writing every morning for a year: the first month was the hardest part, and then it became the easiest hour of the day."}}}]),
+            &json!([{"noteTweet": {"noteTweetId": "1", "createdAt": "2018-10-10T20:19:24.000Z", "core": {"text": "Long note on writing every morning for a year: the first month was the hardest part, and then it became the easiest hour of the day."}}}]),
         ),
     )
     .unwrap();
