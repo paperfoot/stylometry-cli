@@ -550,8 +550,9 @@ fn typography_findings_give_the_exact_conversion_and_lead_the_plan() {
     assert_eq!(row(&j, "curly_quote_share")["status"], "out_of_range");
     assert!(!findings_of(&j, "metric_out_of_range").iter().any(|f| f["key"] == "curly_quote_share"));
 
-    // Set the author's way, the same words have no typography finding and score higher.
-    let fixed = curly(&draft).replace("\n---\n", "\n\u{2022} \u{2022} \u{2022}\n");
+    // Set the author's way, the same words have no typography finding and
+    // score higher; a closed-up "•••" is the author's mark, set tighter.
+    let fixed = curly(&draft).replace("\n---\n", "\n\u{2022}\u{2022}\u{2022}\n");
     let k = check_text(data.path(), "cora", &fixed, &[]);
     assert_eq!(k["data"]["counts"]["typography"], 0, "{}", k["data"]["findings"]);
     assert!(k["data"]["score"].as_f64().unwrap() > j["data"]["score"].as_f64().unwrap());

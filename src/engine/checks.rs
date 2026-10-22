@@ -1171,7 +1171,7 @@ fn form_words(family: &str, form: &str) -> (String, String, String) {
         (_, "--") => ("double_hyphen", "double hyphens (--)", "two hyphens: word--word"),
         (_, " - ") => ("spaced_hyphen", "spaced hyphens as dashes (word - word)", "a hyphen with a space each side: word - word"),
         (_, "\u{2013}") => ("en_dash", "en dashes (\u{2013})", "an en dash: word \u{2013} word"),
-        (_, f) => return (f.to_string(), format!("'{f}' lines"), format!("a line with only {f}")),
+        (_, f) => return (f.to_string(), format!("'{f}' scene breaks"), format!("a line with only {f}")),
     };
     (slug.to_string(), name.to_string(), how.to_string())
 }
@@ -1223,14 +1223,29 @@ fn typography_hits(d: &Draft, habits: &metrics::TypographyHabits, long_form: boo
     let mut out = Vec::new();
     for (family, found) in draft_forms(d, long_form) {
         let Some((_, shares)) = family_habits.iter().find(|f| f.0 == family) else { continue };
-        let Some((top, top_share)) = shares.first().filter(|t| t.1 >= metrics::TYPOGRAPHY_HABIT_SHARE) else { continue };
+        // Scene breaks are told apart by their glyph: "•••" and "• • •" are
+        // one mark spaced by two typesetters (an unseen Hoover novel closes
+        // them up); "---" for "• • •" is another mark.
+        let mark = |f: &str| -> String {
+            if family == "scene_breaks" { f.chars().filter(|c| !c.is_whitespace()).take(1).collect() } else { f.to_string() }
+        };
+        let mut by_mark: Vec<(String, f64)> = Vec::new();
+        for (f, sh) in shares.iter() {
+            match by_mark.iter_mut().find(|m| m.0 == mark(f)) {
+                Some(m) => m.1 += sh,
+                None => by_mark.push((mark(f), *sh)),
+            }
+        }
+        by_mark.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let Some((top_mark, top_share)) = by_mark.first().filter(|t| t.1 >= metrics::TYPOGRAPHY_HABIT_SHARE) else { continue };
+        let Some((top, _)) = shares.iter().find(|s| &mark(&s.0) == top_mark) else { continue };
         let mut forms: Vec<&String> = found.iter().map(|f| &f.0).collect();
         forms.sort();
         forms.dedup();
         for form in forms {
-            let author = shares.iter().find(|s| &s.0 == form).map(|s| s.1).unwrap_or(0.0);
+            let author = by_mark.iter().find(|m| m.0 == mark(form)).map(|m| m.1).unwrap_or(0.0);
             // A form the author really uses (10%+) is voice, not a slip.
-            if form == top || author >= 0.1 {
+            if &mark(form) == top_mark || author >= 0.1 {
                 continue;
             }
             let at: Vec<usize> = found.iter().filter(|f| &f.0 == form).map(|f| f.1).collect();
