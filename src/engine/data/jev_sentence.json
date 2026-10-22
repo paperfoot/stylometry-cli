@@ -2,32 +2,62 @@
  "figure": {
   "type": "noul",
   "instructions": {
-   "question": "Does `sentence` use a fresh figure of speech: an inventive metaphor, simile or personification chosen for effect? `before` is the sentence before it, for context only.",
-   "focus": "Judge only `sentence`, how it is made, not its topic or punctuation."
+   "question": "Is `sentence` built on a fresh figure of speech: an inventive metaphor, simile or personification?",
+   "focus": "Judge only `sentence`. `context` is the passage it comes from, to show how it is used. Ignore the topic, the opinions and the punctuation marks."
   },
   "criteria": {
    "true": {
-    "what": "An inventive image a plain writer would not reach for",
-    "examples": ["The house held its breath.", "Her laugh was a door slamming somewhere far away."]
+    "what": "`sentence` makes an image a plain writer would not reach for: it compares something to an unlike thing, or gives a thing feelings or intentions",
+    "examples": [
+     "The kitchen held its breath while the kettle made up its mind.",
+     "His apology arrived like a parcel with the wrong address on it.",
+     "Grief rode in the passenger seat the whole way home."
+    ]
    },
    "false": {
-    "what": "Plain literal language, or only everyday idioms and dead metaphors (\"fell in love\", \"a lot on my mind\")"
+    "what": "`sentence` says what it means literally",
+    "examples": [
+     "I put the kettle on and waited.",
+     "He said sorry, but it came a week too late.",
+     "The drive home took two hours."
+    ],
+    "not_for": [
+     "Everyday idioms and dead metaphors such as 'fell in love', 'a lot on my mind' or 'hit the ground running' are not fresh figures",
+     "A plain comparison of like with like, such as 'it costs about as much as a month of rent', is not a figure",
+     "Product names and technical terms"
+    ]
    }
   }
  },
- "crafted": {
+ "kicker": {
   "type": "noul",
   "instructions": {
-   "question": "Is `sentence` a crafted, quotable line placed for effect: a kicker, punchline, reveal, callback or aphorism, rather than ordinary narration, argument or report? `before` is the sentence before it, for context only.",
-   "focus": "Judge only `sentence`, how it is made, not its topic or punctuation."
+   "question": "Is `sentence` a beat placed to land: a short line that gives `context` its punchline, reveal or twist?",
+   "focus": "Judge only `sentence`, read in its place in `context`. Ignore the topic and the punctuation marks."
   },
   "criteria": {
    "true": {
-    "what": "A polished button, twist, maxim or slogan meant to land",
-    "examples": ["She never called again.", "Some doors stay shut.", "Speed is a feature until it isn't."]
+    "what": "A short line set up by what comes before it, written so the moment lands: a punchline, a reveal, a twist or a dramatic close",
+    "examples": [
+     "The envelope was empty.",
+     "He had known the whole time.",
+     "Then the lights went out.",
+     "That was the last of the money."
+    ]
    },
    "false": {
-    "what": "An ordinary sentence that carries on the narration, argument or post, even if blunt or emotional"
+    "what": "A sentence that carries the story, argument or post forward: it reports, explains, asks or reacts",
+    "examples": [
+     "I put my bag down and sat on the step.",
+     "She asked if I wanted tea, and I said yes.",
+     "We ship the fix on Monday.",
+     "Thanks to everyone who tried the beta."
+    ],
+    "not_for": [
+     "A closing line that only says what happens next is not a punchline",
+     "A plain fact, number or opinion, even when it is short or ends the paragraph",
+     "A question or a request to the reader"
+    ]
    }
   }
  }

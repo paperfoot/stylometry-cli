@@ -86,7 +86,13 @@ fn serve(mut stream: std::net::TcpStream, mode: Mode) -> std::io::Result<()> {
 /// As with the real model, a short text shows less roughness than a longer
 /// one: one post has fewer chances to over-explain or run on than four.
 fn answer(req: &Value) -> Value {
-    // Passage questions get `text`; the sentence drill-down gets `sentence`.
+    // Passage questions get `text`; the sentence drill-down gets `sentence`
+    // and its passage as `context`, never anything else.
+    if let Some(s) = req["state"]["sentence"].as_str() {
+        let ctx = req["state"]["context"].as_str().expect("a sentence comes with its passage as `context`");
+        assert!(ctx.contains(s), "the context is the sentence's own passage");
+        assert_eq!(req["state"].as_object().unwrap().len(), 2, "only `sentence` and `context`: {}", req["state"]);
+    }
     let text = req["state"]["text"].as_str().or(req["state"]["sentence"].as_str()).unwrap_or("");
     let j = if text.contains(TYPICAL) {
         0.5
@@ -96,8 +102,8 @@ fn answer(req: &Value) -> Value {
     let length = 0.4 + 0.6 * (text.split_whitespace().count() as f64 / 60.0).min(1.0);
     let smooth = text.contains(SMOOTH);
     let value = |k: &str| match (k, smooth) {
-        ("figure" | "crafted", true) => 0.9,
-        ("figure" | "crafted", false) => 0.1,
+        ("figure" | "kicker", true) => 0.9,
+        ("figure" | "kicker", false) => 0.1,
         ("hedge" | "oneliner", _) => panic!("counted keys must never be asked of JEV: {k}"),
         ("rough", true) => 0.05,
         ("polish", true) => 2.8,

@@ -109,7 +109,15 @@ pub fn questions_version() -> String {
 
 /// Sentence-level drill-down: after a passage is flagged as polished, as
 /// ending on a crafted line or as figurative, each of its candidate
-/// sentences is asked these two narrow Nouls, so findings cite exact lines.
+/// sentences is asked two narrow Nouls, with the passage as `context`, so
+/// findings cite exact lines: `figure` (a fresh metaphor or simile) and
+/// `kicker` (a beat placed to land; "She never called again." is one only
+/// in context). Measured 2026-10-22 against lines blind judges quoted from
+/// imitations vs the author's own sentences, split by piece: `kicker`
+/// AUC 0.83 dev / 0.81 test (0.85 / 0.88 on paragraph-closing lines), with
+/// 4% of the author's sentences at >= 0.5 on dev; the earlier five-way
+/// "crafted" question with only the previous sentence had 0.69 / 0.80 and
+/// 14% / 9%. A separate `maxim` question added nothing (dev 0.51).
 const SENTENCE: &str = include_str!("data/jev_sentence.json");
 
 pub fn sentence_questions() -> serde_json::Value {
@@ -854,8 +862,8 @@ pub struct SentenceRow {
     pub text: String,
     /// P(a fresh figure of speech).
     pub figure: f64,
-    /// P(a crafted, quotable line: kicker, reveal, aphorism).
-    pub crafted: f64,
+    /// P(a beat placed to land: a punchline, reveal or twist), in context.
+    pub kicker: f64,
     /// Ends its paragraph.
     pub closing: bool,
 }
@@ -882,15 +890,15 @@ fn sentences_of(lines: &[&str], p: &PassageRow, short: bool) -> Vec<(usize, Stri
 }
 
 /// The sentences that back a key's finding: fresh figures for
-/// `figurative`, crafted lines ending a paragraph for `button`, either for
+/// `figurative`, kickers ending a paragraph for `button`, either for
 /// `polish`.
 pub fn cited<'a>(p: &'a PassageRow, key: &str) -> Vec<&'a SentenceRow> {
     p.sentences
         .iter()
         .filter(|s| match key {
             "figurative" => s.figure >= SENTENCE_YES,
-            "button" => s.closing && s.crafted >= SENTENCE_YES,
-            "polish" => s.figure >= SENTENCE_YES || s.crafted >= SENTENCE_YES,
+            "button" => s.closing && s.kicker >= SENTENCE_YES,
+            "polish" => s.figure >= SENTENCE_YES || s.kicker >= SENTENCE_YES,
             _ => false,
         })
         .collect()
@@ -912,28 +920,21 @@ fn drill(jev: &Jev, draft: &str, short: bool, off: &[&'static str], passages: &m
     let mut asks: Vec<(usize, usize, String, bool)> = Vec::new(); // (passage, line, sentence, closing)
     for i in order {
         let only_endings = passages[i].flags.iter().filter(|f| keys.contains(f)).all(|f| *f == "button");
-        let mut prev = String::new();
         for (line, s, closing) in sentences_of(&lines, &passages[i], short) {
             if (!only_endings || closing) && asks.len() < MAX_SENTENCE_REQUESTS {
-                asks.push((i, line, format!("{prev}\u{0}{s}"), closing));
+                asks.push((i, line, s, closing));
             }
-            prev = s;
         }
     }
-    let states: Vec<serde_json::Value> = asks
-        .iter()
-        .map(|(_, _, both, _)| {
-            let (before, s) = both.split_once('\u{0}').unwrap_or(("", both));
-            json!({ "sentence": normalize(s), "before": normalize(before) })
-        })
-        .collect();
+    // Each sentence with its passage, so a kicker is judged in its place.
+    let states: Vec<serde_json::Value> =
+        asks.iter().map(|(i, _, s, _)| json!({ "sentence": normalize(s), "context": passages[*i].text })).collect();
     let answers = jev.ask_all(&states, &sentence_questions());
-    for ((i, line, both, closing), a) in asks.into_iter().zip(answers) {
-        let (Some(figure), Some(crafted)) = (a.as_ref().and_then(|a| a.noul("figure")), a.as_ref().and_then(|a| a.noul("crafted"))) else {
+    for ((i, line, s, closing), a) in asks.into_iter().zip(answers) {
+        let (Some(figure), Some(kicker)) = (a.as_ref().and_then(|a| a.noul("figure")), a.as_ref().and_then(|a| a.noul("kicker"))) else {
             continue;
         };
-        let s = both.split_once('\u{0}').map(|x| x.1).unwrap_or(&both);
-        passages[i].sentences.push(SentenceRow { line, text: excerpt(s, 160), figure: round3(figure), crafted: round3(crafted), closing });
+        passages[i].sentences.push(SentenceRow { line, text: excerpt(&s, 160), figure: round3(figure), kicker: round3(kicker), closing });
     }
 }
 
@@ -983,11 +984,14 @@ pub struct PassageRow {
     /// Keys beyond the author's passage-level band, on their fault side.
     pub flags: Vec<&'static str>,
     /// Flagged passages only: their sentences, asked about figures and
-    /// crafted lines so findings cite exact lines.
+    /// kickers so findings cite exact lines.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub sentences: Vec<SentenceRow>,
     #[serde(skip)]
     pub excerpt: String,
+    /// The text JEV judged: the context its sentences are judged in.
+    #[serde(skip)]
+    pub text: String,
 }
 
 /// The `texture` block of `check`: how the draft's prose texture compares
@@ -1238,6 +1242,7 @@ pub fn assess_with(jev: &Jev, p: &Profile, draft: &str) -> Texture {
             flags: jev_keys().filter(|k| is_off(k.side, v[k.key], pb.get(k.key))).map(|k| k.key).collect(),
             sentences: Vec::new(),
             excerpt: excerpt(&x.text, 100),
+            text: x.text.clone(),
         })
         .collect();
     let off: Vec<&'static str> = keys.iter().filter(|k| k.status == "off").map(|k| k.key).collect();
@@ -1405,6 +1410,22 @@ mod tests {
         assert!(!jev_questions().as_object().unwrap().contains_key("hedge"), "counted keys never go to JEV");
         assert!(!jev_questions().as_object().unwrap().contains_key("oneliner"));
         assert_eq!(jev_keys().count(), 7);
+    }
+
+    #[test]
+    fn sentence_questions_ask_about_the_sentence_in_its_passage_with_examples_both_sides() {
+        let q = sentence_questions();
+        let q = q.as_object().unwrap();
+        assert_eq!(q.keys().collect::<Vec<_>>(), ["figure", "kicker"]);
+        for (id, x) in q {
+            assert!(x["instructions"]["question"].as_str().unwrap().contains("`sentence`"), "{id}");
+            assert!(x["instructions"]["focus"].as_str().unwrap().contains("`context`"), "{id}");
+            for side in ["true", "false"] {
+                let n = x["criteria"][side]["examples"].as_array().map_or(0, Vec::len);
+                assert!((2..=4).contains(&n), "{id}.{side}: {n} examples");
+            }
+            assert!(!x["criteria"]["false"]["not_for"].as_array().unwrap().is_empty(), "{id}: boundary cases on the no side");
+        }
     }
 
     #[test]
