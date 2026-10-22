@@ -1053,7 +1053,10 @@ pub fn is_nonword(cased: &str, names: &[String]) -> bool {
 pub const BEAT_WORDS: usize = 6;
 
 /// Runs of tidy beats in a sequence of sentences (each as word tokens), as
-/// (first sentence, sentences in the run).
+/// (first sentence, sentences in the run). An empty sentence is a boundary
+/// no run crosses: the measures put one between paragraphs, so a run never
+/// spans two speakers' lines or two posts (no one can "join two beats"
+/// across those).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Polish {
     /// 3+ consecutive sentences of `BEAT_WORDS` words or fewer, once per run.
@@ -1195,6 +1198,10 @@ pub fn measure_named(all_paragraphs: &[String], function_words: &[String], short
 
     for p in paragraphs {
         let sents = text::sentences_for(p, short_form);
+        // No polish run crosses a paragraph (a change of speaker, a new post).
+        if !seq.is_empty() {
+            seq.push(Vec::new());
+        }
         tags += crate::engine::voice::tag_verbs_in(p).len();
         let (cq, sq) = double_quote_counts(p);
         let (ca, sa) = apostrophe_counts(p);
@@ -1781,6 +1788,24 @@ mod tests {
         let plain = polish(&toks(&["I wait.", "The rain comes down hard on the roof tonight.", "She doesn't call."]));
         assert_eq!(plain, Polish::default());
         assert!(!is_mirror(&text::word_tokens("It isn't him."), &text::word_tokens("It can't be him.")), "both negated");
+    }
+
+    #[test]
+    fn polish_runs_never_cross_a_paragraph() {
+        // A quick exchange: three speakers' lines, one short line each.
+        let exchange = "\"Nothing.\"\n\n\"That's not a number.\"\n\n\"Jeremy.\"\n\nI step back and look at him for a long moment before I answer him.";
+        assert_eq!(get(&measure(&paras(exchange), &[]), "short_triplets_per_1k"), 0.0);
+        let one_para = "I wait. It comes out wrong. He steps in.\n\nI step back and look at him for a long moment before I answer him.";
+        assert!(get(&measure(&paras(one_para), &[]), "short_triplets_per_1k") > 0.0);
+        // Two posts' openings and endings make no run either.
+        let posts = vec!["It took 3 tries. Shipped today.".to_string(), "Same booth. Same kiss.".to_string()];
+        let v = measure_for(&posts, &[], true);
+        assert_eq!((get(&v, "short_triplets_per_1k"), get(&v, "anaphora_runs_per_1k")), (0.0, 0.0));
+        // The separator the measures insert is a boundary for every pattern.
+        let joined = polish(&toks(&["Same booth.", "Same dinner.", "Same kiss."]));
+        assert_eq!((joined.triplets.len(), joined.anaphora.len()), (1, 1));
+        let split = polish(&[toks(&["Same booth.", "Same dinner."]), vec![Vec::new()], toks(&["Same kiss."])].concat());
+        assert_eq!(split, Polish::default());
     }
 
     #[test]

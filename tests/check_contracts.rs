@@ -497,6 +497,15 @@ fn build_curly_fiction(data: &Path, dir: &Path) {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
 }
 
+/// An essayist of long abstract sentences: no quotes, no short beats.
+fn build_plain(data: &Path, dir: &Path) {
+    for i in 0..3 {
+        std::fs::write(dir.join(format!("essay{i}.txt")), other_prose(4000)).unwrap();
+    }
+    let out = bin(data).args(["profile", "build", "plain", "--register", "nonfiction", "--corpus"]).arg(dir).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+}
+
 fn findings_of<'a>(j: &'a Value, kind: &str) -> Vec<&'a Value> {
     j["data"]["findings"].as_array().unwrap().iter().filter(|f| f["kind"] == kind).collect()
 }
@@ -574,15 +583,7 @@ fn typography_is_author_relative() {
     // A corpus without a single quote has no quote style to hold a draft to.
     let data = tempfile::tempdir().unwrap();
     let corpus = tempfile::tempdir().unwrap();
-    for i in 0..3 {
-        std::fs::write(corpus.path().join(format!("essay{i}.txt")), other_prose(4000)).unwrap();
-    }
-    let out = bin(data.path())
-        .args(["profile", "build", "plain", "--register", "nonfiction", "--corpus"])
-        .arg(corpus.path())
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    build_plain(data.path(), corpus.path());
     let j = check_text(data.path(), "plain", &author_prose(602, 500), &[]);
     assert_eq!(row(&j, "curly_quote_share")["status"], "unmeasured");
     assert_eq!(row(&j, "curly_apostrophe_share")["status"], "unmeasured");
@@ -649,4 +650,40 @@ fn polish_runs_above_the_authors_band_are_cited_and_fewer_is_never_a_fault() {
     assert_eq!(t["value"], 0.0);
     assert_eq!(t["status"], "in_range", "one-sided: fewer tidy beats is never off-voice: {t}");
     assert!(!flat["data"]["plan"].to_string().contains("short sentences (6 words"));
+}
+
+#[test]
+fn polish_runs_stop_at_paragraphs_so_speakers_and_posts_are_never_one_run() {
+    let data = tempfile::tempdir().unwrap();
+    let corpus = tempfile::tempdir().unwrap();
+    build_plain(data.path(), corpus.path());
+
+    // A quick exchange, one speaker per paragraph: no beats anyone could join.
+    let lines = ["\"Nothing.\"", "\"That's not a number.\"", "\"Jeremy.\""];
+    let mut turns = other_prose(500);
+    let mut tidy = turns.clone();
+    for _ in 0..4 {
+        turns.push_str(&format!("\n\n{}\n\n{}", lines.join("\n\n"), other_prose(30)));
+        tidy.push_str(&format!("\n\nI try to laugh. It comes out wrong. He steps in.\n\n{}", other_prose(30)));
+    }
+    let j = check_text(data.path(), "plain", &turns, &[]);
+    assert_eq!(row(&j, "short_triplets_per_1k")["value"], 0.0, "{}", row(&j, "short_triplets_per_1k"));
+    assert!(!j["data"]["findings"].to_string().contains("short_triplets"), "{}", j["data"]["findings"]);
+
+    // The same beats inside one paragraph are a run, cited on its own line.
+    let k = check_text(data.path(), "plain", &tidy, &[]);
+    let t = findings_of(&k, "structure").into_iter().find(|f| f["key"] == "short_triplets_per_1k").expect("tidy beats cited");
+    let want: Vec<usize> = (1..).zip(tidy.lines()).filter(|(_, l)| l.starts_with("I try to laugh")).map(|(i, _)| i).collect();
+    let got: Vec<usize> = t["lines"].as_array().unwrap().iter().map(|l| l.as_u64().unwrap() as usize).collect();
+    assert_eq!(got, want);
+    assert_eq!(t["excerpts"][0], "I try to laugh. It comes out wrong. He steps in.");
+
+    // Posts: the end of one and the start of the next are not one run.
+    let data = tempfile::tempdir().unwrap();
+    let corpus = tempfile::tempdir().unwrap();
+    build_social(data.path(), corpus.path());
+    let mut r = Lcg(78);
+    let own: Vec<String> = (0..18).map(|_| social_post(&mut r)).collect();
+    let j = check_text(data.path(), "bo", &own.join("\n---\n"), &[]);
+    assert_eq!(row(&j, "short_triplets_per_1k")["value"], 0.0, "two beats a post at most: {}", row(&j, "short_triplets_per_1k"));
 }

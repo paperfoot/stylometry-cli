@@ -308,6 +308,9 @@ pub struct Draft<'a> {
     pub token_line: Vec<usize>,
     /// (paragraph, its lines trimmed, first line index)
     pub paragraphs: Vec<(String, Vec<&'a str>, usize)>,
+    /// Split sentences the short-form way (every line break and terminal
+    /// mark ends one), as the register's measures do.
+    pub short_form: bool,
 }
 
 fn is_heading_line(l: &str) -> bool {
@@ -361,7 +364,9 @@ impl<'a> Draft<'a> {
             block.clear();
         };
         for (i, l) in lines.iter().enumerate() {
-            if l.trim().is_empty() {
+            // A separator (`---` between posts, a scene break) ends a
+            // paragraph even without blank lines around it.
+            if l.trim().is_empty() || is_separator(l) {
                 flush(&mut block, start, &mut paragraphs);
             } else if is_heading_line(l) || is_fence_line(l) {
                 flush(&mut block, start, &mut paragraphs);
@@ -374,7 +379,7 @@ impl<'a> Draft<'a> {
             }
         }
         flush(&mut block, start, &mut paragraphs);
-        Draft { lines, tokens, cased, token_line, paragraphs }
+        Draft { lines, tokens, cased, token_line, paragraphs, short_form: false }
     }
 
     pub fn prose(&self) -> Vec<String> {
@@ -423,19 +428,25 @@ impl<'a> Draft<'a> {
 
     /// `sentences`, split the way the register's measures split them.
     fn sentences_in(&self, short_form: bool) -> Vec<(usize, usize, String)> {
-        let mut out = Vec::new();
-        for (pi, (para, _, _)) in self.paragraphs.iter().enumerate() {
-            if metrics::block_kind(para) == metrics::Block::Heading || metrics::block_kind(para) == metrics::Block::Fence {
-                continue;
-            }
-            let mut cursor = 0;
-            for s in text::sentences_for(para, short_form) {
+        (0..self.paragraphs.len()).flat_map(|pi| self.paragraph_sentences(pi, short_form)).collect()
+    }
+
+    /// Paragraph `pi`'s sentences, as the measures split them, each as
+    /// (1-based line, words, text). Headings and code have none.
+    fn paragraph_sentences(&self, pi: usize, short_form: bool) -> Vec<(usize, usize, String)> {
+        let para = &self.paragraphs[pi].0;
+        if matches!(metrics::block_kind(para), metrics::Block::Heading | metrics::Block::Fence) {
+            return Vec::new();
+        }
+        let mut cursor = 0;
+        text::sentences_for(para, short_form)
+            .into_iter()
+            .map(|s| {
                 let off = para[cursor..].find(s.as_str()).map(|o| o + cursor).unwrap_or(cursor);
                 cursor = off;
-                out.push((self.line_of(pi, off), text::count_words(&metrics::strip_links(&s)), s));
-            }
-        }
-        out
+                (self.line_of(pi, off), text::count_words(&metrics::strip_links(&s)), s)
+            })
+            .collect()
     }
 
     /// Lines (1-based) whose prose contains any of `needles`, outside
@@ -467,14 +478,23 @@ impl<'a> Draft<'a> {
     }
 
     /// The polish runs of the draft's sentences, each as (first line, the
-    /// run's sentences joined), for one of the polish keys.
-    fn polish_runs(&self, key: &str, short_form: bool) -> Vec<(usize, String)> {
-        let sents: Vec<(usize, Vec<String>, String)> = self
-            .sentences_in(short_form)
-            .into_iter()
-            .map(|(line, _, s)| (line, text::word_tokens(&metrics::strip_links(&s)), s))
-            .filter(|s| !s.1.is_empty())
-            .collect();
+    /// run's sentences joined), for one of the polish keys. Paragraphs are
+    /// boundaries, as in `metrics::measure_named`, so the runs cited are the
+    /// runs counted.
+    fn polish_runs(&self, key: &str) -> Vec<(usize, String)> {
+        let mut sents: Vec<(usize, Vec<String>, String)> = Vec::new();
+        for pi in 0..self.paragraphs.len() {
+            let mut para: Vec<(usize, Vec<String>, String)> = self
+                .paragraph_sentences(pi, self.short_form)
+                .into_iter()
+                .map(|(line, _, s)| (line, text::word_tokens(&metrics::strip_links(&s)), s))
+                .filter(|s| !s.1.is_empty())
+                .collect();
+            if !para.is_empty() && !sents.is_empty() {
+                sents.push((0, Vec::new(), String::new()));
+            }
+            sents.append(&mut para);
+        }
         let toks: Vec<Vec<String>> = sents.iter().map(|s| s.1.clone()).collect();
         let p = metrics::polish(&toks);
         let runs = match key {
@@ -1072,7 +1092,7 @@ const POLISH: [(&str, &str, &str); 3] = [
 ];
 
 /// Lines of each construction above the author's band, grouped per pattern.
-fn structure_hits(d: &Draft, rows: &[MetricRow], short_form: bool) -> Vec<Hit> {
+fn structure_hits(d: &Draft, rows: &[MetricRow]) -> Vec<Hit> {
     let above = |key: &str| {
         rows.iter()
             .find(|r| r.key == key)
@@ -1117,7 +1137,7 @@ fn structure_hits(d: &Draft, rows: &[MetricRow], short_form: bool) -> Vec<Hit> {
     // Polish: each run is one hit on its first line, cited whole.
     for (key, message, suggestion) in POLISH {
         let Some(r) = rows.iter().find(|r| r.key == key && r.status == Status::OutOfRange && r.value > r.high) else { continue };
-        for (line, run) in d.polish_runs(key, short_form) {
+        for (line, run) in d.polish_runs(key) {
             let mut h = Hit::new(
                 "structure",
                 key,
@@ -1467,7 +1487,7 @@ fn punct_lines(d: &Draft, key: &str) -> Vec<usize> {
         "not_but_per_1k" => sentence_lines(d, |s| metrics::not_but_count(&[s.to_string()]) > 0),
         "double_punct_per_1k" => d.prose_lines().into_iter().filter(|(_, l)| !metrics::double_punct(l).is_empty()).map(|(i, _)| i).collect(),
         "space_before_punct_per_1k" => d.prose_lines().into_iter().filter(|(_, l)| !metrics::space_before_punct(l).is_empty()).map(|(i, _)| i).collect(),
-        k if POLISH.iter().any(|p| p.0 == k) => d.polish_runs(k, false).into_iter().map(|r| r.0).collect(),
+        k if POLISH.iter().any(|p| p.0 == k) => d.polish_runs(k).into_iter().map(|r| r.0).collect(),
         _ => Vec::new(),
     }
 }
@@ -1681,7 +1701,7 @@ fn check_long(target: &Profile, guards: &[&Profile], avoid: &[String], draft_tex
     hits.extend(metric_hits(rows, &ranges.defs, words));
     hits.extend(tell_hits(&d, &lx.rates, &lx.concepts, words < SHORT_DRAFT_WORDS));
     hits.extend(with_evidence(word_hits(&d, target, &lx.concepts, &lx.avoided)));
-    hits.extend(structure_hits(&d, rows, false));
+    hits.extend(structure_hits(&d, rows));
     // Tense drift: a long draft that sits between the author's modes.
     // Only when the author keeps to one tense per stretch: a dual-timeline
     // author's own windows straddle modes, and a mixed draft is normal there.
@@ -1804,7 +1824,8 @@ fn item_paragraphs(t: &str) -> Vec<String> {
 }
 
 fn check_short(target: &Profile, guards: &[&Profile], avoid: &[String], draft_text: &str, kind: ItemKind) -> Checked {
-    let d = Draft::of(draft_text);
+    let mut d = Draft::of(draft_text);
+    d.short_form = true;
     let words = d.tokens.len().max(1);
     let lx = lexis(target);
     let mut warnings = Vec::new();
@@ -1987,7 +2008,7 @@ fn check_short(target: &Profile, guards: &[&Profile], avoid: &[String], draft_te
             h.severity -= 15.0;
             h
         }));
-        hits.extend(structure_hits(&d, &w.rows, true));
+        hits.extend(structure_hits(&d, &w.rows));
     }
 
     // A batch of posts should vary the way the author's do.
@@ -2268,5 +2289,12 @@ mod tests {
         assert_eq!(g[0].count, 5);
         assert_eq!(g[0].lines, vec![4, 19, 30, 41]);
         assert_eq!(g[0].excerpts.len(), 3);
+    }
+
+    #[test]
+    fn a_separator_line_ends_a_paragraph() {
+        let d = Draft::of("Post one ends here. Short.\n---\nShort again. And again.");
+        assert_eq!(d.paragraphs.len(), 2, "{:?}", d.paragraphs);
+        assert_eq!(d.paragraphs[1].2, 2);
     }
 }
