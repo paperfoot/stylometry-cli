@@ -1085,8 +1085,9 @@ pub fn double_punct(t: &str) -> Vec<usize> {
 
 /// A space between a word and , . ! ? : ; ("thanks !", "so , then"), by
 /// byte offset: a typing habit, often of writers whose first language
-/// spaces them. Ellipses (" ..."), emoticons (" :)"), decimals (" .5") and
-/// domains (" .com") don't count.
+/// spaces them. Ellipses (" ...", and the spaced " . . ." of edited
+/// books), emoticons (" :)"), decimals (" .5") and domains (" .com") don't
+/// count.
 pub fn space_before_punct(t: &str) -> Vec<usize> {
     let cs: Vec<(usize, char)> = t.char_indices().collect();
     let mut out = Vec::new();
@@ -1097,7 +1098,8 @@ pub fn space_before_punct(t: &str) -> Vec<usize> {
         }
         let next = cs.get(i + 1).map(|x| x.1);
         let emoticon = matches!(c, ':' | ';') && next.is_some_and(|n| ")(DPpO/|3*-".contains(n));
-        let not_a_stop = c == '.' && next.is_some_and(|n| n == '.' || n.is_alphanumeric());
+        let spaced_dots = next == Some(' ') && cs.get(i + 2).is_some_and(|x| x.1 == '.');
+        let not_a_stop = c == '.' && (spaced_dots || next.is_some_and(|n| n == '.' || n.is_alphanumeric()));
         if !emoticon && !not_a_stop {
             out.push(cs[i].0);
         }
@@ -1865,6 +1867,10 @@ mod tests {
     fn mechanics_count_doubled_marks_spacing_and_nonwords() {
         assert_eq!(double_punct("Wow!! Really?! Hm.. ok... fine. Why??").len(), 4);
         assert_eq!(space_before_punct("Thanks ! See you , then. Nice :) and .5 and ... ok").len(), 2);
+        // Review: a book set with spaced dots ("word . . .") read as 0.9
+        // spaces before a full stop per 1,000 words, all of them ellipses.
+        assert!(space_before_punct("She paused . . . then left. He waited . . . . Nothing.").is_empty());
+        assert_eq!(space_before_punct("Really ? Yes . . . ok").len(), 1);
         assert!(is_nonword("explicitely", &[]));
         assert!(!is_nonword("Lowen", &[]), "capitalised: a name");
         assert!(!is_nonword("petus", &["petus".to_string()]), "the author's own name for it");
