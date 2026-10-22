@@ -17,8 +17,8 @@
 //! A posts voice is told apart from other posters, not from books, and
 //! that is weak at batch length (AUC ~0.8 at 250 words). So same_author
 //! needs a calibration fit against 3+ other posters (the frozen model
-//! records them) and still current; otherwise the verdict is
-//! inconclusive.
+//! records them), still current, with the claimed poster nearest;
+//! otherwise the verdict is inconclusive.
 
 use serde::Serialize;
 
@@ -187,13 +187,14 @@ pub fn voice_match(target: &Profile, all: &[Profile], text: &str) -> Result<Voic
         ));
     }
 
-    // Candidates for "nearest": every non-blend profile, plus a blend target.
+    // Candidates for "nearest": the target (a blend too) and the profiles
+    // the model ranks in (posters only, in a posts-only model).
     let mut names: Vec<String> = Vec::new();
     let mut centroids: Vec<Vec<f64>> = Vec::new();
     let target_centroid = weighted_centroid(model, target);
     names.push(target.name.clone());
     centroids.push(target_centroid);
-    for p in refs.iter().filter(|p| p.name != target.name) {
+    for p in calibrate::ranks_in(model, target, &refs) {
         if model.windows(p).is_empty() {
             continue;
         }
@@ -284,8 +285,9 @@ pub fn voice_match(target: &Profile, all: &[Profile], text: &str) -> Result<Voic
             ));
         }
         // A posts voice earns same_author only when the verifier was fit
-        // against other posters and still matches the profile set; any
-        // reason left here turns same_author into inconclusive.
+        // against other posters and still matches the profile set, the
+        // claimed poster is the nearest one; any reason left here turns
+        // same_author into inconclusive.
         let mut withheld: Vec<String> = Vec::new();
         let books_only = short_form && !posts_only;
         if books_only {
@@ -303,9 +305,9 @@ pub fn voice_match(target: &Profile, all: &[Profile], text: &str) -> Result<Voic
             });
         } else if short_form {
             if calibration_stale {
-                let unseen: Vec<&str> = refs
-                    .iter()
-                    .filter(|p| p.name != target.name && p.register.is_short_form() && !model.posters.contains(&p.name))
+                let unseen: Vec<&str> = calibrate::ranks_in(model, target, &refs)
+                    .into_iter()
+                    .filter(|p| !model.posters.contains(&p.name))
                     .map(|p| p.name.as_str())
                     .collect();
                 withheld.push(if unseen.is_empty() {
@@ -317,6 +319,12 @@ pub fn voice_match(target: &Profile, all: &[Profile], text: &str) -> Result<Voic
                         target.name
                     )
                 });
+            }
+            if nearest_profile != target.name {
+                withheld.push(format!(
+                    "the nearest poster is {nearest_profile}, not {}: same_author is withheld",
+                    target.name
+                ));
             }
             if c.imposters < MIN_IMPOSTERS {
                 warnings.push(format!(

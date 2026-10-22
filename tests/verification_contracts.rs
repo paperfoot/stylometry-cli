@@ -414,6 +414,64 @@ fn a_posts_calibration_gone_stale_withholds_same_author() {
 }
 
 #[test]
+fn posts_are_ranked_only_against_posters_in_a_posts_model() {
+    // A book whose text is the very posts of the batch: in the posters'
+    // reference model it can sit nearer than any poster, so a posts model
+    // ranks posters (and the target) only.
+    let data = tempfile::tempdir().unwrap();
+    let corpus = tempfile::tempdir().unwrap();
+    social_and_imposters(data.path(), corpus.path());
+    three_posters(data.path(), corpus.path());
+    let book = corpus.path().join("c-posts-book.txt");
+    std::fs::write(&book, posts(&VOCAB_C, 200, 7).replace("\n---\n", "\n\n")).unwrap();
+    bin()
+        .env("STYLOMETRY_DATA_DIR", data.path())
+        .args(["profile", "build", "cbook", "--register", "nonfiction", "--background", "--corpus"])
+        .arg(&book)
+        .assert()
+        .success();
+
+    let batch = posts(&VOCAB_C, 10, 7);
+    for calibrated in [false, true] {
+        if calibrated {
+            run_json(data.path(), &["calibrate", "x"], None);
+        }
+        let j = run_json(data.path(), &["compare", "-", "--profile", "x"], Some(batch.clone()));
+        let d = &j["data"];
+        assert_eq!(d["nearest_profile"], "pc", "calibrated={calibrated}: {d}");
+        let ranked: Vec<&str> = d["ranking"].as_array().unwrap().iter().map(|r| r["profile"].as_str().unwrap()).collect();
+        assert!(ranked.iter().all(|n| ["x", "pb", "pc", "pd"].contains(n)), "books ranked: {ranked:?}");
+    }
+}
+
+#[test]
+fn a_posts_same_author_needs_the_target_nearest() {
+    // Two posters share the target's vocabulary: whichever is nearest, a
+    // same_author verdict always names the target as the nearest poster.
+    let data = tempfile::tempdir().unwrap();
+    let corpus = tempfile::tempdir().unwrap();
+    social_and_imposters(data.path(), corpus.path());
+    three_posters(data.path(), corpus.path());
+    build_poster(data.path(), corpus.path(), "pa", &VOCAB_A, 200, 5);
+    run_json(data.path(), &["calibrate", "x"], None);
+
+    let mut withheld = 0;
+    for seed in 20..32 {
+        let j = run_json(data.path(), &["compare", "-", "--profile", "x"], Some(posts(&VOCAB_A, 10, seed)));
+        let d = &j["data"];
+        let p = d["p_same_author"].as_f64().unwrap();
+        let warnings = d["warnings"].to_string();
+        if d["verdict"] == "same_author" {
+            assert_eq!(d["nearest_profile"], "x", "{d}");
+        } else if p > 0.65 {
+            withheld += 1;
+            assert!(warnings.contains("withheld"), "{d}");
+        }
+    }
+    assert!(withheld > 0, "the gate was never exercised");
+}
+
+#[test]
 fn a_short_batch_says_how_much_to_pool() {
     let data = tempfile::tempdir().unwrap();
     let corpus = tempfile::tempdir().unwrap();

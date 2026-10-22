@@ -549,6 +549,17 @@ pub fn reference_model(target: &Profile, refs: &[Profile], words: usize) -> Refe
     model
 }
 
+/// The profiles (target excluded) a model ranks a text against for
+/// "nearest": those of the kind it was built from. In a posts-only model a
+/// book is measured on the posters' vocabulary and spread, where another
+/// person's batch can land nearest a novel; so only posters are ranked.
+pub fn ranks_in<'a>(model: &ReferenceModel, target: &Profile, refs: &'a [Profile]) -> Vec<&'a Profile> {
+    let posts_only = !model.posters.is_empty();
+    refs.iter()
+        .filter(|p| p.name != target.name && (!posts_only || p.register.is_short_form()))
+        .collect()
+}
+
 /// Fit one length band. `refs` are the non-blend profiles (target included)
 /// that define the reference model and supply the imposters.
 pub fn fit_band(target: &Profile, refs: &[Profile], words: usize) -> Option<(BandCalibration, BandReport)> {
