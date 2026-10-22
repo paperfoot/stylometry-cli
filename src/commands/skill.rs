@@ -5,7 +5,9 @@ use crate::error::AppError;
 use crate::output::{self, Ctx};
 
 // ── Skill content ───────────────────────────────────────────────────────────
-// Built from the binary name. No hardcoded app name.
+// Built from the binary name. A signpost (Agent Skills format): when to use
+// the CLI, the loop with real commands, and how to inspect one command. All
+// flag detail lives in `agent-info`, so the skill never drifts from the binary.
 
 fn skill_content() -> String {
     let name = env!("CARGO_BIN_NAME");
@@ -13,27 +15,30 @@ fn skill_content() -> String {
         r#"---
 name: {name}
 description: >
-  Authorship verification stylometry. Build per-author profiles from their
-  writing, then verify whether a text was written by that author (calibrated
-  Burrows/Cosine Delta -> P(same author)). Local, no model needed. Run
-  `{name} agent-info` for full capabilities, flags, and exit codes.
+  Capture a writer's voice from their own text and write or edit in it: their
+  signature words, the synonyms they pick and avoid, rhythm and punctuation,
+  plus a style brief for drafting and a line-by-line check of drafts (off-voice
+  words with the author's own alternative, LLM tells, rhythm drift). Also
+  authorship verification (P(same author)). Use for "write like X", "in my
+  voice", "match the style", "check the voice", "does this sound like X",
+  "who wrote this", style briefs, voice profiles and blended voices.
 ---
 
 ## {name}
 
-Build an author profile, then compare any text against it.
+The loop: build a profile once, brief the writer, draft, check, revise.
 
 ```bash
-{name} profile build adams --corpus ./adams-essays/   # fingerprint a corpus
-{name} profile build wodehouse --corpus ./wodehouse/  # a second author = background
-{name} calibrate adams                                # fit P(same author) + AUC
-{name} compare suspect.txt --profile adams            # verdict + probability
-{name} profile list
+{name} profile build ada --corpus ./ada-books/      # .md/.txt; each file is one work
+{name} analyze ada                                  # habits and target ranges
+{name} guide ada -o ada-brief.md                    # give this brief to the writer
+{name} check draft.md --profile ada --strict        # exit 5 = failed; revise, check again
 ```
 
-Run `{name} agent-info` for the machine-readable command, flag, and exit-code
-manifest. Profiles live under the platform data dir (override with
-STYLOMETRY_DATA_DIR).
+For authorship, run `{name} background fetch` once, then `{name} calibrate ada`
+and `{name} compare text.txt --profile ada`. Piped output is JSON; follow
+`metadata.next` and each error's `suggestion`. Inspect a command's flags with
+`{name} agent-info --command check`; `{name} agent-info` lists them all.
 "#
     )
 }
@@ -116,7 +121,7 @@ pub fn install(ctx: Ctx) -> Result<(), AppError> {
                 item.path.dimmed()
             );
         }
-    });
+    })?;
 
     Ok(())
 }
@@ -169,7 +174,7 @@ pub fn status(ctx: Ctx) -> Result<(), AppError> {
             ]);
         }
         println!("{table}");
-    });
+    })?;
 
     Ok(())
 }
