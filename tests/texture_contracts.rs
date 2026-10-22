@@ -278,14 +278,23 @@ fn a_smooth_draft_gets_texture_findings_and_a_plan_step_but_never_a_different_pa
 
     let d = &on["data"];
     let tex: Vec<&Value> = d["findings"].as_array().unwrap().iter().filter(|f| f["kind"] == "texture").collect();
-    assert_eq!(tex.len(), off_keys.len(), "one finding per key off");
+    let gate_off: Vec<&str> = t["keys"].as_array().unwrap().iter().filter(|k| k["status"] == "off" && k["gate"] == true).map(|k| k["key"].as_str().unwrap()).collect();
+    assert_eq!(tex.len(), gate_off.len(), "one finding per gate key off: {off_keys:?}");
+    // Too little of an advisory kind is a diagnostic row, never advice to
+    // add it: writers given those as targets were caught for the tics.
+    for k in ["overexplain", "repeat", "splice"] {
+        let row = t["keys"].as_array().unwrap().iter().find(|r| r["key"] == k).unwrap();
+        assert_eq!((row["status"].as_str(), row["off_side"].as_str()), (Some("off"), Some("low")), "{row}");
+        assert!(row["note"].as_str().unwrap().contains("not a target"), "{row}");
+        assert!(!tex.iter().any(|f| f["key"] == k), "no finding for {k}");
+    }
     for f in &tex {
         assert_eq!(f["hard"], false);
         assert!(!f["lines"].as_array().unwrap().is_empty(), "{f}");
         assert!(!f["excerpts"].as_array().unwrap().is_empty(), "{f}");
     }
     let rough = tex.iter().find(|f| f["key"] == "rough").unwrap();
-    assert!(rough["suggestion"].as_str().unwrap().contains("not with filler"), "{rough}");
+    assert!(rough["suggestion"].as_str().unwrap().contains("Never rough it up with filler"), "{rough}");
     // Flagged passages are drilled into sentence by sentence: the figure
     // and crafted-line findings cite the marker sentences' own lines.
     let drilled: usize = t["passages"].as_array().unwrap().iter().map(|p| p["sentences"].as_array().map_or(0, Vec::len)).sum();
@@ -305,6 +314,11 @@ fn a_smooth_draft_gets_texture_findings_and_a_plan_step_but_never_a_different_pa
     let step = d["plan"].as_array().unwrap().iter().find(|s| s["action"].as_str().unwrap().contains("texture")).expect("a texture plan step");
     let action = step["action"].as_str().unwrap();
     assert!(action.starts_with("Rework the texture"), "{action}");
+    for insert in ["spell out", "repeat the key noun", "run on", "a little more fully"] {
+        assert!(!action.contains(insert), "the plan never asks to add {insert:?}: {action}");
+        assert!(!tex.iter().any(|f| f["suggestion"].as_str().unwrap().contains(insert)), "{insert:?} in a suggestion");
+    }
+    assert!(!action.contains("over-explaining") && !action.contains("run-on"), "advisory kinds stay out of the plan: {action}");
     assert!(action.contains("Start with lines"), "names the worst passages: {action}");
     assert!(step["why"].as_str().unwrap().contains("Don't fake roughness"), "{step}");
     assert_eq!(step["hard"], false);

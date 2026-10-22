@@ -299,10 +299,13 @@ fn print_texture(t: &Texture) {
         println!(
             "  {}{} {:.2} (author {:.2}–{:.2})",
             k.label,
-            if k.gate { "" } else { " [advisory]" },
+            if k.acts() { "" } else { " [diagnostic]" },
             k.draft,
             k.low,
             k.high
         );
+        if let Some(n) = &k.note {
+            println!("{}", format!("    {n}").dimmed());
+        }
     }
 }

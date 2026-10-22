@@ -2253,13 +2253,16 @@ fn habit_advice(feature: &str, h: &metrics::ItemHabits, m: &ItemMeasure, none_sh
 
 // ── Texture ──────────────────────────────────────────────────────────────────
 
-/// Add the texture judgment to a check: one soft finding per key off the
-/// author's band (citing the exact sentences JEV picked out, or the hedges
-/// counted, where it can) and one plan step, right after typography.
+/// Add the texture judgment to a check: one soft finding per gate key off
+/// the author's band (citing the exact sentences JEV picked out, or the
+/// hedges counted, where it can) and one plan step, right after typography.
 /// Advice only: nothing here is hard, so `pass`, `score` and `--strict`
 /// never move. One-sentence paragraphs already have their metric finding.
+/// Too little of an advisory kind (over-explaining, noun repetition,
+/// run-ons) or of hedges stays a row in `texture.keys` with a note: telling
+/// writers to add them is what blind judges caught as a tic.
 pub fn add_texture(c: &mut Checked, t: &texture::Texture, draft_text: &str) {
-    let off: Vec<&texture::KeyRow> = t.off().into_iter().filter(|r| r.key != "oneliner").collect();
+    let off: Vec<&texture::KeyRow> = t.off().into_iter().filter(|r| r.acts()).collect();
     if !t.measured() || off.is_empty() {
         return;
     }
@@ -2285,8 +2288,9 @@ pub fn add_texture(c: &mut Checked, t: &texture::Texture, draft_text: &str) {
         let too_much = row.off_side == Some(texture::Side::High);
         let (more, which) = if too_much { ("too much", "above") } else { ("too little", "below") };
         if row.key == "hedge" {
-            // Counted: the exact lines, one excerpt per line with its hedges.
-            let hits: Vec<&(usize, String, String)> = if too_much { t.hedges.iter().collect() } else { Vec::new() };
+            // Counted, and only too many acts: the exact lines, one excerpt
+            // per line with its hedges.
+            let hits: Vec<&(usize, String, String)> = t.hedges.iter().collect();
             let mut by_line: Vec<(usize, Vec<String>, &str)> = Vec::new();
             for h in &hits {
                 match by_line.last_mut() {
@@ -2302,8 +2306,7 @@ pub fn add_texture(c: &mut Checked, t: &texture::Texture, draft_text: &str) {
                 lines: by_line.iter().map(|l| l.0).collect(),
                 excerpts: by_line.iter().take(MAX_EXCERPTS).map(|l| format!("L{}: {} in {}", l.0, l.1.join(", "), excerpt(l.2, &first(l)))).collect(),
                 message: format!(
-                    "{} {}: {} in this draft, {which} the author's {}–{} (median {}) at this length",
-                    if too_much { "too many" } else { "too few" },
+                    "too many {}: {} in this draft, {which} the author's {}–{} (median {}) at this length",
                     row.label,
                     t2(row.draft),
                     t2(row.low),
@@ -2312,7 +2315,7 @@ pub fn add_texture(c: &mut Checked, t: &texture::Texture, draft_text: &str) {
                 ),
                 suggestion: capitalize(def.advice),
                 hard: false,
-                severity: if row.gate && too_much { 55.0 } else { 20.0 },
+                severity: 55.0,
                 alt: None,
             });
             continue;
@@ -2358,7 +2361,7 @@ pub fn add_texture(c: &mut Checked, t: &texture::Texture, draft_text: &str) {
             ),
             suggestion: capitalize(def.advice),
             hard: false,
-            severity: if row.gate { 55.0 } else { 20.0 },
+            severity: 55.0,
             alt: None,
         });
     }
@@ -2380,14 +2383,13 @@ pub fn add_texture(c: &mut Checked, t: &texture::Texture, draft_text: &str) {
             format!("lines {}–{} ({})", p.lines[0], p.lines[1], why.join(", "))
         })
         .collect();
-    let gate = off.iter().any(|r| r.gate);
-    let mut action = format!("{} the texture: {}", if gate { "Rework" } else { "Adjust" }, advice.join("; "));
+    let mut action = format!("Rework the texture: {}", advice.join("; "));
     if !named.is_empty() {
         action.push_str(&format!(". Start with {}", named.join("; ")));
     }
     let off_rows: Vec<String> = off.iter().map(|r| format!("{} {} (author {}–{})", r.label, t2(r.draft), t2(r.low), t2(r.high))).collect();
     let mut step_lines: Vec<usize> = worst.iter().flat_map(|(_, p)| prose_lines(p)).collect();
-    if off.iter().any(|r| r.key == "hedge" && r.off_side == Some(texture::Side::High)) {
+    if off.iter().any(|r| r.key == "hedge") {
         step_lines.extend(t.hedges.iter().map(|h| h.0));
     }
     c.plan.push(PlanStep {

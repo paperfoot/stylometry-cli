@@ -584,7 +584,7 @@ fn texture_section(b: &texture::Bands, n: usize, short: bool, hedges: Option<[f6
         "AI drafts go the other way: bare model drafts score polish about 2.0-2.5 and rough edges only 30-50%, and end on kickers and fresh metaphors. `check` reports it as `texture`.".into(),
     );
     lines.push(
-        "Don't fake roughness: padding, filler hedges and mechanical noun repetition read as imitation too. Loosen only in the author's own ways; never misspell on purpose.".into(),
+        "Don't fake roughness: padding, filler hedges, added explanations and mechanical noun repetition read as imitation too. These shares describe the author; they are not targets. Write it plain the first time instead of roughening a polished draft; never misspell on purpose.".into(),
     );
     sec(
         "Texture",

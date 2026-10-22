@@ -45,33 +45,45 @@ pub struct TextureKey {
     /// Judged by JEV per passage; otherwise counted in code. What code can
     /// count never goes to JEV.
     pub jev: bool,
-    /// What to do when the draft is off on this side.
+    /// What to do when the draft is off on a side it should act on (see
+    /// `KeyRow::acts`).
     pub advice: &'static str,
+    /// What the author does instead, said as a fact, for a side that is
+    /// reported but never advised (too little of an advisory kind, too few
+    /// hedges). Empty when there is none.
+    pub note: &'static str,
 }
 
 /// The measured keys, gate keys first. Gate: the ones that separated
 /// genuine from imitation and resisted gaming in rounds 3-4. JEV judges
 /// only what code cannot; filler hedges are a word list and one-sentence
 /// paragraphs a count, both held to the author's own rates.
+///
+/// Nothing here tells a writer to add a kind of roughness: in round 4,
+/// writers given over-explaining, noun repetition and run-ons as targets
+/// were caught for a "redundancy tic" and a "mechanical noun-repetition
+/// tic". Too little of a kind is a diagnostic row with a `note`.
 pub const KEYS: [TextureKey; 9] = [
     TextureKey { key: "rough", label: "rough edges", side: Side::Low, gate: true, jev: true,
-        advice: "loosen it in the author's own ways (the kinds below), not with filler" },
+        advice: "write it less tidied, as the author does: not every sentence smoothed and balanced. Never rough it up with filler, hedges, padding or repeated nouns",
+        note: "" },
     TextureKey { key: "polish", label: "polish (0 plain to 3 highly crafted)", side: Side::High, gate: true, jev: true,
-        advice: "write plainer: say what happens and what is thought, directly" },
+        advice: "write plainer: say what happens and what is thought, directly", note: "" },
     TextureKey { key: "button", label: "crafted closing lines", side: Side::High, gate: true, jev: true,
-        advice: "end passages on ordinary sentences, not kickers, reveals or callbacks" },
+        advice: "end passages on ordinary sentences, not kickers, reveals or callbacks", note: "" },
     TextureKey { key: "figurative", label: "fresh figures of speech", side: Side::High, gate: true, jev: true,
-        advice: "cut inventive metaphors and similes" },
+        advice: "cut inventive metaphors and similes", note: "" },
     TextureKey { key: "hedge", label: "filler hedges per 1,000 words (counted)", side: Side::Both, gate: true, jev: false,
-        advice: "use filler hedges (I guess, kind of) about as often as the author does: piling them on reads as imitation" },
+        advice: "cut filler hedges (I guess, kind of) back to the author's rate: piling them on reads as imitation",
+        note: "the author uses more filler hedges than this draft" },
     TextureKey { key: "overexplain", label: "over-explaining", side: Side::Low, gate: false, jev: true,
-        advice: "spell out reasons, logistics and feelings a little more fully, as the author does" },
+        advice: "", note: "the author spells out reasons, logistics and feelings more than this draft does" },
     TextureKey { key: "repeat", label: "repeating a noun instead of a pronoun", side: Side::Low, gate: false, jev: true,
-        advice: "repeat the key noun now and then where the author would" },
+        advice: "", note: "the author repeats a noun where a pronoun would do more often than this draft does" },
     TextureKey { key: "splice", label: "loosely joined, run-on sentences", side: Side::Low, gate: false, jev: true,
-        advice: "let a few sentences run on, joined loosely with commas or \"and\"" },
+        advice: "", note: "the author's sentences run on and join loosely more often than this draft's" },
     TextureKey { key: "oneliner", label: "one-sentence paragraphs (counted)", side: Side::High, gate: false, jev: false,
-        advice: "fold some standalone beats back into their paragraphs" },
+        advice: "fold some standalone beats back into their paragraphs", note: "" },
 ];
 
 /// The keys JEV judges.
@@ -946,6 +958,19 @@ pub struct KeyRow {
     /// When off: low (too little) or high (too much).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub off_side: Option<Side>,
+    /// When off on a side that is reported, never advised: what the
+    /// author does instead. A diagnostic, not a target.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl KeyRow {
+    /// Whether the draft should change for this row: a gate key off on its
+    /// fault side, except too few hedges. Too little of an advisory kind or
+    /// of hedges is only reported: added on purpose it reads as imitation.
+    pub fn acts(&self) -> bool {
+        self.status == "off" && self.gate && !(self.side == Side::Both && self.off_side == Some(Side::Low))
+    }
 }
 
 /// One judged passage of the draft.
@@ -1085,6 +1110,7 @@ fn off_side(side: Side, v: f64, band: [f64; 3], may_be_high: bool) -> Option<Sid
 
 fn row(k: &'static TextureKey, draft: f64, band: [f64; 3], may_be_high: bool) -> KeyRow {
     let off = off_side(k.side, draft, band, may_be_high);
+    let reported_only = off.is_some() && (!k.gate || (k.side == Side::Both && off == Some(Side::Low)));
     KeyRow {
         key: k.key,
         label: k.label,
@@ -1097,6 +1123,8 @@ fn row(k: &'static TextureKey, draft: f64, band: [f64; 3], may_be_high: bool) ->
         high: band[2],
         status: if off.is_some() { "off" } else { "ok" },
         off_side: off,
+        note: (reported_only && !k.note.is_empty())
+            .then(|| format!("{}: a diagnostic, not a target; added on purpose it reads as imitation", k.note)),
     }
 }
 
