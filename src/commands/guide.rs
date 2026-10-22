@@ -110,17 +110,26 @@ struct Ctxt<'a> {
 pub fn run(ctx: Ctx, a: GuideArgs) -> Result<(), AppError> {
     let p = store::load(&a.profile)?;
     let r = analyze::report(&p, a.limit, a.window);
-    let register = a.register.unwrap_or(p.register);
     let mut warnings = r.warnings.clone();
-    if register.is_short_form() != p.register.is_short_form() {
-        warnings.push(format!(
-            "'{}' holds {} writing; a {} brief from it is directional (build a {} profile for a firm one)",
-            p.name,
-            p.register.as_str(),
-            register.as_str(),
-            register.as_str()
-        ));
-    }
+    // A template needs the matching unit of analysis: posts can't yield a
+    // chapter brief, nor chapters a post brief. Across that line the
+    // profile's own register wins, with a warning saying how to get the
+    // other.
+    let register = match a.register {
+        Some(want) if want.is_short_form() != p.register.is_short_form() => {
+            warnings.push(format!(
+                "'{}' holds {} writing, so this is a {} brief; for a {} brief build a profile from that kind of writing: {BIN} profile build <name> --corpus <path> --register {}",
+                p.name,
+                p.register.as_str(),
+                p.register.as_str(),
+                want.as_str(),
+                want.as_str()
+            ));
+            p.register
+        }
+        Some(want) => want,
+        None => p.register,
+    };
     let for_text = match &a.for_file {
         Some(f) => Some(input::read_text(Some(f.clone()), None, "guide")?),
         None => None,
@@ -145,11 +154,11 @@ pub fn run(ctx: Ctx, a: GuideArgs) -> Result<(), AppError> {
         for_text,
         exemplars: a.exemplars,
     };
-    let (sections, picks, topic_match) = match (register, p.register.is_short_form()) {
-        (Register::Social, true) => social(&c),
-        (Register::Email | Register::Message, true) => mail(&c),
-        (Register::Fiction, _) => fiction(&c),
-        _ => prose(&c),
+    let (sections, picks, topic_match) = match register {
+        Register::Social => social(&c),
+        Register::Email | Register::Message => mail(&c),
+        Register::Fiction => fiction(&c),
+        Register::Nonfiction | Register::Blog => prose(&c),
     };
     let markdown = render(&sections);
     let brief_words: usize = sections.iter().filter(|s| !s.exemplar).map(|s| count(&s.heading) + count(&s.body)).sum();
@@ -892,7 +901,7 @@ fn stance(c: &Ctxt) -> Section {
 
 fn prose(c: &Ctxt) -> (Vec<Section>, Vec<Example>, TopicMatch) {
     let r = c.r;
-    let what = if c.register == Register::Blog { "posts" } else { "non-fiction" };
+    let what = if c.register == Register::Blog { "blog posts" } else { "non-fiction" };
     let mut out = vec![header(c, what)];
     out.push(sec("The voice in brief", bullets(&long_summary(r, false))));
     out.extend(openings_closings(c));
