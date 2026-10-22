@@ -17,7 +17,8 @@
 use serde::Serialize;
 
 use crate::engine::calibrate::{
-    self, MIN_IMPOSTERS, P_ABSTAIN_HIGH, P_ABSTAIN_LOW, bands_for, own_deltas, weighted_centroid,
+    self, MIN_IMPOSTERS, MIN_SHORT_FORM_IMPOSTERS, P_ABSTAIN_HIGH, P_ABSTAIN_LOW, bands_for, own_deltas,
+    weighted_centroid,
 };
 use crate::engine::delta::cosine_delta;
 use crate::engine::model::{ReferenceModel, reference_signature};
@@ -164,7 +165,7 @@ pub fn voice_match(target: &Profile, all: &[Profile], text: &str) -> Result<Voic
                 .filter(|&w| target.windows(w).len() >= 3)
                 .collect();
             let bw = pick_band(&lens, words);
-            live = ReferenceModel::build(&refs, DEFAULT_MFW, DEFAULT_TRIGRAMS, bw);
+            live = ReferenceModel::build(&calibrate::reference_pool(target, &refs), DEFAULT_MFW, DEFAULT_TRIGRAMS, bw);
             (&live, None, None)
         }
     };
@@ -272,7 +273,19 @@ pub fn voice_match(target: &Profile, all: &[Profile], text: &str) -> Result<Voic
                 target.name
             ));
         }
-        if c.imposters < MIN_IMPOSTERS {
+        let posters = calibrate::short_form_imposters(target, &refs);
+        let books_only = short_form && posters < MIN_SHORT_FORM_IMPOSTERS;
+        if books_only {
+            warnings.push(format!(
+                "{} is a short-form voice verified against {posters} other poster(s): P(same author) here separates posts from books, not this person from other posters, so same_author is reported as inconclusive; add 3+ other writers' posts with `{bin} profile build <name> --corpus <their-posts.json> --background`, then `{bin} calibrate {}`",
+                target.name, target.name
+            ));
+        } else if short_form && c.imposters < MIN_IMPOSTERS {
+            warnings.push(format!(
+                "calibrated against only {} other poster(s): unseen posters may pass as same_author; add more with `{bin} profile build <name> --corpus <their-posts.json> --background`, then `{bin} calibrate {}`",
+                c.imposters, target.name
+            ));
+        } else if c.imposters < MIN_IMPOSTERS {
             warnings.push(format!(
                 "calibrated against only {} imposter(s): unseen authors may pass as same_author; run `{bin} background fetch` then `{bin} calibrate {}`",
                 c.imposters, target.name
@@ -283,7 +296,10 @@ pub fn voice_match(target: &Profile, all: &[Profile], text: &str) -> Result<Voic
                 "at {band_words} words this profile's verifier has AUC {auc:.2}: treat the verdict as directional; longer text verifies better"
             ));
         }
-        verdict_from_p(p).to_string()
+        match verdict_from_p(p) {
+            "same_author" if books_only => "inconclusive".to_string(),
+            v => v.to_string(),
+        }
     } else if names.len() < 2 {
         warnings.push(format!(
             "no other profiles to compare against: install reference authors with `{bin} background fetch`"

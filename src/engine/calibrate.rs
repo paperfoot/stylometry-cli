@@ -492,16 +492,59 @@ fn split_positives(own: &OwnDeltas) -> (Vec<f64>, Vec<f64>) {
     tail_split(&own.deltas, TEST_FRACTION)
 }
 
+/// Short-form imposters a posts/messages voice needs before its verifier
+/// means "this person, not another poster".
+pub const MIN_SHORT_FORM_IMPOSTERS: usize = 3;
+
+/// Short-form profiles in `refs` other than the target.
+pub fn short_form_imposters(target: &Profile, refs: &[Profile]) -> usize {
+    refs.iter()
+        .filter(|p| p.name != target.name && p.kind != ProfileKind::Blend && p.register.is_short_form())
+        .count()
+}
+
+/// The imposters a target is fit against. A short-form voice is fit against
+/// other people's posts once there are `MIN_SHORT_FORM_IMPOSTERS` of them:
+/// books are so far from any post that, as negatives, they put the
+/// threshold where every poster passes (measured: 17 of 19 batches of an
+/// unseen X author verified as the owner against a books-only background).
+fn imposter_pool<'a>(target: &Profile, refs: &'a [Profile]) -> Vec<&'a Profile> {
+    let others = refs.iter().filter(|p| p.name != target.name);
+    if form_matched(target, refs) {
+        others.filter(|p| p.register.is_short_form()).collect()
+    } else {
+        others.collect()
+    }
+}
+
+fn form_matched(target: &Profile, refs: &[Profile]) -> bool {
+    target.register.is_short_form() && short_form_imposters(target, refs) >= MIN_SHORT_FORM_IMPOSTERS
+}
+
+/// The profiles a target's reference model (vocabulary, mean, sd) is built
+/// from. For a short-form voice with enough other posters these are the
+/// posters: z-scored against books, every post deviates the same way (links,
+/// "I", short sentences) and that shared axis swamps who wrote it.
+pub fn reference_pool(target: &Profile, refs: &[Profile]) -> Vec<Profile> {
+    if form_matched(target, refs) {
+        refs.iter()
+            .filter(|p| p.name == target.name || p.register.is_short_form())
+            .cloned()
+            .collect()
+    } else {
+        refs.to_vec()
+    }
+}
+
 /// Fit one length band. `refs` are the non-blend profiles (target included)
 /// that define the reference model and supply the imposters.
 pub fn fit_band(target: &Profile, refs: &[Profile], words: usize) -> Option<(BandCalibration, BandReport)> {
-    let model = ReferenceModel::build(refs, DEFAULT_MFW, DEFAULT_TRIGRAMS, words);
+    let model = ReferenceModel::build(&reference_pool(target, refs), DEFAULT_MFW, DEFAULT_TRIGRAMS, words);
     let own = own_deltas(&model, target);
     let centroid = weighted_centroid(&model, target);
     // Negatives per imposter author, so whole authors can be held out.
-    let by_imposter: Vec<Vec<f64>> = refs
-        .iter()
-        .filter(|p| p.name != target.name)
+    let by_imposter: Vec<Vec<f64>> = imposter_pool(target, refs)
+        .into_iter()
         .map(|p| {
             model
                 .passage_zvectors(p)
@@ -589,7 +632,7 @@ pub fn calibrate(target: &Profile, refs: &[Profile]) -> Result<(Calibration, Vec
             format!("Calibrate its components instead: {bin} calibrate {}", parts.first().copied().unwrap_or("<author>")),
         ));
     }
-    let imposters = refs.iter().filter(|p| p.name != target.name).count();
+    let imposters = imposter_pool(target, refs).len();
     if imposters == 0 {
         return Err(AppError::setup(
             "calibration needs other writers as imposters, and there are none",

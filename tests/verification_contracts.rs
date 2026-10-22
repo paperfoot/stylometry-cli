@@ -307,13 +307,16 @@ fn social_profile_calibrates_on_pooled_posts_and_compare_pools_a_batch() {
     let next = j["metadata"]["next"].to_string();
     assert!(next.contains("compare <posts-separated-by-dashes.md> --profile x"), "{next}");
 
-    // A batch of ten unseen posts is pooled into one verdict.
+    // A batch of ten unseen posts is pooled into one verdict. Against books
+    // alone P(same) only says "posts, not books": never same_author.
     let j = run_json(data.path(), &["compare", "-", "--profile", "x"], Some(posts(&VOCAB_A, 10, 7)));
     let d = &j["data"];
     assert_eq!(d["items"], 10);
     assert_eq!(d["words"], 300);
     assert_eq!(d["band_words"], 250);
-    assert_eq!(d["verdict"], "same_author", "{d}");
+    assert!(d["p_same_author"].as_f64().unwrap() > 0.65, "{d}");
+    assert_eq!(d["verdict"], "inconclusive", "{d}");
+    assert!(d["warnings"].to_string().contains("separates posts from books"), "{d}");
     let j = run_json(data.path(), &["compare", "-", "--profile", "x"], Some(posts(&VOCAB_C, 10, 7)));
     assert_eq!(j["data"]["verdict"], "different_author");
 
@@ -325,6 +328,33 @@ fn social_profile_calibrates_on_pooled_posts_and_compare_pools_a_batch() {
     // Each post is one line plus a `---` line: posts start on odd lines.
     let second = passages[1]["start_line"].as_u64().unwrap();
     assert!(second > 1 && second % 2 == 1, "second window starts on a post's first line: {second}");
+}
+
+#[test]
+fn other_posters_as_imposters_allow_a_same_author_verdict() {
+    let data = tempfile::tempdir().unwrap();
+    let corpus = tempfile::tempdir().unwrap();
+    social_and_imposters(data.path(), corpus.path());
+    for (name, vocab) in [("pb", &VOCAB_B), ("pc", &VOCAB_C), ("pd", &VOCAB_D)] {
+        let f = corpus.path().join(format!("{name}.txt"));
+        std::fs::write(&f, posts(vocab, 120, 3)).unwrap();
+        bin()
+            .env("STYLOMETRY_DATA_DIR", data.path())
+            .args(["profile", "build", name, "--register", "social", "--background", "--corpus"])
+            .arg(&f)
+            .assert()
+            .success();
+    }
+    // Fit against the three posters only (books are not this voice's rivals).
+    let j = run_json(data.path(), &["calibrate", "x"], None);
+    assert_eq!(j["data"]["imposters"], 3);
+    assert!(!j["data"]["warnings"].to_string().contains("short-form imposter"));
+
+    let j = run_json(data.path(), &["compare", "-", "--profile", "x"], Some(posts(&VOCAB_A, 10, 7)));
+    assert_eq!(j["data"]["verdict"], "same_author", "{}", j["data"]);
+    let j = run_json(data.path(), &["compare", "-", "--profile", "x"], Some(posts(&VOCAB_C, 10, 7)));
+    assert_eq!(j["data"]["verdict"], "different_author");
+    assert_eq!(j["data"]["nearest_profile"], "pc");
 }
 
 #[test]
