@@ -12,6 +12,8 @@ const LLM_TELLS: &str = include_str!("data/llm_tells.txt");
 const SLOP_WORDS: &str = include_str!("data/slop_words.txt");
 const SLOP_PHRASES: &str = include_str!("data/slop_phrases.txt");
 const STOPWORDS: &str = include_str!("data/stopwords_nltk.txt");
+const SOCIAL_TELLS: &str = include_str!("data/social_tells.txt");
+const INFORMAL: &str = include_str!("data/informal.txt");
 
 fn lines(src: &str) -> impl Iterator<Item = &str> {
     src.lines()
@@ -58,6 +60,8 @@ static SLOP_WORD_LIST: LazyLock<Vec<&'static str>> = LazyLock::new(|| lines(SLOP
 static SLOP_PHRASE_LIST: LazyLock<Vec<&'static str>> =
     LazyLock::new(|| lines(SLOP_PHRASES).collect());
 static STOP_SET: LazyLock<HashSet<&'static str>> = LazyLock::new(|| lines(STOPWORDS).collect());
+static SOCIAL_TELL_LIST: LazyLock<Vec<&'static str>> = LazyLock::new(|| lines(SOCIAL_TELLS).collect());
+static INFORMAL_LIST: LazyLock<Vec<&'static str>> = LazyLock::new(|| lines(INFORMAL).collect());
 
 /// Articles, pronouns, prepositions, conjunctions, auxiliaries and the like.
 pub fn is_function_word(w: &str) -> bool {
@@ -105,6 +109,19 @@ pub fn slop_phrases() -> &'static [&'static str] {
     &SLOP_PHRASE_LIST
 }
 
+/// Phrases that mark machine-written social posts ("let that sink in",
+/// "here's the thing"), lowercase word tokens. Author-relative, like
+/// `llm_tells`.
+pub fn social_tells() -> &'static [&'static str] {
+    &SOCIAL_TELL_LIST
+}
+
+/// Informal and internet words (lol, tbh, gonna, ok): which of them a
+/// short-form author uses is voice.
+pub fn informal_words() -> &'static [&'static str] {
+    &INFORMAL_LIST
+}
+
 /// NLTK English stopwords, as slop-score strips them.
 pub fn is_stopword(w: &str) -> bool {
     STOP_SET.contains(w)
@@ -136,6 +153,9 @@ mod tests {
         assert!(slop_words().len() > 500);
         assert!(slop_phrases().iter().all(|p| p.contains(' ')));
         assert!(is_stopword("the") && !is_stopword("voice"));
+        assert!(social_tells().contains(&"let that sink in"));
+        assert!(social_tells().iter().all(|t| !t.contains('-')), "tells are token phrases");
+        assert!(informal_words().contains(&"tbh"));
     }
 
     #[test]

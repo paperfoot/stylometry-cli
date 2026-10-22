@@ -1,0 +1,26 @@
+# Phrases that mark machine-written social posts (X, Threads, LinkedIn),
+# matched on word tokens (lowercase; "game-changer" tokenizes to "game
+# changer"). Author-relative like every tell: an author who really writes
+# "here's the thing" keeps it. Layout tells (🧵👇, a closing "thoughts?",
+# a string of hashtags at the end, emoji bullets) are detected from the raw
+# text in voice::item_tells.
+let that sink in
+here's the thing
+unpopular opinion
+read that again
+game changer
+game changers
+buckle up
+let's dive in
+dive in
+this changes everything
+a masterclass in
+here's why it matters
+here's what you need to know
+the best part
+i'll go first
+hot take
+let me explain
+in today's world
+level up
+the secret sauce
