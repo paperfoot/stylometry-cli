@@ -16,6 +16,10 @@ pub enum AppError {
     #[error("doctor found failing checks")]
     Diagnostics(serde_json::Value),
 
+    /// `check --strict` gate failure; the full check report is the details.
+    #[error("draft failed the voice check")]
+    CheckFailed(serde_json::Value),
+
     #[error("Invalid input: {0}")]
     InvalidInput(String),
     /// Bad input with a specific recovery (also used for parse errors).
@@ -60,7 +64,7 @@ impl AppError {
 
     pub fn details(&self) -> Option<&serde_json::Value> {
         match self {
-            Self::Diagnostics(report) => Some(report),
+            Self::Diagnostics(report) | Self::CheckFailed(report) => Some(report),
             _ => None,
         }
     }
@@ -68,6 +72,7 @@ impl AppError {
     pub fn exit_code(&self) -> i32 {
         match self {
             Self::InvalidInput(_) | Self::InvalidArguments { .. } => 3,
+            Self::CheckFailed(_) => 5,
             Self::Config(_) | Self::Setup { .. } | Self::Diagnostics(_) => 2,
             Self::RateLimited(_) => 4,
             Self::Transient(_) | Self::Io(_) | Self::Update(_) | Self::Serialization => 1,
@@ -83,7 +88,8 @@ impl AppError {
             | Self::InvalidArguments { .. }
             | Self::Config(_)
             | Self::Setup { .. }
-            | Self::Diagnostics(_) => Some(false),
+            | Self::Diagnostics(_)
+            | Self::CheckFailed(_) => Some(false),
             _ => None,
         }
     }
@@ -91,6 +97,7 @@ impl AppError {
     pub fn error_code(&self) -> &str {
         match self {
             Self::Serialization => "serialization_error",
+            Self::CheckFailed(_) => "check_failed",
             Self::Diagnostics(_) | Self::Config(_) | Self::Setup { .. } => "config_error",
             Self::InvalidInput(_) | Self::InvalidArguments { .. } => "invalid_input",
             Self::Transient(_) => "transient_error",
@@ -107,6 +114,9 @@ impl AppError {
             }
             Self::Diagnostics(_) => {
                 "Fix the failed checks listed in error.details, then run doctor again".into()
+            }
+            Self::CheckFailed(_) => {
+                "Revise the draft for the findings in error.details (hard failures first), then run check again".into()
             }
             Self::InvalidInput(_) => {
                 concat!("Check arguments with: ", env!("CARGO_BIN_NAME"), " --help").into()

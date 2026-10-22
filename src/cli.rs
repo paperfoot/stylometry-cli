@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
 #[command(
@@ -35,6 +35,9 @@ pub enum Commands {
         /// Items per list (signature words, phrases, ...)
         #[arg(short = 'n', long, default_value_t = 25)]
         limit: usize,
+        /// Passage length (words) the target ranges are measured at, e.g. a scene or a chapter
+        #[arg(long, default_value_t = 1000)]
+        window: usize,
     },
     /// Style brief (Markdown) an agent can follow to write in a profile's voice
     Guide {
@@ -46,6 +49,9 @@ pub enum Commands {
         /// Items per word list
         #[arg(short = 'n', long, default_value_t = 30)]
         limit: usize,
+        /// Passage length (words) the target ranges are measured at, e.g. a scene or a chapter
+        #[arg(long, default_value_t = 1000)]
+        window: usize,
         /// Write the brief to this file instead of only returning it
         #[arg(short = 'o', long)]
         out: Option<PathBuf>,
@@ -63,6 +69,15 @@ pub enum Commands {
         /// Maximum findings to return, most important first
         #[arg(short = 'n', long, default_value_t = 50)]
         limit: usize,
+        /// File of banned words/phrases (one per line); any hit fails the check
+        #[arg(long, value_name = "FILE")]
+        avoid: Vec<PathBuf>,
+        /// Extra profile whose text the draft must not copy (the target's own text is always guarded)
+        #[arg(long, value_name = "PROFILE")]
+        guard: Vec<String>,
+        /// Gate mode: exit 5 with the report in error.details when the check fails
+        #[arg(long)]
+        strict: bool,
     },
     /// Contrast two voices: what each uses that the other doesn't
     Diff {
@@ -73,6 +88,17 @@ pub enum Commands {
         /// Items per list
         #[arg(short = 'n', long, default_value_t = 20)]
         limit: usize,
+    },
+    /// Export a profile's passages as fine-tuning data (JSONL continuation pairs)
+    Export {
+        /// Profile name
+        profile: String,
+        /// Output file (JSONL, one example per line)
+        #[arg(short = 'o', long)]
+        out: PathBuf,
+        /// Example shape: chat messages or prompt/completion
+        #[arg(long, value_enum, default_value = "chat")]
+        format: ExportFormat,
     },
     /// Authorship verification: was this text written by the profile's author?
     Compare {
@@ -207,4 +233,13 @@ pub enum ConfigAction {
     Show,
     /// Print configuration file path
     Path,
+}
+
+#[derive(Clone, Copy, ValueEnum, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportFormat {
+    /// {"messages": [system, user (preceding text), assistant (continuation)]}
+    Chat,
+    /// {"prompt": preceding text, "completion": continuation}
+    Completion,
 }

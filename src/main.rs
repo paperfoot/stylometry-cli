@@ -76,19 +76,43 @@ fn main() {
                 commands::profile::remove(ctx, name, confirm)
             }
         },
-        Commands::Analyze { source, limit } => commands::analyze::run(ctx, source, limit),
+        Commands::Analyze {
+            source,
+            limit,
+            window,
+        } => commands::analyze::run(ctx, source, limit, window),
         Commands::Guide {
             profile,
             exemplars,
             limit,
+            window,
             out,
-        } => commands::guide::run(ctx, profile, exemplars, limit, out),
+        } => commands::guide::run(ctx, profile, exemplars, limit, window, out),
         Commands::Check {
             file,
             profile,
             text,
             limit,
-        } => commands::check::run(ctx, profile, file, text, limit),
+            avoid,
+            guard,
+            strict,
+        } => commands::check::run(
+            ctx,
+            commands::check::CheckArgs {
+                profile,
+                file,
+                text,
+                limit,
+                avoid,
+                guard,
+                strict,
+            },
+        ),
+        Commands::Export {
+            profile,
+            out,
+            format,
+        } => commands::export::run(ctx, profile, out, format),
         Commands::Diff { a, b, limit } => commands::diff::run(ctx, a, b, limit),
         Commands::Compare {
             profile,

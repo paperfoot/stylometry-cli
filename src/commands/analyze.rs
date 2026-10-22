@@ -6,7 +6,6 @@ use crate::error::AppError;
 use crate::output::Ctx;
 
 #[allow(unused_variables)]
-pub fn run(ctx: Ctx, source: String, limit: usize) -> Result<(), AppError> {
-    let _ = ctx;
+pub fn run(ctx: Ctx, source: String, limit: usize, window: usize) -> Result<(), AppError> {
     Err(AppError::InvalidInput("`analyze` is not implemented yet".into()))
 }

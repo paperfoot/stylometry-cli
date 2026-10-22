@@ -2,11 +2,19 @@
 //!
 //! FOUNDATION STUB: implemented by a build lane.
 
+use std::path::PathBuf;
+
 use crate::error::AppError;
 use crate::output::Ctx;
 
 #[allow(unused_variables)]
-pub fn run(ctx: Ctx, profile: String, exemplars: usize, limit: usize, out: Option<std::path::PathBuf>) -> Result<(), AppError> {
-    let _ = ctx;
+pub fn run(
+    ctx: Ctx,
+    profile: String,
+    exemplars: usize,
+    limit: usize,
+    window: usize,
+    out: Option<PathBuf>,
+) -> Result<(), AppError> {
     Err(AppError::InvalidInput("`guide` is not implemented yet".into()))
 }
