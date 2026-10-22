@@ -49,9 +49,9 @@ const MAX_PLAN: usize = 8;
 /// metric), with the lines it occurs on. Never one finding per sentence.
 #[derive(Debug, Clone, Serialize)]
 pub struct Finding {
-    /// copy_overlap | avoid_list | never | length | metric_out_of_range |
-    /// habit | llm_tell | off_voice_word | synonym_variation | structure |
-    /// tense_drift | batch
+    /// copy_overlap | avoid_list | never | length | typography |
+    /// metric_out_of_range | habit | llm_tell | off_voice_word |
+    /// synonym_variation | structure | tense_drift | batch
     pub kind: &'static str,
     /// What the finding is about: a metric key, a word, a habit.
     pub key: String,
@@ -418,13 +418,18 @@ impl<'a> Draft<'a> {
 
     /// Every sentence of the prose: (1-based line, words).
     fn sentences(&self) -> Vec<(usize, usize, String)> {
+        self.sentences_in(false)
+    }
+
+    /// `sentences`, split the way the register's measures split them.
+    fn sentences_in(&self, short_form: bool) -> Vec<(usize, usize, String)> {
         let mut out = Vec::new();
         for (pi, (para, _, _)) in self.paragraphs.iter().enumerate() {
             if metrics::block_kind(para) == metrics::Block::Heading || metrics::block_kind(para) == metrics::Block::Fence {
                 continue;
             }
             let mut cursor = 0;
-            for s in text::sentences(para) {
+            for s in text::sentences_for(para, short_form) {
                 let off = para[cursor..].find(s.as_str()).map(|o| o + cursor).unwrap_or(cursor);
                 cursor = off;
                 out.push((self.line_of(pi, off), text::count_words(&metrics::strip_links(&s)), s));
@@ -441,6 +446,45 @@ impl<'a> Draft<'a> {
             .enumerate()
             .filter(|(_, l)| !is_heading_line(l) && needles.iter().any(|n| prose_of_line(l).contains(n)))
             .map(|(i, _)| i + 1)
+            .collect()
+    }
+
+    /// Prose lines (1-based) with their text, links stripped: outside code
+    /// blocks and headings.
+    fn prose_lines(&self) -> Vec<(usize, String)> {
+        let mut in_code = false;
+        let mut out = Vec::new();
+        for (i, l) in self.lines.iter().enumerate() {
+            if is_fence_line(l) {
+                in_code = !in_code;
+                continue;
+            }
+            if !in_code && !is_heading_line(l) {
+                out.push((i + 1, prose_of_line(l)));
+            }
+        }
+        out
+    }
+
+    /// The polish runs of the draft's sentences, each as (first line, the
+    /// run's sentences joined), for one of the polish keys.
+    fn polish_runs(&self, key: &str, short_form: bool) -> Vec<(usize, String)> {
+        let sents: Vec<(usize, Vec<String>, String)> = self
+            .sentences_in(short_form)
+            .into_iter()
+            .map(|(line, _, s)| (line, text::word_tokens(&metrics::strip_links(&s)), s))
+            .filter(|s| !s.1.is_empty())
+            .collect();
+        let toks: Vec<Vec<String>> = sents.iter().map(|s| s.1.clone()).collect();
+        let p = metrics::polish(&toks);
+        let runs = match key {
+            "short_triplets_per_1k" => p.triplets,
+            "anaphora_runs_per_1k" => p.anaphora,
+            "mirror_pairs_per_1k" => p.mirrors,
+            _ => Vec::new(),
+        };
+        runs.into_iter()
+            .map(|(i, n)| (sents[i].0, sents[i..i + n].iter().map(|s| s.2.as_str()).collect::<Vec<_>>().join(" ")))
             .collect()
     }
 
@@ -879,7 +923,7 @@ struct Windowed {
 /// short-form draft's items pooled) among the author's `words`-word windows.
 fn windowed(target: &Profile, paragraphs: &[String], words: usize, fw: &[String]) -> Windowed {
     let pooled = target.register.is_short_form();
-    let values = metrics::measure_for(paragraphs, fw, pooled);
+    let values = metrics::measure_named(paragraphs, fw, pooled, &target.proper_nouns);
     let defs = metrics::defs(fw);
     let at = |k: &str| defs.iter().position(|d| d.key == k).unwrap_or(0);
     // Narrative mode: compare a present-tense chapter with present-tense
@@ -1014,8 +1058,21 @@ fn reliability(compared: usize, words: usize, short: bool) -> &'static str {
     }
 }
 
+/// The polish measures, what their runs are, and what to do about them.
+const POLISH: [(&str, &str, &str); 3] = [
+    ("short_triplets_per_1k",
+     "runs of three or more short sentences (6 words or fewer): tidy beats",
+     "Join two of the beats, or let one run on with a clause"),
+    ("anaphora_runs_per_1k",
+     "runs of sentences opening the same way",
+     "Vary the openings, or fold the run into one sentence"),
+    ("mirror_pairs_per_1k",
+     "mirrored pairs: a sentence and its negation side by side",
+     "Say it once: cut the mirror, or let the contradiction sit inside one plainer sentence"),
+];
+
 /// Lines of each construction above the author's band, grouped per pattern.
-fn structure_hits(d: &Draft, rows: &[MetricRow]) -> Vec<Hit> {
+fn structure_hits(d: &Draft, rows: &[MetricRow], short_form: bool) -> Vec<Hit> {
     let above = |key: &str| {
         rows.iter()
             .find(|r| r.key == key)
@@ -1057,6 +1114,22 @@ fn structure_hits(d: &Draft, rows: &[MetricRow]) -> Vec<Hit> {
             }
         }
     }
+    // Polish: each run is one hit on its first line, cited whole.
+    for (key, message, suggestion) in POLISH {
+        let Some(r) = rows.iter().find(|r| r.key == key && r.status == Status::OutOfRange && r.value > r.high) else { continue };
+        for (line, run) in d.polish_runs(key, short_form) {
+            let mut h = Hit::new(
+                "structure",
+                key,
+                Some(line),
+                format!("{message}: {} per 1k words, the author {}\u{2013}{} (median {})", r.value, r.low, r.high, r.median),
+                suggestion.into(),
+            );
+            h.excerpt = excerpt(&run, "");
+            h.severity = 35.0;
+            out.push(h);
+        }
+    }
     if echoes {
         // One finding for all echoes: the repeats of the top phrases.
         let top: Vec<(String, usize)> = metrics::echo_phrases(&d.tokens).into_iter().take(5).collect();
@@ -1073,6 +1146,116 @@ fn structure_hits(d: &Draft, rows: &[MetricRow]) -> Vec<Hit> {
                 );
                 h.excerpt = d.excerpt_at(i, 3);
                 h.severity = 25.0;
+                out.push(h);
+            }
+        }
+    }
+    out
+}
+
+// ── Typography ───────────────────────────────────────────────────────────────
+
+/// How a form reads in a finding: (slug for the key, the form as named, how to write it).
+fn form_words(family: &str, form: &str) -> (String, String, String) {
+    let (slug, name, how) = match (family, form) {
+        ("double_quotes", "curly") => ("curly", "curly quotes (\u{201C} \u{201D})", "\u{201C} to open, \u{201D} to close"),
+        ("double_quotes", _) => ("straight", "straight quotes (\")", "\" for both"),
+        ("apostrophes", "curly") => ("curly", "curly apostrophes (\u{2019})", "\u{2019} (don\u{2019}t, it\u{2019}s)"),
+        ("apostrophes", _) => ("straight", "straight apostrophes (')", "' (don't, it's)"),
+        (_, "\u{2026}") => ("ellipsis_character", "ellipses as one character (\u{2026})", "the single character \u{2026}"),
+        (_, "...") => ("three_dots", "ellipses as three dots (...)", "three dots ..."),
+        (_, ". . .") => ("spaced_dots", "spaced ellipses (. . .)", "spaced dots . . ."),
+        (_, "..") => ("two_dots", "two-dot pauses (..)", "two dots .."),
+        (_, "\u{2014}") => ("closed_em_dash", "closed em dashes (word\u{2014}word)", "an em dash with no spaces: word\u{2014}word"),
+        (_, " \u{2014} ") => ("spaced_em_dash", "spaced em dashes (word \u{2014} word)", "an em dash with a space each side: word \u{2014} word"),
+        (_, "--") => ("double_hyphen", "double hyphens (--)", "two hyphens: word--word"),
+        (_, " - ") => ("spaced_hyphen", "spaced hyphens as dashes (word - word)", "a hyphen with a space each side: word - word"),
+        (_, "\u{2013}") => ("en_dash", "en dashes (\u{2013})", "an en dash: word \u{2013} word"),
+        (_, f) => return (f.to_string(), format!("'{f}' lines"), format!("a line with only {f}")),
+    };
+    (slug.to_string(), name.to_string(), how.to_string())
+}
+
+/// The draft's typographic forms per family, each with the lines it is on.
+fn draft_forms(d: &Draft, long_form: bool) -> Vec<(&'static str, Vec<(String, usize)>)> {
+    let (mut quotes, mut apostrophes, mut ellipses, mut dashes, mut breaks) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for (line, prose) in d.prose_lines() {
+        for c in prose.chars() {
+            match c {
+                '"' => quotes.push(("straight".to_string(), line)),
+                '\u{201C}' | '\u{201D}' => quotes.push(("curly".to_string(), line)),
+                _ => {}
+            }
+        }
+        for (_, curly) in metrics::apostrophes_at(&prose) {
+            apostrophes.push((if curly { "curly" } else { "straight" }.to_string(), line));
+        }
+        ellipses.extend(metrics::ellipsis_forms(&prose).into_iter().map(|(f, _)| (f.to_string(), line)));
+        dashes.extend(metrics::dash_forms(&prose).into_iter().map(|(f, _)| (f.to_string(), line)));
+    }
+    // Short-form drafts use separator lines between items, not scene breaks.
+    if long_form {
+        let blank = |i: Option<&&str>| i.is_none_or(|l| l.trim().is_empty());
+        for (i, l) in d.lines.iter().enumerate() {
+            let standalone = blank(i.checked_sub(1).and_then(|j| d.lines.get(j))) && blank(d.lines.get(i + 1));
+            if let Some(f) = crate::engine::profile::scene_break_form(l).filter(|_| standalone && !is_fence_line(l)) {
+                breaks.push((f, i + 1));
+            }
+        }
+    }
+    vec![("double_quotes", quotes), ("apostrophes", apostrophes), ("ellipses", ellipses), ("dashes", dashes), ("scene_breaks", breaks)]
+}
+
+/// Off-habit dashes or ellipses a draft needs before they are a finding.
+const TYPOGRAPHY_MIN_STRAYS: usize = 3;
+
+/// Typographic forms the author (almost) never uses where they hold another
+/// form at least 80% of the time: one finding per form, with the lines and
+/// the exact conversion. Mechanical and certain, so they lead the plan.
+fn typography_hits(d: &Draft, habits: &metrics::TypographyHabits, long_form: bool) -> Vec<Hit> {
+    let family_habits = [
+        ("double_quotes", &habits.double_quotes),
+        ("apostrophes", &habits.apostrophes),
+        ("ellipses", &habits.ellipses),
+        ("dashes", &habits.dashes),
+        ("scene_breaks", &habits.scene_breaks),
+    ];
+    let mut out = Vec::new();
+    for (family, found) in draft_forms(d, long_form) {
+        let Some((_, shares)) = family_habits.iter().find(|f| f.0 == family) else { continue };
+        let Some((top, top_share)) = shares.first().filter(|t| t.1 >= metrics::TYPOGRAPHY_HABIT_SHARE) else { continue };
+        let mut forms: Vec<&String> = found.iter().map(|f| &f.0).collect();
+        forms.sort();
+        forms.dedup();
+        for form in forms {
+            let author = shares.iter().find(|s| &s.0 == form).map(|s| s.1).unwrap_or(0.0);
+            // A form the author really uses (10%+) is voice, not a slip.
+            if form == top || author >= 0.1 {
+                continue;
+            }
+            let at: Vec<usize> = found.iter().filter(|f| &f.0 == form).map(|f| f.1).collect();
+            let n = at.len();
+            // Dashes and ellipses are set differently from book to book (an
+            // unseen Hoover novel spaces its ellipses), so a stray one or two
+            // is no certainty; quotes, apostrophes and break lines are.
+            if matches!(family, "dashes" | "ellipses") && n < TYPOGRAPHY_MIN_STRAYS {
+                continue;
+            }
+            let mut lines = at.clone();
+            lines.dedup();
+            let (slug, from, _) = form_words(family, form);
+            let (_, to, how) = form_words(family, top);
+            // One hit per mark: the grouped finding counts marks, lists lines.
+            for line in at {
+                let mut h = Hit::new(
+                    "typography",
+                    format!("{family}:{slug}"),
+                    Some(line),
+                    format!("the author writes {to} {} of the time, {from} {}; this draft has {n} {from}", pct(*top_share), pct(author)),
+                    format!("Use {to}: {n} {from} on lines {} \u{2192} {how}", join_lines(&lines)),
+                );
+                h.excerpt = excerpt(d.lines[line - 1].trim(), "");
+                h.severity = 300.0 - (n as f64 - 1.0).min(10.0) + (n as f64).min(50.0);
                 out.push(h);
             }
         }
@@ -1267,6 +1450,9 @@ fn punct_lines(d: &Draft, key: &str) -> Vec<usize> {
         "trailing_ing_per_1k" => sentence_lines(d, |s| metrics::trailing_ing_count(s) > 0),
         "and_chains_per_1k_sentences" => sentence_lines(d, |s| metrics::is_and_chain(&text::word_tokens(s))),
         "not_but_per_1k" => sentence_lines(d, |s| metrics::not_but_count(&[s.to_string()]) > 0),
+        "double_punct_per_1k" => d.prose_lines().into_iter().filter(|(_, l)| !metrics::double_punct(l).is_empty()).map(|(i, _)| i).collect(),
+        "space_before_punct_per_1k" => d.prose_lines().into_iter().filter(|(_, l)| !metrics::space_before_punct(l).is_empty()).map(|(i, _)| i).collect(),
+        k if POLISH.iter().any(|p| p.0 == k) => d.polish_runs(k, false).into_iter().map(|r| r.0).collect(),
         _ => Vec::new(),
     }
 }
@@ -1336,6 +1522,18 @@ fn finding_steps(findings: &[Finding]) -> Vec<PlanStep> {
             lines: f.lines.clone(),
             hard: true,
             order: 1000.0 + f.severity,
+        });
+    }
+    // Typography is mechanical and certain: one step, ahead of every soft step.
+    let typo: Vec<&Finding> = findings.iter().filter(|f| f.kind == "typography").collect();
+    if !typo.is_empty() {
+        steps.push(PlanStep {
+            action: format!("Set type the author's way. {}", typo.iter().map(|f| f.suggestion.as_str()).collect::<Vec<_>>().join("; ")),
+            why: typo.iter().map(|f| f.message.as_str()).collect::<Vec<_>>().join("; "),
+            quantity: typo.iter().map(|f| f.count).sum::<usize>().to_string(),
+            lines: typo.iter().flat_map(|f| f.lines.iter().copied()).collect(),
+            hard: false,
+            order: 900.0,
         });
     }
     let words: Vec<&Finding> = findings
@@ -1464,10 +1662,11 @@ fn check_long(target: &Profile, guards: &[&Profile], avoid: &[String], draft_tex
         g
     }, COPY_NGRAM, &long_copy_verdict);
     hits.extend(avoid_hits(&d, avoid, &lx.concepts));
+    hits.extend(typography_hits(&d, &metrics::typography_habits(target), true));
     hits.extend(metric_hits(rows, &ranges.defs, words));
     hits.extend(tell_hits(&d, &lx.rates, &lx.concepts, words < SHORT_DRAFT_WORDS));
     hits.extend(with_evidence(word_hits(&d, target, &lx.concepts, &lx.avoided)));
-    hits.extend(structure_hits(&d, rows));
+    hits.extend(structure_hits(&d, rows, false));
     // Tense drift: a long draft that sits between the author's modes.
     // Only when the author keeps to one tense per stretch: a dual-timeline
     // author's own windows straddle modes, and a mixed draft is normal there.
@@ -1764,6 +1963,7 @@ fn check_short(target: &Profile, guards: &[&Profile], avoid: &[String], draft_te
     };
     hits.extend(copy_hits(&d, &guarded, COPY_NGRAM_SHORT, &|r| Some(r.len >= 10 || r.len as f64 >= 0.5 * item_words_at(r.line))));
     hits.extend(avoid_hits(&d, avoid, &lx.concepts));
+    hits.extend(typography_hits(&d, &metrics::typography_habits(target), false));
     hits.extend(tell_hits(&d, &lx.rates, &lx.concepts, true));
     hits.extend(with_evidence(word_hits(&d, target, &lx.concepts, &lx.avoided)));
     if let Some(w) = &win {
@@ -1772,7 +1972,7 @@ fn check_short(target: &Profile, guards: &[&Profile], avoid: &[String], draft_te
             h.severity -= 15.0;
             h
         }));
-        hits.extend(structure_hits(&d, &w.rows));
+        hits.extend(structure_hits(&d, &w.rows, true));
     }
 
     // A batch of posts should vary the way the author's do.
@@ -1992,7 +2192,7 @@ fn habit_advice(feature: &str, h: &metrics::ItemHabits, m: &ItemMeasure, none_sh
 /// Finding counts by kind, every kind present (zero when absent).
 pub fn counts(findings: &[Finding]) -> BTreeMap<&'static str, usize> {
     let mut m: BTreeMap<&'static str, usize> = [
-        "copy_overlap", "avoid_list", "never", "length", "metric_out_of_range", "habit", "llm_tell",
+        "copy_overlap", "avoid_list", "never", "length", "typography", "metric_out_of_range", "habit", "llm_tell",
         "off_voice_word", "synonym_variation", "structure", "tense_drift", "batch",
     ]
     .into_iter()
