@@ -7,6 +7,7 @@ For each held-out quarter Q of the owner's posts (newest first): build
 `owner-wo-Q` from the other quarters, calibrate it, then score
 - the owner's held-out posts of Q in batches of 10 (expect same_author)
 - the other (unseen) author's posts in batches of 10 (expect not same_author)
+and finally the totals over every quarter (report those, not one quarter).
 Imposter JSONs (other X accounts) are built as --background profiles first.
 
 Inputs are xmaster JSON (`xmaster timeline --user <handle> -c 200 --json`),
@@ -55,7 +56,8 @@ def run(bin_, env, *args, stdin=None):
     return r.returncode, (json.loads(r.stdout) if r.returncode == 0 else json.loads(r.stderr or "{}"))
 
 
-def score(bin_, env, profile, texts):
+def score(bin_, env, profile, texts, total):
+    """One line for one quarter; adds its verdicts to `total`."""
     tally, ps, words = {}, [], []
     for t in texts:
         code, j = run(bin_, env, "compare", "-", "--profile", profile, stdin=t)
@@ -67,6 +69,8 @@ def score(bin_, env, profile, texts):
         words.append(d["words"])
         if d.get("p_same_author") is not None:
             ps.append(d["p_same_author"])
+    for v, n in tally.items():
+        total[v] = total.get(v, 0) + n
     med = f"{statistics.median(ps):.2f}" if ps else "-"
     w = f"{statistics.median(words):.0f}" if words else "-"
     return f"n={sum(tally.values())} medWords={w} medP={med} {json.dumps(tally, sort_keys=True)}"
@@ -83,6 +87,8 @@ def main():
     posts = load(owner)
     other_batches = batches(load(other))
     quarters = sorted({quarter(t) for t in posts}, reverse=True)
+    # Every quarter counts: one held-out quarter is not the claim.
+    totals = {"owner": {}, "other": {}}
     for q in quarters:
         held = [t for t in posts if quarter(t) == q]
         rest = [t for t in posts if quarter(t) != q]
@@ -104,10 +110,14 @@ def main():
         c = j["data"]
         bands = " ".join(f"{b['words']}w:auc={b['auc']},acc={b['holdout_accuracy']}" for b in c["bands"])
         print(f"{q} held out ({len(held)} posts; profile from {len(rest)}): cross_work={c['cross_work']} {bands}")
-        print(f"  owner held-out batches : {score(bin_, env, name, held_b)}")
-        print(f"  other author batches   : {score(bin_, env, name, other_batches)}")
+        print(f"  owner held-out batches : {score(bin_, env, name, held_b, totals['owner'])}")
+        print(f"  other author batches   : {score(bin_, env, name, other_batches, totals['other'])}")
         os.remove(corpus)
         run(bin_, env, "profile", "remove", name, "--confirm")  # never an imposter for the next quarter
+    for who, t in totals.items():
+        n = sum(v for k, v in t.items() if k != "error")  # under 150 words: not scored
+        same = t.get("same_author", 0)
+        print(f"all quarters, {who:5s}: same_author {same}/{n} ({100 * same / max(n, 1):.0f}%) {json.dumps(t, sort_keys=True)}")
 
 
 if __name__ == "__main__":
