@@ -1,9 +1,7 @@
-//! Integration tests for the v0.2 hardening behaviors: stdin/`-` input to
-//! `compare`, the new `compare`/`calibrate` JSON fields, short-text rejection,
-//! imposter-count warnings, and frozen-reference calibration stability.
-//!
-//! Every test gets its OWN tempdir for STYLOMETRY_DATA_DIR so tests never
-//! touch real profiles and stay parallel-safe.
+//! Contracts for verification: `compare`, `calibrate`, `background`.
+//! Pins the JSON fields agents and the owner's gate script read, verdicts
+//! following P(same author), length bands, frozen-reference stability, and
+//! exit codes. Every test gets its OWN tempdir for STYLOMETRY_DATA_DIR.
 
 use std::path::Path;
 
@@ -15,13 +13,11 @@ fn bin() -> Command {
 
 // ── Synthetic corpora ───────────────────────────────────────────────────────
 //
-// Each "author" has a distinct vocabulary; text is built by alternating
-// vocabulary words with shared glue words, giving each author a clearly
-// different word-frequency fingerprint while remaining deterministic (no
-// randomness, so runs are reproducible).
+// Each "author" has a distinct vocabulary mixed with shared glue words, in
+// ten-word sentences and five-sentence paragraphs (so passages chunk like
+// prose). Deterministic: no randomness.
 
 const GLUE: [&str; 8] = ["the", "a", "and", "with", "over", "near", "under", "through"];
-
 const VOCAB_A: [&str; 12] = [
     "whale", "harpoon", "ocean", "captain", "voyage", "storm", "sail", "tide", "current",
     "anchor", "reef", "compass",
@@ -39,212 +35,218 @@ const VOCAB_D: [&str; 12] = [
     "boulder", "trail", "cairn", "moraine",
 ];
 
-/// Deterministic synthetic text of exactly `target_words` unicode words,
-/// alternating a fixed vocabulary with shared glue words.
-fn corpus_text(vocab: &[&str], target_words: usize) -> String {
-    let mut words = Vec::with_capacity(target_words);
-    let mut vi = 0usize;
-    let mut gi = 0usize;
-    for i in 0..target_words {
-        if i % 2 == 0 {
-            words.push(vocab[vi % vocab.len()]);
-            vi += 1;
+/// Deterministic prose of `n` words: vocabulary and glue words alternate
+/// (the vocabulary walks with a stride so passages vary a little).
+fn corpus_text(vocab: &[&str], n: usize) -> String {
+    let mut out = String::new();
+    for i in 0..n {
+        let w = if i % 2 == 0 {
+            vocab[(i / 2 * 5 + i / 7) % vocab.len()]
         } else {
-            words.push(GLUE[gi % GLUE.len()]);
-            gi += 1;
+            GLUE[(i / 2 + i / 11) % GLUE.len()]
+        };
+        out.push_str(w);
+        if i % 10 == 9 {
+            out.push('.');
+            out.push_str(if i % 50 == 49 { "\n\n" } else { " " });
+        } else {
+            out.push(' ');
         }
     }
-    words.join(" ")
+    out
 }
 
-/// Build a profile named `name` from `words` synthetic words of `vocab`, at
-/// --chunk-size 200 (1000 words -> 5 clean 200-word chunks).
-fn build_profile(data_dir: &Path, corpus_dir: &Path, name: &str, vocab: &[&str], words: usize) {
-    let file = corpus_dir.join(format!("{name}.txt"));
+fn build_profile(data: &Path, corpus: &Path, name: &str, vocab: &[&str], words: usize) {
+    let file = corpus.join(format!("{name}.txt"));
     std::fs::write(&file, corpus_text(vocab, words)).unwrap();
     bin()
-        .env("STYLOMETRY_DATA_DIR", data_dir)
+        .env("STYLOMETRY_DATA_DIR", data)
         .args(["profile", "build", name, "--corpus"])
         .arg(&file)
-        .args(["--chunk-size", "200"])
         .assert()
         .success();
 }
 
-fn json_of(out: &std::process::Output) -> serde_json::Value {
-    serde_json::from_slice(&out.stdout)
-        .unwrap_or_else(|e| panic!("stdout should be valid JSON: {e}\nstdout={:?}", out.stdout))
+/// Four authors; `a` is the target.
+fn four_authors(data: &Path, corpus: &Path) {
+    build_profile(data, corpus, "a", &VOCAB_A, 4000);
+    build_profile(data, corpus, "b", &VOCAB_B, 4000);
+    build_profile(data, corpus, "c", &VOCAB_C, 4000);
+    build_profile(data, corpus, "d", &VOCAB_D, 4000);
 }
 
-// ── stdin / `-` input ───────────────────────────────────────────────────────
-
-#[test]
-fn compare_via_piped_stdin_gives_verdict() {
-    let data = tempfile::tempdir().unwrap();
-    let corpus = tempfile::tempdir().unwrap();
-    build_profile(data.path(), corpus.path(), "a", &VOCAB_A, 1000);
-    build_profile(data.path(), corpus.path(), "b", &VOCAB_B, 1000);
-
-    let out = bin()
-        .env("STYLOMETRY_DATA_DIR", data.path())
-        .args(["compare", "--profile", "a"])
-        .write_stdin(corpus_text(&VOCAB_A, 200))
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "stderr={:?}", out.stderr);
-
-    let json = json_of(&out);
-    assert_eq!(json["status"], "success");
-    assert!(json["data"]["verdict"].is_string());
+fn run_json(data: &Path, args: &[&str], stdin: Option<String>) -> serde_json::Value {
+    let mut cmd = bin();
+    cmd.env("STYLOMETRY_DATA_DIR", data).args(args);
+    if let Some(s) = stdin {
+        cmd.write_stdin(s);
+    }
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "{args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).expect("stdout is one JSON envelope")
 }
 
-#[test]
-fn compare_via_dash_arg_with_stdin_works() {
-    let data = tempfile::tempdir().unwrap();
-    let corpus = tempfile::tempdir().unwrap();
-    build_profile(data.path(), corpus.path(), "a", &VOCAB_A, 1000);
-    build_profile(data.path(), corpus.path(), "b", &VOCAB_B, 1000);
-
-    let out = bin()
-        .env("STYLOMETRY_DATA_DIR", data.path())
-        .args(["compare", "--profile", "a", "-"])
-        .write_stdin(corpus_text(&VOCAB_A, 200))
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "stderr={:?}", out.stderr);
-
-    let json = json_of(&out);
-    assert_eq!(json["status"], "success");
-    assert!(json["data"]["verdict"].is_string());
-}
-
-// ── Short-text rejection ────────────────────────────────────────────────────
+// ── compare: input and fields ───────────────────────────────────────────────
 
 #[test]
-fn compare_with_short_text_exits_3() {
+fn compare_reads_stdin_only_on_dash_and_returns_gate_fields() {
     let data = tempfile::tempdir().unwrap();
     let corpus = tempfile::tempdir().unwrap();
-    build_profile(data.path(), corpus.path(), "a", &VOCAB_A, 1000);
-    build_profile(data.path(), corpus.path(), "b", &VOCAB_B, 1000);
+    four_authors(data.path(), corpus.path());
 
-    // 20 words: well under the 50-word floor.
+    let j = run_json(data.path(), &["compare", "-", "--profile", "a"], Some(corpus_text(&VOCAB_A, 600)));
+    let d = &j["data"];
+    // Fields the owner's gate script reads.
+    assert!(d["cosine_delta"].is_number());
+    assert!(d["p_same_author"].is_null(), "uncalibrated: no P");
+    assert!(d["nearest_profile"].is_string());
+    assert_eq!(d["verdict"], "close_uncalibrated");
+    assert_eq!(d["words"], 600);
+    assert!(d["band_words"].as_u64().unwrap() <= 600);
+    assert!(d["typicality"].is_number());
+    assert_eq!(d["calibration_stale"], false);
+    let ranking = d["ranking"].as_array().unwrap();
+    assert!(!ranking.is_empty() && ranking.len() <= 5);
+    assert_eq!(ranking[0]["profile"], "a");
+    // Next step: calibrate.
+    let next = j["metadata"]["next"].as_array().unwrap();
+    assert!(next.iter().any(|n| n.as_str().unwrap().contains("calibrate a")));
+
+    // Without '-', piped stdin is NOT read: an agent's open pipe must never hang it.
     bin()
         .env("STYLOMETRY_DATA_DIR", data.path())
         .args(["compare", "--profile", "a"])
-        .write_stdin(corpus_text(&VOCAB_A, 20))
+        .write_stdin(corpus_text(&VOCAB_A, 600))
         .assert()
         .code(3);
 }
 
-// ── New compare JSON fields ─────────────────────────────────────────────────
-
 #[test]
-fn compare_json_has_new_fields() {
+fn compare_rejects_texts_under_150_words() {
     let data = tempfile::tempdir().unwrap();
     let corpus = tempfile::tempdir().unwrap();
-    build_profile(data.path(), corpus.path(), "a", &VOCAB_A, 1000);
-    build_profile(data.path(), corpus.path(), "b", &VOCAB_B, 1000);
-
+    build_profile(data.path(), corpus.path(), "a", &VOCAB_A, 3000);
     let out = bin()
         .env("STYLOMETRY_DATA_DIR", data.path())
-        .args(["compare", "--profile", "a"])
-        .write_stdin(corpus_text(&VOCAB_A, 200))
+        .args(["compare", "-", "--profile", "a", "--json"])
+        .write_stdin(corpus_text(&VOCAB_A, 120))
         .output()
         .unwrap();
-    assert!(out.status.success(), "stderr={:?}", out.stderr);
-
-    let json = json_of(&out);
-    let data = &json["data"];
-    assert_eq!(data["query_words"], 200);
-    assert!(data["length_mismatch"].is_boolean());
-    assert!(data["ranking"].is_array());
-    assert!(!data["ranking"].as_array().unwrap().is_empty());
-    for r in data["ranking"].as_array().unwrap() {
-        assert!(r["profile"].is_string());
-        assert!(r["cosine_delta"].is_number());
-    }
+    assert_eq!(out.status.code(), Some(3));
+    let err: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert!(err["error"]["message"].as_str().unwrap().contains("150"));
 }
 
-// ── calibrate: imposter-count warning ───────────────────────────────────────
+// ── calibrate ───────────────────────────────────────────────────────────────
 
 #[test]
-fn calibrate_with_one_imposter_warns() {
+fn calibrate_reports_bands_and_warns_about_few_imposters() {
     let data = tempfile::tempdir().unwrap();
     let corpus = tempfile::tempdir().unwrap();
-    build_profile(data.path(), corpus.path(), "a", &VOCAB_A, 1000);
-    build_profile(data.path(), corpus.path(), "b", &VOCAB_B, 1000);
+    four_authors(data.path(), corpus.path());
 
-    let out = bin()
-        .env("STYLOMETRY_DATA_DIR", data.path())
-        .args(["calibrate", "a"])
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "stderr={:?}", out.stderr);
-
-    let json = json_of(&out);
-    let warning = json["data"]["warning"]
-        .as_str()
-        .expect("warning should be present with only 1 imposter");
+    let j = run_json(data.path(), &["calibrate", "a"], None);
+    let d = &j["data"];
+    assert_eq!(d["imposters"], 3);
+    assert_eq!(d["cross_work"], false, "one work: neighbour exclusion");
+    let bands = d["bands"].as_array().unwrap();
+    assert!(!bands.is_empty());
+    assert_eq!(bands[0]["words"], 250);
+    for b in bands {
+        for f in ["auc", "positives", "negatives", "delta_at_p50"] {
+            assert!(b[f].is_number(), "band field {f}: {b}");
+        }
+        for f in ["holdout_accuracy", "holdout_brier", "c_at_1"] {
+            assert!(b[f].is_number() || b[f].is_null(), "band field {f}: {b}");
+        }
+        assert!(b["positives"].as_u64().unwrap() >= 6);
+        assert!(b["negatives"].as_u64().unwrap() >= 20);
+    }
+    let warnings = d["warnings"].as_array().unwrap();
     assert!(
-        warning.to_lowercase().contains("imposter"),
-        "warning should mention imposter count: {warning}"
+        warnings.iter().any(|w| {
+            let w = w.as_str().unwrap();
+            w.contains("3 imposter") && w.contains("background fetch")
+        }),
+        "{warnings:?}"
     );
-    assert!(warning.contains('1'), "warning should mention the count 1: {warning}");
 }
 
 #[test]
-fn calibrate_with_three_imposters_has_no_imposter_warning() {
+fn calibrated_verdict_follows_probability() {
     let data = tempfile::tempdir().unwrap();
     let corpus = tempfile::tempdir().unwrap();
-    build_profile(data.path(), corpus.path(), "a", &VOCAB_A, 1000);
-    build_profile(data.path(), corpus.path(), "b", &VOCAB_B, 1000);
-    build_profile(data.path(), corpus.path(), "c", &VOCAB_C, 1000);
-    build_profile(data.path(), corpus.path(), "d", &VOCAB_D, 1000);
+    four_authors(data.path(), corpus.path());
+    run_json(data.path(), &["calibrate", "a"], None);
 
-    let out = bin()
-        .env("STYLOMETRY_DATA_DIR", data.path())
-        .args(["calibrate", "a"])
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "stderr={:?}", out.stderr);
-
-    let json = json_of(&out);
-    assert_eq!(json["data"]["imposters"], 3);
-    match json["data"]["warning"].as_str() {
-        None => {}
-        Some(w) => assert!(
-            !w.to_lowercase().contains("imposter"),
-            "warning should not mention imposter count with 3 imposters: {w}"
-        ),
+    for (vocab, want) in [(&VOCAB_A, "same_author"), (&VOCAB_C, "different_author")] {
+        let j = run_json(data.path(), &["compare", "-", "--profile", "a"], Some(corpus_text(vocab, 700)));
+        let d = &j["data"];
+        let p = d["p_same_author"].as_f64().expect("calibrated: P present");
+        let v = d["verdict"].as_str().unwrap();
+        let from_p = if p > 0.65 {
+            "same_author"
+        } else if p < 0.35 {
+            "different_author"
+        } else {
+            "inconclusive"
+        };
+        assert_eq!(v, from_p, "verdict must follow P={p}");
+        assert_eq!(v, want);
+        assert_eq!(d["band_words"], 500, "largest band not exceeding 700 words");
     }
 }
 
-// ── calibrate: report fields ────────────────────────────────────────────────
-
 #[test]
-fn calibrate_report_has_quality_fields() {
+fn calibrate_refuses_a_blend_and_compare_scores_it_uncalibrated() {
     let data = tempfile::tempdir().unwrap();
     let corpus = tempfile::tempdir().unwrap();
-    build_profile(data.path(), corpus.path(), "a", &VOCAB_A, 1000);
-    build_profile(data.path(), corpus.path(), "b", &VOCAB_B, 1000);
-    build_profile(data.path(), corpus.path(), "c", &VOCAB_C, 1000);
-
-    let out = bin()
+    four_authors(data.path(), corpus.path());
+    bin()
         .env("STYLOMETRY_DATA_DIR", data.path())
-        .args(["calibrate", "a"])
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "stderr={:?}", out.stderr);
+        .args(["profile", "blend", "ab", "--from", "a=0.6", "--from", "b=0.4"])
+        .assert()
+        .success();
+    bin()
+        .env("STYLOMETRY_DATA_DIR", data.path())
+        .args(["calibrate", "ab"])
+        .assert()
+        .code(3);
+    let j = run_json(data.path(), &["compare", "-", "--profile", "ab"], Some(corpus_text(&VOCAB_A, 600)));
+    let d = &j["data"];
+    assert!(d["p_same_author"].is_null(), "a blend never has a P");
+    assert!(d["verdict"].as_str().unwrap().ends_with("_uncalibrated"));
+}
 
-    let json = json_of(&out);
-    let data = &json["data"];
-    assert!(data["auc"].is_number());
-    assert!(data["accuracy"].is_number());
-    assert!(data["c_at_1"].is_number());
-    assert!(data["threshold"].is_number());
-    assert!(data["holdout"].is_boolean());
-    // holdout_brier may legitimately be null when there's no holdout split.
-    assert!(data["holdout_brier"].is_number() || data["holdout_brier"].is_null());
+#[test]
+fn long_text_is_scored_passage_by_passage() {
+    let data = tempfile::tempdir().unwrap();
+    let corpus = tempfile::tempdir().unwrap();
+    four_authors(data.path(), corpus.path());
+    run_json(data.path(), &["calibrate", "a"], None);
+
+    // Calibrated bands reach 1,000 words on a 4,000-word corpus; 6,000 words
+    // is well over twice that.
+    let text = format!("{}\n\n{}", corpus_text(&VOCAB_A, 3000), corpus_text(&VOCAB_C, 3000));
+    let j = run_json(data.path(), &["compare", "-", "--profile", "a"], Some(text));
+    let d = &j["data"];
+    let band = d["band_words"].as_u64().unwrap();
+    assert!(6000 > 2 * band);
+    let passages = d["passages"].as_array().expect("passages for a long text");
+    assert!(passages.len() >= 4);
+    assert_eq!(passages[0]["start_line"], 1);
+    for p in passages {
+        for f in ["start_line", "words", "cosine_delta", "p_same_author", "nearest_profile"] {
+            assert!(!p[f].is_null(), "passage field {f}: {p}");
+        }
+    }
+    // The drift map shows where the voice changes.
+    assert_eq!(passages.first().unwrap()["nearest_profile"], "a");
+    assert_eq!(passages.last().unwrap()["nearest_profile"], "c");
 }
 
 // ── Frozen reference stability ──────────────────────────────────────────────
@@ -253,84 +255,73 @@ fn calibrate_report_has_quality_fields() {
 fn frozen_reference_survives_profile_removal() {
     let data = tempfile::tempdir().unwrap();
     let corpus = tempfile::tempdir().unwrap();
-    build_profile(data.path(), corpus.path(), "a", &VOCAB_A, 1000);
-    build_profile(data.path(), corpus.path(), "b", &VOCAB_B, 1000);
-    build_profile(data.path(), corpus.path(), "c", &VOCAB_C, 1000);
+    four_authors(data.path(), corpus.path());
+    run_json(data.path(), &["calibrate", "a"], None);
+
+    let q = corpus_text(&VOCAB_A, 600);
+    let j1 = run_json(data.path(), &["compare", "-", "--profile", "a"], Some(q.clone()));
+    assert_eq!(j1["data"]["calibration_stale"], false);
 
     bin()
         .env("STYLOMETRY_DATA_DIR", data.path())
-        .args(["calibrate", "a"])
+        .args(["profile", "remove", "d", "--confirm"])
         .assert()
         .success();
 
-    let query = corpus_text(&VOCAB_A, 200);
-
-    let out1 = bin()
-        .env("STYLOMETRY_DATA_DIR", data.path())
-        .args(["compare", "--profile", "a"])
-        .write_stdin(query.clone())
-        .output()
-        .unwrap();
-    assert!(out1.status.success(), "stderr={:?}", out1.stderr);
-    let json1 = json_of(&out1);
-    let cosine1 = json1["data"]["cosine_delta"].clone();
-    let p1 = json1["data"]["p_same_author"].clone();
-    let verdict1 = json1["data"]["verdict"].as_str().unwrap().to_string();
-    assert!(!verdict1.ends_with("_uncalibrated"), "verdict1={verdict1}");
-    assert_eq!(json1["data"]["calibration_stale"], false);
-
-    // Remove a non-target profile.
-    bin()
-        .env("STYLOMETRY_DATA_DIR", data.path())
-        .args(["profile", "remove", "c"])
-        .assert()
-        .success();
-
-    let out2 = bin()
-        .env("STYLOMETRY_DATA_DIR", data.path())
-        .args(["compare", "--profile", "a"])
-        .write_stdin(query)
-        .output()
-        .unwrap();
-    assert!(out2.status.success(), "stderr={:?}", out2.stderr);
-    let json2 = json_of(&out2);
-
-    assert_eq!(cosine1, json2["data"]["cosine_delta"], "cosine_delta must be bit-identical");
-    assert_eq!(p1, json2["data"]["p_same_author"], "p_same_author must be bit-identical");
-    assert_eq!(json2["data"]["calibration_stale"], true, "profile set changed -> stale");
-    let verdict2 = json2["data"]["verdict"].as_str().unwrap();
-    assert!(!verdict2.ends_with("_uncalibrated"), "verdict2={verdict2} should stay calibrated");
+    let j2 = run_json(data.path(), &["compare", "-", "--profile", "a"], Some(q));
+    assert_eq!(j1["data"]["cosine_delta"], j2["data"]["cosine_delta"], "delta bit-identical");
+    assert_eq!(j1["data"]["p_same_author"], j2["data"]["p_same_author"], "P bit-identical");
+    assert_eq!(j2["data"]["calibration_stale"], true, "profile set changed -> stale");
+    assert!(!j2["data"]["verdict"].as_str().unwrap().ends_with("_uncalibrated"));
 }
 
-// ── Length mismatch ──────────────────────────────────────────────────────────
+// ── background ──────────────────────────────────────────────────────────────
+
+/// A fake Gutenberg file: header, a body of `vocab` prose, licence footer.
+fn gutenberg(vocab: &[&str]) -> String {
+    format!(
+        "Title: Test\n\n*** START OF THE PROJECT GUTENBERG EBOOK TEST ***\n\n{}\n\n*** END OF THE PROJECT GUTENBERG EBOOK TEST ***\nLicence text.\n",
+        corpus_text(vocab, 5000)
+    )
+}
 
 #[test]
-fn length_mismatch_flagged_and_warned() {
+fn background_fetch_builds_from_a_local_source_and_lists_failures() {
     let data = tempfile::tempdir().unwrap();
-    let corpus = tempfile::tempdir().unwrap();
-    build_profile(data.path(), corpus.path(), "a", &VOCAB_A, 1000);
-    build_profile(data.path(), corpus.path(), "b", &VOCAB_B, 1000);
+    let src = tempfile::tempdir().unwrap();
+    // Two catalog ids (A Tale of Two Cities, Silas Marner) present locally.
+    std::fs::write(src.path().join("98.txt"), gutenberg(&VOCAB_B)).unwrap();
+    std::fs::write(src.path().join("550.txt"), gutenberg(&VOCAB_C)).unwrap();
 
+    let mut cmd = bin();
+    cmd.env("STYLOMETRY_DATA_DIR", data.path())
+        .env("STYLOMETRY_BACKGROUND_SOURCE", src.path())
+        .args(["background", "fetch"]);
+    let out = cmd.output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let j: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let d = &j["data"];
+    let built: Vec<&str> = d["built"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+    assert_eq!(built, ["bg-dickens-two-cities", "bg-eliot-silas-marner"]);
+    assert!(d["failed"].as_array().unwrap().len() >= 30, "missing files are listed, not fatal");
+    assert_eq!(d["installed"], 2);
+
+    // Second run skips what is installed.
+    let j = run_json(data.path(), &["background", "status"], None);
+    assert_eq!(j["data"]["installed"], 2);
+    assert!(j["data"]["missing"].as_u64().unwrap() >= 30);
+    let listed = run_json(data.path(), &["profile", "list", "--all"], None);
+    assert!(listed.to_string().contains("bg-dickens-two-cities"));
+}
+
+#[test]
+fn background_fetch_with_every_download_failing_is_an_error() {
+    let data = tempfile::tempdir().unwrap();
+    let src = tempfile::tempdir().unwrap();
     bin()
         .env("STYLOMETRY_DATA_DIR", data.path())
-        .args(["calibrate", "a"])
+        .env("STYLOMETRY_BACKGROUND_SOURCE", src.path())
+        .args(["background", "fetch"])
         .assert()
-        .success();
-
-    // Calibration chunk_words = 200 (--chunk-size 200 at build time); a
-    // ~1000-word query is 5x that, well outside the [0.5, 2.0] ratio band.
-    let out = bin()
-        .env("STYLOMETRY_DATA_DIR", data.path())
-        .args(["compare", "--profile", "a"])
-        .write_stdin(corpus_text(&VOCAB_A, 1000))
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "stderr={:?}", out.stderr);
-
-    let json = json_of(&out);
-    assert_eq!(json["data"]["length_mismatch"], true);
-    let warning = json["data"]["warning"]
-        .as_str()
-        .expect("warning should be present when length_mismatch is true");
-    assert!(warning.contains("word"), "warning should mention word length: {warning}");
+        .code(2);
 }

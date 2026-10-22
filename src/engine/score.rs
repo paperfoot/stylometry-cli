@@ -276,7 +276,7 @@ pub fn voice_match(target: &Profile, all: &[Profile], text: &str) -> Result<Voic
         words,
         band_words,
         cosine_delta: round(delta, 4),
-        typicality: round(typicality, 3),
+        typicality: round(typicality, 3).max(0.0),
         p_same_author,
         nearest_profile,
         verdict,
