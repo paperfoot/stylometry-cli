@@ -466,3 +466,289 @@ fn verify_on_a_short_draft_explains_why_voice_match_is_skipped() {
     assert!(j["data"].get("voice_match").is_none());
     assert!(j["data"]["warnings"].to_string().contains("voice_match skipped"));
 }
+
+// ── Typography, mechanics and polish ────────────────────────────────────────
+
+/// Book typesetting: curly quotes and apostrophes.
+fn curly(t: &str) -> String {
+    let cs: Vec<char> = t.chars().collect();
+    let mut out = String::with_capacity(t.len());
+    let mut open = true;
+    for (i, &c) in cs.iter().enumerate() {
+        match c {
+            '"' => {
+                out.push(if open { '\u{201C}' } else { '\u{201D}' });
+                open = !open;
+            }
+            '\'' if i > 0 && cs[i - 1].is_alphabetic() => out.push('\u{2019}'),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// A curly-set author whose books break scenes with "• • •".
+fn build_curly_fiction(data: &Path, dir: &Path) {
+    for (i, seed) in [11u64, 22, 33].iter().enumerate() {
+        let book: Vec<String> = (0..6).map(|k| curly(&author_prose(*seed * 10 + k, 1500))).collect();
+        std::fs::write(dir.join(format!("book{i}.txt")), book.join("\n\n\u{2022} \u{2022} \u{2022}\n\n")).unwrap();
+    }
+    let out = bin(data).args(["profile", "build", "cora", "--register", "fiction", "--corpus"]).arg(dir).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+}
+
+/// An essayist of long abstract sentences: no quotes, no short beats.
+fn build_plain(data: &Path, dir: &Path) {
+    for i in 0..3 {
+        std::fs::write(dir.join(format!("essay{i}.txt")), other_prose(4000)).unwrap();
+    }
+    let out = bin(data).args(["profile", "build", "plain", "--register", "nonfiction", "--corpus"]).arg(dir).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+}
+
+fn findings_of<'a>(j: &'a Value, kind: &str) -> Vec<&'a Value> {
+    j["data"]["findings"].as_array().unwrap().iter().filter(|f| f["kind"] == kind).collect()
+}
+
+fn row<'a>(j: &'a Value, key: &str) -> &'a Value {
+    j["data"]["metrics"].as_array().unwrap().iter().find(|r| r["key"] == key).unwrap_or_else(|| panic!("no {key} row"))
+}
+
+#[test]
+fn typography_findings_give_the_exact_conversion_and_lead_the_plan() {
+    let data = tempfile::tempdir().unwrap();
+    let corpus = tempfile::tempdir().unwrap();
+    build_curly_fiction(data.path(), corpus.path());
+
+    // The author's voice, typed by an agent: straight quotes, a '---' break.
+    let draft = format!("{}\n---\n\n{}", author_prose(501, 450), author_prose(502, 450));
+    let straight_quotes = draft.matches('"').count();
+    let j = check_text(data.path(), "cora", &draft, &[]);
+    let typo = findings_of(&j, "typography");
+    let by = |key: &str| typo.iter().find(|f| f["key"] == key).copied().unwrap_or_else(|| panic!("no {key}: {typo:?}"));
+    let q = by("double_quotes:straight");
+    assert_eq!(q["count"].as_u64().unwrap() as usize, straight_quotes, "every straight quote, one finding");
+    assert!(!q["lines"].as_array().unwrap().is_empty());
+    let s = q["suggestion"].as_str().unwrap();
+    assert!(s.starts_with("Use curly quotes") && s.contains("\u{201C} to open, \u{201D} to close"), "{s}");
+    assert!(s.contains(&format!("{straight_quotes} straight quotes")), "{s}");
+    assert!(q["message"].as_str().unwrap().contains("100%"), "{q}");
+    assert!(by("apostrophes:straight")["suggestion"].as_str().unwrap().contains('\u{2019}'));
+    let brk = by("scene_breaks:---");
+    assert!(brk["suggestion"].as_str().unwrap().contains("\u{2022} \u{2022} \u{2022}"), "{brk}");
+    assert_eq!(j["data"]["counts"]["typography"], 3);
+
+    // Mechanical and certain: the first step after any hard ones.
+    let plan = j["data"]["plan"].as_array().unwrap();
+    let first_soft = plan.iter().find(|s| s["hard"] == false).unwrap();
+    assert!(first_soft["action"].as_str().unwrap().starts_with("Set type the author's way"), "{plan:?}");
+
+    // The shares score in their own family; the finding, not a metric row, says what to do.
+    for (key, family) in [
+        ("curly_quote_share", "typography"),
+        ("curly_apostrophe_share", "typography"),
+        ("double_punct_per_1k", "mechanics"),
+        ("space_before_punct_per_1k", "mechanics"),
+        ("nonword_per_1k", "mechanics"),
+        ("short_triplets_per_1k", "constructions"),
+        ("anaphora_runs_per_1k", "constructions"),
+        ("mirror_pairs_per_1k", "constructions"),
+    ] {
+        assert_eq!(row(&j, key)["family"], family, "{key}");
+    }
+    assert_eq!(row(&j, "curly_quote_share")["status"], "out_of_range");
+    assert!(!findings_of(&j, "metric_out_of_range").iter().any(|f| f["key"] == "curly_quote_share"));
+
+    // Set the author's way, the same words have no typography finding and
+    // score higher; a closed-up "•••" is the author's mark, set tighter.
+    let fixed = curly(&draft).replace("\n---\n", "\n\u{2022}\u{2022}\u{2022}\n");
+    let k = check_text(data.path(), "cora", &fixed, &[]);
+    assert_eq!(k["data"]["counts"]["typography"], 0, "{}", k["data"]["findings"]);
+    assert!(k["data"]["score"].as_f64().unwrap() > j["data"]["score"].as_f64().unwrap());
+}
+
+#[test]
+fn typography_is_author_relative() {
+    let data = tempfile::tempdir().unwrap();
+    let corpus = tempfile::tempdir().unwrap();
+    build_fiction(data.path(), corpus.path());
+
+    // The author types straight quotes: straight is their voice, curly is not.
+    let j = check_text(data.path(), "ann", &author_prose(601, 600), &[]);
+    assert_eq!(j["data"]["counts"]["typography"], 0, "{}", j["data"]["findings"]);
+    let j = check_text(data.path(), "ann", &curly(&author_prose(601, 600)), &[]);
+    let q = findings_of(&j, "typography").into_iter().find(|f| f["key"] == "double_quotes:curly").expect("curly quotes flagged");
+    assert!(q["suggestion"].as_str().unwrap().starts_with("Use straight quotes"), "{q}");
+
+    // A corpus without a single quote has no quote style to hold a draft to.
+    let data = tempfile::tempdir().unwrap();
+    let corpus = tempfile::tempdir().unwrap();
+    build_plain(data.path(), corpus.path());
+    let j = check_text(data.path(), "plain", &author_prose(602, 500), &[]);
+    assert_eq!(row(&j, "curly_quote_share")["status"], "unmeasured");
+    assert_eq!(row(&j, "curly_apostrophe_share")["status"], "unmeasured");
+    assert_eq!(j["data"]["counts"]["typography"], 0);
+}
+
+#[test]
+fn typos_count_in_the_score_but_never_become_advice() {
+    let data = tempfile::tempdir().unwrap();
+    let corpus = tempfile::tempdir().unwrap();
+    // An author who slips: misspelt words every few sentences.
+    for (i, seed) in [11u64, 22, 33].iter().enumerate() {
+        let t = author_prose(*seed, 9000).replace("anymore.", "anymroe.").replace("quiet.", "quiettt.");
+        std::fs::write(corpus.path().join(format!("book{i}.txt")), t).unwrap();
+    }
+    let out = bin(data.path())
+        .args(["profile", "build", "slip", "--register", "fiction", "--corpus"])
+        .arg(corpus.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    let j = check_text(data.path(), "slip", &author_prose(701, 900), &[]);
+    let r = row(&j, "nonword_per_1k");
+    assert_eq!(r["family"], "mechanics");
+    assert!(r["value"].as_f64().unwrap() < r["low"].as_f64().unwrap(), "the clean draft sits below the author's slips: {r}");
+    assert_ne!(r["status"], "in_range");
+    let all = format!("{}{}", j["data"]["plan"], j["data"]["findings"]);
+    assert!(!all.contains("nonword") && !all.to_lowercase().contains("typo") && !all.contains("misspel"), "never told to misspell: {all}");
+}
+
+#[test]
+fn polish_runs_above_the_authors_band_are_cited_and_fewer_is_never_a_fault() {
+    let data = tempfile::tempdir().unwrap();
+    let corpus = tempfile::tempdir().unwrap();
+    build_fiction(data.path(), corpus.path());
+
+    let mut draft = author_prose(801, 500);
+    for k in 0..4 {
+        draft.push_str("I want him to stay with me tonight. I don't want him to stay with me tonight.\n\n");
+        draft.push_str(&author_prose(900 + k, 20));
+    }
+    let pair_lines: Vec<usize> = (1..).zip(draft.lines()).filter(|(_, l)| l.starts_with("I want him")).map(|(i, _)| i).collect();
+    let j = check_text(data.path(), "ann", &draft, &[]);
+    let m = findings_of(&j, "structure")
+        .into_iter()
+        .find(|f| f["key"] == "mirror_pairs_per_1k")
+        .unwrap_or_else(|| panic!("mirrored pairs cited: {}", j["data"]["findings"]));
+    assert_eq!(m["count"], 4, "one per pair: {m}");
+    let lines: Vec<usize> = m["lines"].as_array().unwrap().iter().map(|l| l.as_u64().unwrap() as usize).collect();
+    assert_eq!(lines, pair_lines);
+    assert!(m["excerpts"][0].as_str().unwrap().contains("I don't want him to stay"));
+    assert!(
+        !findings_of(&j, "metric_out_of_range").iter().any(|f| f["key"] == "mirror_pairs_per_1k"),
+        "the cited runs replace the bare metric"
+    );
+
+    // The author's own prose has no mirrors to cut, and a draft with no
+    // short beats at all is not told to add some.
+    let own = check_text(data.path(), "ann", &author_prose(802, 900), &[]);
+    assert!(!own["data"]["findings"].to_string().contains("mirror_pairs"));
+    let flat = check_text(data.path(), "ann", &other_prose(900), &[]);
+    let t = row(&flat, "short_triplets_per_1k");
+    assert_eq!(t["value"], 0.0);
+    assert_eq!(t["status"], "in_range", "one-sided: fewer tidy beats is never off-voice: {t}");
+    assert!(!flat["data"]["plan"].to_string().contains("short sentences (6 words"));
+}
+
+#[test]
+fn polish_runs_stop_at_paragraphs_so_speakers_and_posts_are_never_one_run() {
+    let data = tempfile::tempdir().unwrap();
+    let corpus = tempfile::tempdir().unwrap();
+    build_plain(data.path(), corpus.path());
+
+    // A quick exchange, one speaker per paragraph: no beats anyone could join.
+    let lines = ["\"Nothing.\"", "\"That's not a number.\"", "\"Jeremy.\""];
+    let mut turns = other_prose(500);
+    let mut tidy = turns.clone();
+    for _ in 0..4 {
+        turns.push_str(&format!("\n\n{}\n\n{}", lines.join("\n\n"), other_prose(30)));
+        tidy.push_str(&format!("\n\nI try to laugh. It comes out wrong. He steps in.\n\n{}", other_prose(30)));
+    }
+    let j = check_text(data.path(), "plain", &turns, &[]);
+    assert_eq!(row(&j, "short_triplets_per_1k")["value"], 0.0, "{}", row(&j, "short_triplets_per_1k"));
+    assert!(!j["data"]["findings"].to_string().contains("short_triplets"), "{}", j["data"]["findings"]);
+
+    // The same beats inside one paragraph are a run, cited on its own line.
+    let k = check_text(data.path(), "plain", &tidy, &[]);
+    let t = findings_of(&k, "structure").into_iter().find(|f| f["key"] == "short_triplets_per_1k").expect("tidy beats cited");
+    let want: Vec<usize> = (1..).zip(tidy.lines()).filter(|(_, l)| l.starts_with("I try to laugh")).map(|(i, _)| i).collect();
+    let got: Vec<usize> = t["lines"].as_array().unwrap().iter().map(|l| l.as_u64().unwrap() as usize).collect();
+    assert_eq!(got, want);
+    assert_eq!(t["excerpts"][0], "I try to laugh. It comes out wrong. He steps in.");
+
+    // Posts: the end of one and the start of the next are not one run.
+    let data = tempfile::tempdir().unwrap();
+    let corpus = tempfile::tempdir().unwrap();
+    build_social(data.path(), corpus.path());
+    let mut r = Lcg(78);
+    let own: Vec<String> = (0..18).map(|_| social_post(&mut r)).collect();
+    let j = check_text(data.path(), "bo", &own.join("\n---\n"), &[]);
+    assert_eq!(row(&j, "short_triplets_per_1k")["value"], 0.0, "two beats a post at most: {}", row(&j, "short_triplets_per_1k"));
+}
+
+#[test]
+fn the_ellipsis_glyph_is_typography_not_rhythm() {
+    let data = tempfile::tempdir().unwrap();
+    let corpus = tempfile::tempdir().unwrap();
+    build_fiction(data.path(), corpus.path());
+
+    let speech = "\"I don't know... Maybe it's fine... Maybe it isn't... We'll see what happens when he gets home.\"\n\n";
+    let mut dots = String::new();
+    for k in 0..4 {
+        dots.push_str(speech);
+        dots.push_str(&author_prose(1100 + k, 120));
+    }
+    let glyph = dots.replace("...", "\u{2026}");
+    let (a, b) = (check_text(data.path(), "ann", &dots, &[]), check_text(data.path(), "ann", &glyph, &[]));
+    for key in ["sentence_words_mean", "short_sentence_share", "short_triplets_per_1k", "anaphora_runs_per_1k"] {
+        assert_eq!(row(&a, key)["value"], row(&b, key)["value"], "{key} moved with the glyph");
+    }
+    for j in [&a, &b] {
+        assert!(!findings_of(j, "structure").iter().any(|f| f["excerpts"].to_string().contains("Maybe it")), "{}", j["data"]["findings"]);
+    }
+}
+
+#[test]
+fn one_polish_run_is_within_any_authors_band() {
+    let data = tempfile::tempdir().unwrap();
+    let corpus = tempfile::tempdir().unwrap();
+    build_fiction(data.path(), corpus.path());
+
+    // The author never mirrors a sentence; one mirrored pair in a scene is
+    // still theirs to write. Three are a habit they don't have.
+    let mut draft = author_prose(1201, 600);
+    draft.push_str("I want him to stay with me tonight. I don't want him to stay with me tonight.\n\n");
+    let j = check_text(data.path(), "ann", &draft, &[]);
+    let m = row(&j, "mirror_pairs_per_1k");
+    assert_eq!(m["median"], 0.0, "{m}");
+    assert_eq!(m["status"], "in_range", "{m}");
+    assert!(!j["data"]["findings"].to_string().contains("mirror_pairs"), "{}", j["data"]["findings"]);
+    for k in 0..2 {
+        draft.push_str(&author_prose(1210 + k, 20));
+        draft.push_str("I want him to stay with me tonight. I don't want him to stay with me tonight.\n\n");
+    }
+    let j = check_text(data.path(), "ann", &draft, &[]);
+    assert_eq!(row(&j, "mirror_pairs_per_1k")["status"], "out_of_range");
+}
+
+#[test]
+fn habits_the_draft_keeps_add_nothing_to_the_score() {
+    // A straight-quote author: a draft set straight keeps the habit, so
+    // typography and mechanics are reported but left out of the score.
+    let data = tempfile::tempdir().unwrap();
+    let corpus = tempfile::tempdir().unwrap();
+    build_fiction(data.path(), corpus.path());
+    let j = check_text(data.path(), "ann", &author_prose(1301, 900), &[]);
+    let families = j["data"]["score_basis"]["families"].to_string();
+    assert!(!families.contains("typography") && !families.contains("mechanics"), "{families}");
+    assert_eq!(row(&j, "curly_quote_share")["status"], "in_range");
+
+    // A curly-set author: the straight draft departs, and typography counts.
+    let data = tempfile::tempdir().unwrap();
+    let corpus = tempfile::tempdir().unwrap();
+    build_curly_fiction(data.path(), corpus.path());
+    let j = check_text(data.path(), "cora", &author_prose(1302, 900), &[]);
+    assert!(j["data"]["score_basis"]["families"].to_string().contains("typography"), "{}", j["data"]["score_basis"]);
+}
