@@ -1015,18 +1015,54 @@ pub fn sentences_at(p: &str, short_form: bool) -> Vec<(usize, String)> {
     out
 }
 
+/// Which chars of `cs` sit in inline code (`--json`): a run of backticks
+/// opens a span and the next run of the same length closes it; a run with
+/// no match is a literal backtick.
+fn in_code(cs: &[(usize, char)]) -> Vec<bool> {
+    let mut runs = Vec::new();
+    let mut i = 0;
+    while i < cs.len() {
+        let n = cs[i..].iter().take_while(|x| x.1 == '`').count();
+        if n > 0 {
+            runs.push((i, n));
+        }
+        i += n.max(1);
+    }
+    let mut code = vec![false; cs.len()];
+    let mut k = 0;
+    while k < runs.len() {
+        let (start, n) = runs[k];
+        match runs[k + 1..].iter().position(|r| r.1 == n) {
+            Some(j) => {
+                let (end, m) = runs[k + 1 + j];
+                code[start..end + m].fill(true);
+                k += j + 2;
+            }
+            None => k += 1,
+        }
+    }
+    code
+}
+
 /// Dash forms in a text, in order, with byte offsets: "—" (closed em dash),
 /// " — " (spaced), "--", " - " (a spaced hyphen used as a dash) and "–" (an
-/// en dash outside a number range). A list marker ("- item") is no dash.
-/// The text's edges count as spaces: a hard-wrapped line that starts or
-/// ends on a dash is spaced.
+/// en dash outside a number range). A list marker ("- item"), a
+/// command-line flag ("--json", "-v") and anything in inline code are no
+/// dashes. The text's edges count as spaces: a hard-wrapped line that
+/// starts or ends on a dash is spaced.
 pub fn dash_forms(t: &str) -> Vec<(&'static str, usize)> {
     let cs: Vec<(usize, char)> = t.char_indices().collect();
+    let code = in_code(&cs);
     let space = |j: Option<&(usize, char)>| j.is_none_or(|x| x.1.is_whitespace());
+    let word = |j: Option<&(usize, char)>| j.is_some_and(|x| x.1.is_alphanumeric());
     let mut out = Vec::new();
     let mut i = 0;
     while i < cs.len() {
         let (at, c) = cs[i];
+        if code[i] {
+            i += 1;
+            continue;
+        }
         let prev = i.checked_sub(1).and_then(|j| cs.get(j));
         match c {
             '\u{2014}' => {
@@ -1046,7 +1082,9 @@ pub fn dash_forms(t: &str) -> Vec<(&'static str, usize)> {
                 let run = cs[i..].iter().take_while(|x| x.1 == '-').count();
                 let next = cs.get(i + run);
                 let after_word = i >= 2 && !cs[i - 2].1.is_whitespace();
-                if run == 2 {
+                // "word--word" and "word -- word" are dashes; "--json" (no
+                // word before, one right after) is a flag.
+                if run == 2 && !(word(next) && !word(prev)) {
                     out.push(("--", at));
                 } else if run == 1 && prev.is_some_and(|p| p.1 == ' ') && space(next) && after_word {
                     out.push((" - ", at));
@@ -1861,6 +1899,14 @@ mod tests {
         assert_eq!(d, vec!["\u{2014}", " \u{2014} ", "--", " - ", "\u{2013}"]);
         assert!(dash_forms("- a list item").is_empty(), "a list marker is no dash");
         assert_eq!(dash_forms("\u{2014} a hard-wrapped line starting on a dash")[0].0, " \u{2014} ");
+        // Review: a developer's flags made "--" their main dash (78%) when
+        // the only dash they write is the spaced em dash.
+        let d: Vec<&str> = dash_forms("Run guide --json (or --limit=5) \u{2014} then `a--b` and ``x -- y``; wait-- no, wait -- yes, a--b")
+            .into_iter()
+            .map(|f| f.0)
+            .collect();
+        assert_eq!(d, vec![" \u{2014} ", "--", "--", "--"]);
+        assert_eq!(dash_forms("an `unclosed tick -- here").len(), 1, "a lone backtick opens no code");
     }
 
     #[test]
