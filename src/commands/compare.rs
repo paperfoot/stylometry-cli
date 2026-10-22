@@ -48,7 +48,8 @@ pub fn run(
             .p_same_author
             .map(|p| format!("P(same author) {p:.2}, "))
             .unwrap_or_default();
-        println!("{} words vs {}: {}", m.words, r.profile, m.verdict.bold());
+        let pooled = m.items.map(|n| format!(" ({n} items pooled)")).unwrap_or_default();
+        println!("{} words{pooled} vs {}: {}", m.words, r.profile, m.verdict.bold());
         println!(
             "  {p}δ {:.3} at {} words, typicality {:.2}, nearest {}",
             m.cosine_delta, m.band_words, m.typicality, m.nearest_profile

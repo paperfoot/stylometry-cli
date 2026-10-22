@@ -307,7 +307,7 @@ pub fn voice_match(target: &Profile, all: &[Profile], text: &str) -> Result<Voic
 
     Ok(VoiceMatch {
         words,
-        items: (items.len() > 1).then_some(items.len()),
+        items: (short_form && items.len() > 1).then_some(items.len()),
         band_words,
         cosine_delta: round(delta, 4),
         typicality: round(typicality, 3).max(0.0),

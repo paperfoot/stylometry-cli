@@ -249,6 +249,117 @@ fn long_text_is_scored_passage_by_passage() {
     assert_eq!(passages.last().unwrap()["nearest_profile"], "c");
 }
 
+// ── Short-form: pooled posts ────────────────────────────────────────────────
+
+/// `n` posts of ~30 words in `vocab`, offset by `seed` so batches differ,
+/// separated by `---` lines.
+fn posts(vocab: &[&str], n: usize, seed: usize) -> String {
+    (0..n)
+        .map(|i| {
+            let words: Vec<&str> = (0..30)
+                .map(|j| {
+                    let k = seed * 31 + i * 7 + j;
+                    if j % 2 == 0 { vocab[(k * 5 + k / 3) % vocab.len()] } else { GLUE[(k + k / 5) % GLUE.len()] }
+                })
+                .collect();
+            format!("{}.", words.join(" "))
+        })
+        .collect::<Vec<_>>()
+        .join("\n---\n")
+}
+
+/// A social profile `x` of 400 vocab-A posts in two files, plus three
+/// long-form imposters.
+fn social_and_imposters(data: &Path, corpus: &Path) {
+    let dir = corpus.join("x");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("2025.txt"), posts(&VOCAB_A, 200, 0)).unwrap();
+    std::fs::write(dir.join("2026.txt"), posts(&VOCAB_A, 200, 1)).unwrap();
+    bin()
+        .env("STYLOMETRY_DATA_DIR", data)
+        .args(["profile", "build", "x", "--register", "social", "--corpus"])
+        .arg(&dir)
+        .assert()
+        .success();
+    build_profile(data, corpus, "b", &VOCAB_B, 6000);
+    build_profile(data, corpus, "c", &VOCAB_C, 6000);
+    build_profile(data, corpus, "d", &VOCAB_D, 6000);
+}
+
+#[test]
+fn social_profile_calibrates_on_pooled_posts_and_compare_pools_a_batch() {
+    let data = tempfile::tempdir().unwrap();
+    let corpus = tempfile::tempdir().unwrap();
+    social_and_imposters(data.path(), corpus.path());
+
+    // Posts of ~30 words have no 250-word passage of their own: the bands
+    // are pooled windows, held out across the two sources.
+    let j = run_json(data.path(), &["calibrate", "x"], None);
+    let d = &j["data"];
+    assert_eq!(d["register"], "social");
+    assert_eq!(d["unit"], "pooled posts");
+    assert_eq!(d["cross_work"], true, "two sources: held out across them");
+    let bands: Vec<u64> = d["bands"].as_array().unwrap().iter().map(|b| b["words"].as_u64().unwrap()).collect();
+    assert_eq!(bands[0], 250);
+    assert!(bands.iter().all(|w| [250, 500, 1000].contains(w)), "{bands:?}");
+    let warnings = d["warnings"].to_string();
+    assert!(warnings.contains("short-form imposter") && warnings.contains("--background"), "{warnings}");
+    let next = j["metadata"]["next"].to_string();
+    assert!(next.contains("compare <posts-separated-by-dashes.md> --profile x"), "{next}");
+
+    // A batch of ten unseen posts is pooled into one verdict.
+    let j = run_json(data.path(), &["compare", "-", "--profile", "x"], Some(posts(&VOCAB_A, 10, 7)));
+    let d = &j["data"];
+    assert_eq!(d["items"], 10);
+    assert_eq!(d["words"], 300);
+    assert_eq!(d["band_words"], 250);
+    assert_eq!(d["verdict"], "same_author", "{d}");
+    let j = run_json(data.path(), &["compare", "-", "--profile", "x"], Some(posts(&VOCAB_C, 10, 7)));
+    assert_eq!(j["data"]["verdict"], "different_author");
+
+    // A long batch is scored window by window, each window whole posts.
+    let j = run_json(data.path(), &["compare", "-", "--profile", "x"], Some(posts(&VOCAB_A, 40, 9)));
+    let passages = j["data"]["passages"].as_array().expect("windows of posts");
+    assert!(passages.len() >= 2);
+    assert_eq!(passages[0]["start_line"], 1);
+    // Each post is one line plus a `---` line: posts start on odd lines.
+    let second = passages[1]["start_line"].as_u64().unwrap();
+    assert!(second > 1 && second % 2 == 1, "second window starts on a post's first line: {second}");
+}
+
+#[test]
+fn a_short_batch_says_how_much_to_pool() {
+    let data = tempfile::tempdir().unwrap();
+    let corpus = tempfile::tempdir().unwrap();
+    social_and_imposters(data.path(), corpus.path());
+    let out = bin()
+        .env("STYLOMETRY_DATA_DIR", data.path())
+        .args(["compare", "-", "--profile", "x", "--json"])
+        .write_stdin(posts(&VOCAB_A, 3, 2))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    let err: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert!(err["error"]["message"].as_str().unwrap().contains("across 3 items"), "{err}");
+    let fix = err["error"]["suggestion"].to_string() + &err.to_string();
+    assert!(fix.contains("---"), "{err}");
+}
+
+#[test]
+fn long_form_scene_breaks_are_not_items() {
+    // A *** scene break in a chapter is not a batch: no `items`, and the
+    // separator itself adds nothing to the score.
+    let data = tempfile::tempdir().unwrap();
+    let corpus = tempfile::tempdir().unwrap();
+    four_authors(data.path(), corpus.path());
+    let plain = corpus_text(&VOCAB_A, 600);
+    let broken = plain.replacen("\n\n", "\n\n***\n\n", 3);
+    let a = run_json(data.path(), &["compare", "-", "--profile", "a"], Some(plain));
+    let b = run_json(data.path(), &["compare", "-", "--profile", "a"], Some(broken));
+    assert!(b["data"]["items"].is_null());
+    assert_eq!(a["data"]["cosine_delta"], b["data"]["cosine_delta"]);
+}
+
 // ── Frozen reference stability ──────────────────────────────────────────────
 
 #[test]

@@ -242,3 +242,46 @@ pub fn reference_signature(profiles: &[Profile], n_words: usize, n_trigrams: usi
     parts.sort();
     format!("mfw={n_words};tri={n_trigrams};{}", parts.join("|"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::profile::ProfileKind;
+    use crate::engine::text::Doc;
+
+    fn profile() -> Profile {
+        let words = ["the", "storm", "and", "a", "harbour", "of", "light", "we", "said", "never"];
+        let mut t = String::new();
+        for i in 0..3000 {
+            t.push_str(words[(i * 7 + i / 13) % words.len()]);
+            t.push_str(if i % 12 == 11 { ".\n\n" } else { " " });
+        }
+        let doc = Doc { name: "a".into(), text: t, items: Vec::new() };
+        Profile::build("a", &[doc], ProfileKind::Author).unwrap()
+    }
+
+    #[test]
+    fn dense_window_vector_matches_the_frequency_maps() {
+        let p = profile();
+        let m = ReferenceModel::build(std::slice::from_ref(&p), 50, 80, 500);
+        assert_eq!(m.band_words(), 500);
+        let wins = m.windows(&p);
+        assert!(wins.len() >= 4);
+        for w in &wins {
+            let (wf, tf) = p.span_freqs(w);
+            let a = m.vectorize(&wf, &tf);
+            let b = m.window_vector(&p, w);
+            for (x, y) in a.iter().zip(&b) {
+                assert!((x - y).abs() < 1e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn v03_artifacts_keep_their_length() {
+        // v0.3 froze `k` (base chunks) and no `words`.
+        let m: ReferenceModel =
+            serde_json::from_str(r#"{"vocab":{"words":[],"trigrams":[]},"mean":[],"sd":[],"k":4}"#).unwrap();
+        assert_eq!(m.band_words(), 1000);
+    }
+}

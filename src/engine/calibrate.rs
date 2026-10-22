@@ -729,6 +729,46 @@ mod tests {
         assert!(p_small > 0.5 && p_big < 0.5);
     }
 
+    fn meta(sources: &[u32]) -> WindowMeta {
+        WindowMeta { weight: 1.0, work: sources[0], sources: sources.to_vec() }
+    }
+
+    #[test]
+    fn a_window_spanning_two_sources_never_meets_either_again() {
+        // Windows over sources {0}, {0,1}, {1}, {2}. The pooled {0,1} window
+        // must be scored against {2} alone: if any window of source 0 or 1
+        // leaked into its centroid, the delta would drop below 1.
+        let z = vec![vec![0.0, 1.0], vec![0.0, 1.0], vec![0.0, 1.0], vec![1.0, 0.0]];
+        let m = vec![meta(&[0]), meta(&[0, 1]), meta(&[1]), meta(&[2])];
+        let out = cross_work_deltas(&z, &m, 2);
+        assert!(out.cross_work);
+        assert_eq!(out.deltas.len(), 4);
+        assert!((out.deltas[1] - 1.0).abs() < 1e-12, "pooled window leaked: {}", out.deltas[1]);
+        // Source 0's window sees sources 1 and 2 (not the pooled {0,1}):
+        // centroid (0.5, 0.5), delta 1 - cos 45°.
+        let half = 1.0 - std::f64::consts::FRAC_1_SQRT_2;
+        assert!((out.deltas[0] - half).abs() < 1e-12, "{}", out.deltas[0]);
+        assert!((out.deltas[2] - half).abs() < 1e-12, "{}", out.deltas[2]);
+        // Source 2's window sees sources 0 and 1 only.
+        assert!((out.deltas[3] - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn one_source_falls_back_to_neighbour_exclusion() {
+        let z: Vec<Vec<f64>> = (0..8).map(|i| vec![1.0, i as f64 * 0.1]).collect();
+        let m: Vec<WindowMeta> = (0..8).map(|_| meta(&[0])).collect();
+        let out = neighbour_deltas(&z, &m, 2);
+        assert!(!out.cross_work);
+        assert_eq!(out.deltas.len(), 8);
+    }
+
+    #[test]
+    fn short_form_bands_stop_at_1000_words() {
+        assert_eq!(bands_for(Register::Social), &[250, 500, 1000]);
+        assert_eq!(bands_for(Register::Email), &[250, 500, 1000]);
+        assert_eq!(bands_for(Register::Fiction), &[250, 500, 1000, 2000, 4000]);
+    }
+
     #[test]
     fn balanced_fit_is_not_swamped_by_the_bigger_class() {
         // 5 positives near 0.3, 200 negatives near 0.7: an unweighted fit

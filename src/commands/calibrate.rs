@@ -12,6 +12,10 @@ use crate::output::{self, Ctx};
 #[derive(Serialize)]
 struct Report {
     profile: String,
+    register: &'static str,
+    /// What a band's windows are made of: book/blog passages, or posts
+    /// pooled until the window reaches its length.
+    unit: &'static str,
     imposters: usize,
     /// Positives were scored against centroids built from the author's other works.
     cross_work: bool,
@@ -33,14 +37,28 @@ pub fn run(ctx: Ctx, name: String) -> Result<(), AppError> {
             cal.imposters
         ));
     }
+    let short_form = target.register.is_short_form();
     if !cal.cross_work {
-        warnings.push(
-            "positives come from the same work as their centroid (one work, or too little per work): accuracy on a new book by this author is likely lower than reported; build the profile from two or more works".into(),
-        );
+        warnings.push(if short_form {
+            "positives come from the same block of posts as their centroid (undated posts, or too few per quarter): accuracy on new posts is likely lower than reported; build from dated posts spanning two or more quarters".into()
+        } else {
+            "positives come from the same work as their centroid (one work, or too little per work): accuracy on a new book by this author is likely lower than reported; build the profile from two or more works".into()
+        });
+    }
+    let short_imposters = refs
+        .iter()
+        .filter(|p| p.name != target.name && p.register.is_short_form())
+        .count();
+    if short_form && short_imposters < 3 {
+        warnings.push(format!(
+            "only {short_imposters} short-form imposter(s): the background is books, so another person's posts can pass as same_author; add 3+ other writers' posts with `{bin} profile build <name> --corpus <their-posts.json> --background`, then re-calibrate"
+        ));
     }
     let mut updated = target;
     let report = Report {
         profile: updated.name.clone(),
+        register: updated.register.as_str(),
+        unit: if short_form { "pooled posts" } else { "passages" },
         imposters: cal.imposters,
         cross_work: cal.cross_work,
         bands,
@@ -49,15 +67,19 @@ pub fn run(ctx: Ctx, name: String) -> Result<(), AppError> {
     updated.calibration = Some(cal);
     store::save(&updated)?;
 
-    let mut next = vec![format!("{bin} compare <file> --profile {}", report.profile)];
+    // Posts verify only pooled: the file holds 10+ posts separated by --- lines.
+    let what = if short_form { "<posts-separated-by-dashes.md>" } else { "<file>" };
+    let mut next = vec![format!("{bin} compare {what} --profile {}", report.profile)];
     if report.imposters < MIN_IMPOSTERS {
         next.insert(0, format!("{bin} background fetch"));
     }
     output::print_success_with(ctx, &report, &next, |r| {
         use owo_colors::OwoColorize;
         println!(
-            "Calibrated {} against {} imposter(s){}",
+            "Calibrated {} ({}, {}) against {} imposter(s){}",
             r.profile.green().bold(),
+            r.register,
+            r.unit,
             r.imposters,
             if r.cross_work { ", cross-work" } else { "" }
         );
