@@ -300,7 +300,7 @@ fn a_smooth_draft_gets_texture_findings_and_a_plan_step_but_never_a_different_pa
         assert!(!f["excerpts"].as_array().unwrap().is_empty(), "{f}");
     }
     let rough = tex.iter().find(|f| f["key"] == "rough").unwrap();
-    assert!(rough["suggestion"].as_str().unwrap().contains("Never rough it up with filler"), "{rough}");
+    assert!(rough["suggestion"].as_str().unwrap().contains("no filler, hedges, padding or repeated nouns"), "{rough}");
     // Flagged passages are drilled into sentence by sentence: the figure
     // and crafted-line findings cite the marker sentences' own lines.
     let drilled: usize = t["passages"].as_array().unwrap().iter().map(|p| p["sentences"].as_array().map_or(0, Vec::len)).sum();

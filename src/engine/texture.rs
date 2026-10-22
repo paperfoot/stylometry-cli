@@ -65,7 +65,7 @@ pub struct TextureKey {
 /// tic". Too little of a kind is a diagnostic row with a `note`.
 pub const KEYS: [TextureKey; 9] = [
     TextureKey { key: "rough", label: "rough edges", side: Side::Low, gate: true, jev: true,
-        advice: "write it less tidied, as the author does: not every sentence smoothed and balanced. Never rough it up with filler, hedges, padding or repeated nouns",
+        advice: "write it less tidied, as the author does: fewer smoothed, balanced sentences, and no filler, hedges, padding or repeated nouns to rough it up",
         note: "" },
     TextureKey { key: "polish", label: "polish (0 plain to 3 highly crafted)", side: Side::High, gate: true, jev: true,
         advice: "write plainer: say what happens and what is thought, directly", note: "" },
