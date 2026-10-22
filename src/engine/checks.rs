@@ -228,7 +228,8 @@ pub struct ScoreBasis {
     pub unit: &'static str,
     /// Author windows or items the draft was ranked among.
     pub compared: usize,
-    /// Window length in words (long-form), 0 for items.
+    /// Window length in words (long-form, and short-form drafts of 150+
+    /// words, whose items are also measured pooled), else 0.
     pub window_words: usize,
     /// source (each reference window judged against bands without its own
     /// work) | block (one or two works, or a blend: without its own half of its work) | item
@@ -243,7 +244,24 @@ pub struct ScoreBasis {
     /// Measures in the score, and their families (each family weighs the same).
     pub metrics: usize,
     pub families: Vec<&'static str>,
+    /// Short-form drafts of 150+ words: the two scores behind `score`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parts: Option<ScoreParts>,
     pub note: String,
+}
+
+/// A short-form draft long enough for rates (an email, an X Article, a
+/// batch of posts) is scored twice and the two percentiles are combined.
+#[derive(Debug, Clone, Serialize)]
+pub struct ScoreParts {
+    /// Item habits: percentile among the author's items (mean over items).
+    pub items: Option<f64>,
+    /// The items pooled: percentile of their rhythm, punctuation, lexis and
+    /// function-word rates among the author's own windows of that length.
+    pub windows: Option<f64>,
+    pub windows_compared: usize,
+    /// Distance behind `windows`, as `distance` is for long-form drafts.
+    pub window_distance: f64,
 }
 
 /// Everything `check` reports about one draft.
@@ -834,12 +852,108 @@ fn skip_in_window(b: &Band) -> bool {
     b.key == "opening_paragraph_words"
 }
 
+/// Measures a window of pooled posts leaves out: the item measures already
+/// judge links, and pooled posts have no opening paragraph.
+fn skip_in_pooled(b: &Band) -> bool {
+    skip_in_window(b) || b.key == "links_per_1k"
+}
+
+/// The draft measured as a window of the author's text at its own length.
+struct Windowed {
+    values: Vec<f64>,
+    ranges: metrics::Ranges,
+    rows: Vec<MetricRow>,
+    distance: f64,
+    /// Percentile among the author's own windows (None under 3 of them).
+    score: Option<f64>,
+    compared: usize,
+    holdout: &'static str,
+    mode: Option<Mode>,
+    /// Author windows the bands came from.
+    windows: usize,
+    /// Share of those windows whose narration mixes tenses (30–60% present).
+    author_mixed: f64,
+}
+
+/// Rates, bands and score of `paragraphs` (a long draft's prose, or a
+/// short-form draft's items pooled) among the author's `words`-word windows.
+fn windowed(target: &Profile, paragraphs: &[String], words: usize, fw: &[String]) -> Windowed {
+    let pooled = target.register.is_short_form();
+    let values = metrics::measure_for(paragraphs, fw, pooled);
+    let defs = metrics::defs(fw);
+    let at = |k: &str| defs.iter().position(|d| d.key == k).unwrap_or(0);
+    // Narrative mode: compare a present-tense chapter with present-tense
+    // chapters (fiction with clear modes only).
+    let all_rows = metrics::window_rows(target, words, fw, true);
+    let draft_mode = metrics::mode_of(values[at("pov_first_share")], values[at("present_tense_share")]);
+    let mut mode = None;
+    let mut rows_used: Vec<&WindowRow> = all_rows.iter().collect();
+    if target.register == Register::Fiction && words >= 300 && draft_mode.tense != "mixed" {
+        let modes = metrics::chunk_modes(target);
+        let same: Vec<&WindowRow> = all_rows.iter().filter(|r| metrics::window_mode(r, &modes) == draft_mode).collect();
+        if same.len() >= 8 && same.len() < all_rows.len() {
+            rows_used = same;
+            mode = Some(draft_mode);
+        }
+    }
+    let ranges = metrics::ranges_from(target, words, fw, &rows_used);
+    let mut rows = rows_for(&values, &ranges.bands, words);
+    // A long draft is a whole piece, so its opening counts; pooled posts
+    // skip on both sides what the item measures already judge.
+    let distance = if pooled {
+        for (r, b) in rows.iter_mut().zip(&ranges.bands) {
+            if skip_in_pooled(b) {
+                r.status = Status::Unmeasured;
+            }
+        }
+        metrics::distance(&values, &ranges.bands, words, &skip_in_pooled)
+    } else {
+        metrics::distance(&values, &ranges.bands, words, &|_| false)
+    };
+    let (refs, holdout) =
+        reference_distances(target, &rows_used, fw, words, if pooled { &skip_in_pooled } else { &skip_in_window });
+    let score = (refs.len() >= 3).then(|| (metrics::percentile_above(&refs, distance) * 10.0).round() / 10.0);
+    let mixed = |v: f64| v > 0.3 && v < 0.6;
+    let author_mixed = rows_used.iter().filter(|r| mixed(r.values[at("present_tense_share")])).count() as f64
+        / rows_used.len().max(1) as f64;
+    Windowed {
+        values,
+        rows,
+        distance,
+        score,
+        compared: refs.len(),
+        holdout,
+        mode,
+        windows: rows_used.len(),
+        author_mixed,
+        ranges,
+    }
+}
+
+/// Measured families of a window's bands, and how many measures.
+fn measured_families(w: &Windowed) -> (Vec<&'static str>, usize) {
+    let measured: Vec<&MetricRow> = w.rows.iter().filter(|r| r.status != Status::Unmeasured).collect();
+    let mut families: Vec<&'static str> = measured.iter().map(|r| r.family).collect();
+    families.sort_unstable();
+    families.dedup();
+    (families, measured.len())
+}
+
+/// Two percentiles (0–100) combined by Fisher's method: the share of the
+/// author's own text at least this unusual on both counts, if the two were
+/// independent. Each is floored at half a step of its resolution.
+fn combine(a: f64, n_a: usize, b: f64, n_b: usize) -> f64 {
+    let p = |s: f64, n: usize| (s / 100.0).max(0.5 / n.max(1) as f64).min(1.0);
+    let q = p(a, n_a) * p(b, n_b);
+    ((q * (1.0 - q.ln())).min(1.0) * 1000.0).round() / 10.0
+}
+
 /// Reference distances: each author window measured against bands built
 /// without its own source (with fewer than three works, or for a blend,
 /// without its own half of its work: holding out a whole blend component
 /// would make its windows alien), so an unseen piece by the author is
 /// compared like with like.
-fn reference_distances(p: &Profile, rows: &[&WindowRow], fw: &[String], words: usize) -> (Vec<(f64, f64)>, &'static str) {
+fn reference_distances(p: &Profile, rows: &[&WindowRow], fw: &[String], words: usize, skip: &dyn Fn(&Band) -> bool) -> (Vec<(f64, f64)>, &'static str) {
     let defs = metrics::defs(fw);
     let presence = metrics::markup_presence(p);
     let mut sources: Vec<u32> = rows.iter().map(|r| r.source(p)).collect();
@@ -883,7 +997,7 @@ fn reference_distances(p: &Profile, rows: &[&WindowRow], fw: &[String], words: u
         let bands = metrics::bands_from(p, &defs, &train, &presence);
         for (i, r) in rows.iter().enumerate() {
             if folds[i] == f {
-                out[i] = (metrics::distance(&r.values, &bands, words, &skip_in_window), r.weight);
+                out[i] = (metrics::distance(&r.values, &bands, words, skip), r.weight);
             }
         }
     }
@@ -1036,6 +1150,19 @@ struct Counts {
     words: usize,
     sentences: Vec<(usize, usize, String)>,
     paragraphs: Vec<(usize, usize)>,
+}
+
+fn counts_of(d: &Draft, words: usize) -> Counts {
+    Counts {
+        words,
+        sentences: d.sentences(),
+        paragraphs: d
+            .paragraphs
+            .iter()
+            .filter(|p| metrics::block_kind(&p.0) == metrics::Block::Prose || metrics::block_kind(&p.0) == metrics::Block::Quote)
+            .map(|p| (p.2 + 1, text::sentences(&p.0).len()))
+            .collect(),
+    }
 }
 
 /// A plan step for one out-of-range measure, aimed at the author's median
@@ -1302,54 +1429,31 @@ fn check_long(target: &Profile, guards: &[&Profile], avoid: &[String], draft_tex
     let words = d.tokens.len().max(1);
     let lx = lexis(target);
     let fw = metrics::top_function_words(target, metrics::FUNCTION_WORDS_TRACKED);
-    let defs = metrics::defs(&fw);
-    let values = metrics::measure(&d.prose(), &fw);
     let mut warnings = Vec::new();
-
-    // Narrative mode: compare a present-tense chapter with present-tense
-    // chapters (fiction with clear modes only).
-    let all_rows = metrics::window_rows(target, words, &fw, true);
-    let at = |k: &str| defs.iter().position(|d| d.key == k).unwrap_or(0);
-    let draft_mode = metrics::mode_of(values[at("pov_first_share")], values[at("present_tense_share")]);
-    let mut mode = None;
-    let mut rows_used: Vec<&WindowRow> = all_rows.iter().collect();
-    if target.register == Register::Fiction && words >= 300 && draft_mode.tense != "mixed" {
-        let modes = metrics::chunk_modes(target);
-        let same: Vec<&WindowRow> = all_rows.iter().filter(|r| metrics::window_mode(r, &modes) == draft_mode).collect();
-        if same.len() >= 8 && same.len() < all_rows.len() {
-            rows_used = same;
-            mode = Some(draft_mode);
-        }
-    }
-    let ranges = metrics::ranges_from(target, words, &fw, &rows_used);
-    let rows = rows_for(&values, &ranges.bands, words);
-
-    // Score: the draft's percentile among the author's own windows.
-    let distance = metrics::distance(&values, &ranges.bands, words, &|_| false);
-    let (refs, holdout) = reference_distances(target, &rows_used, &fw, words);
-    let score = (refs.len() >= 3).then(|| (metrics::percentile_above(&refs, distance) * 10.0).round() / 10.0);
+    let w = windowed(target, &d.prose(), words, &fw);
+    let (values, ranges, rows) = (&w.values, &w.ranges, &w.rows);
+    let at = |k: &str| ranges.defs.iter().position(|d| d.key == k).unwrap_or(0);
+    let (distance, score, holdout) = (w.distance, w.score, w.holdout);
     if score.is_none() {
         warnings.push(format!(
             "the author's text has {} windows of {words} words: too few to score a draft this long; check a shorter section, or add more of the author's writing",
-            rows_used.len()
+            w.windows
         ));
     }
-    let measured: Vec<&Band> = ranges.bands.iter().filter(|b| !b.unmeasured).collect();
-    let mut families: Vec<&'static str> = measured.iter().map(|b| b.family).collect();
-    families.sort_unstable();
-    families.dedup();
+    let (families, n_measured) = measured_families(&w);
     let basis = ScoreBasis {
         unit: "windows",
-        compared: refs.len(),
+        compared: w.compared,
         window_words: words,
         holdout,
         kind: None,
-        mode,
-        metrics: measured.len(),
+        mode: w.mode,
+        metrics: n_measured,
         families,
+        parts: None,
         note: format!(
             "percentile of the draft's distance among {} of the author's own {words}-word windows (half-overlapping), each judged against bands without its own {}; 50 = as typical as the author's median window",
-            refs.len(),
+            w.compared,
             if holdout == "source" { "work" } else { "half of its work" }
         ),
     };
@@ -1360,18 +1464,15 @@ fn check_long(target: &Profile, guards: &[&Profile], avoid: &[String], draft_tex
         g
     }, COPY_NGRAM, &long_copy_verdict);
     hits.extend(avoid_hits(&d, avoid, &lx.concepts));
-    hits.extend(metric_hits(&rows, &ranges.defs, words));
+    hits.extend(metric_hits(rows, &ranges.defs, words));
     hits.extend(tell_hits(&d, &lx.rates, &lx.concepts, words < SHORT_DRAFT_WORDS));
     hits.extend(with_evidence(word_hits(&d, target, &lx.concepts, &lx.avoided)));
-    hits.extend(structure_hits(&d, &rows));
+    hits.extend(structure_hits(&d, rows));
     // Tense drift: a long draft that sits between the author's modes.
     // Only when the author keeps to one tense per stretch: a dual-timeline
     // author's own windows straddle modes, and a mixed draft is normal there.
     let present = values[at("present_tense_share")];
-    let mixed = |v: f64| v > 0.3 && v < 0.6;
-    let author_mixed = rows_used.iter().filter(|r| mixed(r.values[at("present_tense_share")])).count() as f64
-        / rows_used.len().max(1) as f64;
-    if target.register == Register::Fiction && words >= 800 && mixed(present) && author_mixed < 0.1 {
+    if target.register == Register::Fiction && words >= 800 && present > 0.3 && present < 0.6 && w.author_mixed < 0.1 {
         let mut h = Hit::new(
             "tense_drift",
             "present_tense_share",
@@ -1386,18 +1487,9 @@ fn check_long(target: &Profile, guards: &[&Profile], avoid: &[String], draft_tex
     drop_shadowed(&mut findings);
     sort_findings(&mut findings);
 
-    let counts = Counts {
-        words,
-        sentences: d.sentences(),
-        paragraphs: d
-            .paragraphs
-            .iter()
-            .filter(|p| metrics::block_kind(&p.0) == metrics::Block::Prose || metrics::block_kind(&p.0) == metrics::Block::Quote)
-            .map(|p| (p.2 + 1, text::sentences(&p.0).len()))
-            .collect(),
-    };
+    let counts = counts_of(&d, words);
     let mut steps = finding_steps(&findings);
-    steps.extend(metric_plan(&rows, &ranges.defs, &d, &counts, words, &ranges.bands, target.register));
+    steps.extend(metric_plan(rows, &ranges.defs, &d, &counts, words, &ranges.bands, target.register));
     let plan = finish_plan(steps);
 
     // Segments: where a long draft drifts.
@@ -1437,11 +1529,11 @@ fn check_long(target: &Profile, guards: &[&Profile], avoid: &[String], draft_tex
         register: target.register,
         score,
         distance: (distance * 1000.0).round() / 1000.0,
-        reliability: reliability(refs.len(), words, false),
+        reliability: reliability(w.compared, words, false),
         basis,
         findings,
         plan,
-        rows,
+        rows: rows.clone(),
         segments,
         habits: Vec::new(),
         items: Vec::new(),
@@ -1477,6 +1569,24 @@ fn habit_value(feature: &str, m: &ItemMeasure) -> serde_json::Value {
         "signoff" => m.signoff.clone().map(Into::into).unwrap_or(serde_json::Value::Null),
         k => m.get(k).into(),
     }
+}
+
+/// A short-form item as paragraphs, the way profiles store items: blank
+/// lines split, line breaks inside a paragraph kept.
+fn item_paragraphs(t: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur: Vec<&str> = Vec::new();
+    for line in t.lines().chain(std::iter::once("")) {
+        if line.trim().is_empty() {
+            if !cur.is_empty() {
+                out.push(cur.join("\n"));
+                cur.clear();
+            }
+        } else {
+            cur.push(line.trim_end());
+        }
+    }
+    out
 }
 
 fn check_short(target: &Profile, guards: &[&Profile], avoid: &[String], draft_text: &str, kind: ItemKind) -> Checked {
@@ -1520,8 +1630,30 @@ fn check_short(target: &Profile, guards: &[&Profile], avoid: &[String], draft_te
             score: (model.score(m) * 10.0).round() / 10.0,
         })
         .collect();
-    let score = (!item_scores.is_empty() && author.len() >= 3)
+    let item_score = (!item_scores.is_empty() && author.len() >= 3)
         .then(|| (item_scores.iter().map(|s| s.score).sum::<f64>() / item_scores.len() as f64 * 10.0).round() / 10.0);
+    // 150+ words (an email, an X Article, a batch of posts): the items
+    // pooled are also a window of the author's text, judged on rhythm,
+    // punctuation, lexis and function words as a long-form draft is.
+    let win = (words >= SHORT_DRAFT_WORDS).then(|| {
+        let fw = metrics::top_function_words(target, metrics::FUNCTION_WORDS_TRACKED);
+        let paras: Vec<String> = items
+            .iter()
+            .flat_map(|(t, _)| item_paragraphs(if kind == ItemKind::Reply { metrics::strip_leading_handles(t) } else { t }))
+            .collect();
+        windowed(target, &paras, words, &fw)
+    });
+    let score = match (item_score, win.as_ref().and_then(|w| w.score.map(|s| (s, w.compared)))) {
+        (Some(i), Some((ws, n))) => Some(combine(i, author.len(), ws, n)),
+        (None, Some((ws, _))) => Some(ws),
+        (i, None) => i,
+    };
+    if let Some(w) = win.as_ref().filter(|w| w.score.is_none()) {
+        warnings.push(format!(
+            "the author's items give {} windows of {words} words: too few to score the draft's rates, so the score is its item habits alone",
+            w.windows
+        ));
+    }
     let distance = if measured.is_empty() {
         0.0
     } else {
@@ -1546,6 +1678,9 @@ fn check_short(target: &Profile, guards: &[&Profile], avoid: &[String], draft_te
             let rare = (r.value > 0.5 && r.median < 0.05) || (r.value < 0.5 && r.median > 0.95);
             r.status = if rare { Status::OutOfRange } else { Status::InRange };
         }
+    }
+    if let Some(w) = &win {
+        rows.extend(w.rows.iter().cloned());
     }
 
     let mut hits = Vec::new();
@@ -1631,6 +1766,14 @@ fn check_short(target: &Profile, guards: &[&Profile], avoid: &[String], draft_te
     hits.extend(avoid_hits(&d, avoid, &lx.concepts));
     hits.extend(tell_hits(&d, &lx.rates, &lx.concepts, true));
     hits.extend(with_evidence(word_hits(&d, target, &lx.concepts, &lx.avoided)));
+    if let Some(w) = &win {
+        // Below the item's own habits, which a reader sees first.
+        hits.extend(metric_hits(&w.rows, &w.ranges.defs, words).into_iter().map(|mut h| {
+            h.severity -= 15.0;
+            h
+        }));
+        hits.extend(structure_hits(&d, &w.rows));
+    }
 
     // A batch of posts should vary the way the author's do.
     let mut batch = None;
@@ -1703,7 +1846,13 @@ fn check_short(target: &Profile, guards: &[&Profile], avoid: &[String], draft_te
         .collect();
 
     let mut steps = finding_steps(&findings);
-    for f in findings.iter().filter(|f| !f.hard && matches!(f.kind, "habit" | "metric_out_of_range" | "batch")) {
+    // Item findings become steps here; window rates get theirs from metric_plan.
+    let item_step = |f: &&Finding| match f.kind {
+        "habit" | "batch" => true,
+        "metric_out_of_range" => metrics::item_index(&f.key).is_some(),
+        _ => false,
+    };
+    for f in findings.iter().filter(|f| !f.hard).filter(item_step) {
         steps.push(PlanStep {
             action: f.suggestion.clone(),
             why: f.message.clone(),
@@ -1713,28 +1862,55 @@ fn check_short(target: &Profile, guards: &[&Profile], avoid: &[String], draft_te
             order: f.severity,
         });
     }
+    if let Some(w) = &win {
+        for mut s in metric_plan(&w.rows, &w.ranges.defs, &d, &counts_of(&d, words), words, &w.ranges.bands, target.register) {
+            s.order = 85.0 + (s.order - 100.0).min(10.0);
+            steps.push(s);
+        }
+    }
     let plan = finish_plan(steps);
     if words < SHORT_DRAFT_WORDS {
         warnings.push(format!(
             "{words} words: scored on post-level habits only (length, lines, emoji, tags, endings); window rates and voice_match need {SHORT_DRAFT_WORDS}+ words"
         ));
     }
+    let mut families = vec!["items"];
+    let mut n_metrics = model.features();
+    if let Some(w) = &win {
+        let (f, n) = measured_families(w);
+        families.extend(f.into_iter().filter(|f| *f != "items"));
+        n_metrics += n;
+    }
+    let mut note = format!(
+        "{}percentile of how surprising the draft's habits (length, lines, emoji, tags, mentions, links, punctuation, casing, stock phrases, ending, layout) are to the author, among {} of their own {}s (each left out of its own comparison); 50 = as typical as their median {}",
+        if multi { "mean over items of the " } else { "" },
+        author.len(),
+        kind_word(kind),
+        kind_word(kind)
+    );
+    if let Some(w) = win.as_ref().filter(|w| w.score.is_some()) {
+        note.push_str(&format!(
+            "; combined (Fisher's method) with the percentile of the items' pooled rates (rhythm, punctuation, lexis, function words) among {} of the author's own {words}-word windows, each judged without its own {}: the score is the share of the author's own text at least this unusual on both counts",
+            w.compared,
+            if w.holdout == "source" { "quarter or 200-item block" } else { "half of the corpus" }
+        ));
+    }
     let basis = ScoreBasis {
         unit: "items",
         compared: author.len(),
-        window_words: 0,
+        window_words: if win.is_some() { words } else { 0 },
         holdout: "item",
         kind: Some(kind),
         mode: None,
-        metrics: model.features(),
-        families: vec!["items"],
-        note: format!(
-            "{}percentile of how surprising the draft's habits (length, lines, emoji, tags, mentions, links, punctuation, casing, ending, layout) are to the author, among {} of their own {}s (each left out of its own comparison); 50 = as typical as their median {}",
-            if multi { "mean over items of the " } else { "" },
-            author.len(),
-            kind_word(kind),
-            kind_word(kind)
-        ),
+        metrics: n_metrics,
+        families,
+        parts: win.as_ref().map(|w| ScoreParts {
+            items: item_score,
+            windows: w.score,
+            windows_compared: w.compared,
+            window_distance: (w.distance * 1000.0).round() / 1000.0,
+        }),
+        note,
     };
     Checked {
         register: target.register,

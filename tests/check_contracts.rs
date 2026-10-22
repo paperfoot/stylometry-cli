@@ -276,16 +276,20 @@ fn adding_links_does_not_move_punctuation_rates_or_point_at_url_lines() {
 // ── Short-form ───────────────────────────────────────────────────────────────
 
 /// 120 plain posts: no hashtags, no emoji, mostly one line, ending in '.'.
+fn social_post(r: &mut Lcg) -> String {
+    match r.next(4) {
+        0 => format!("Shipped the {} fix today. It took {} tries.", NOUNS[r.next(16)], 2 + r.next(9)),
+        1 => format!("Most people {} the {} too early. Wait a week first.", VERBS[r.next(12)], NOUNS[r.next(16)]),
+        2 => format!("New episode of the pod is out. We talk about the {} and the {}.", NOUNS[r.next(16)], NOUNS[r.next(16)]),
+        _ => format!("The {} is the product. Everything else is a {}.", NOUNS[r.next(16)], NOUNS[r.next(16)]),
+    }
+}
+
 fn build_social(data: &Path, dir: &Path) {
     let mut r = Lcg(5);
     let mut lines = String::new();
     for i in 0..120 {
-        let text = match r.next(4) {
-            0 => format!("Shipped the {} fix today. It took {} tries.", NOUNS[r.next(16)], 2 + r.next(9)),
-            1 => format!("Most people {} the {} too early. Wait a week first.", VERBS[r.next(12)], NOUNS[r.next(16)]),
-            2 => format!("New episode of the pod is out. We talk about the {} and the {}.", NOUNS[r.next(16)], NOUNS[r.next(16)]),
-            _ => format!("The {} is the product. Everything else is a {}.", NOUNS[r.next(16)], NOUNS[r.next(16)]),
-        };
+        let text = social_post(&mut r);
         let row = serde_json::json!({"text": text, "likes": i % 7, "date": format!("2026-0{}-1{}", 1 + i % 9, i % 10)});
         lines.push_str(&row.to_string());
         lines.push('\n');
@@ -386,6 +390,43 @@ fn the_authors_own_formulas_are_not_copying() {
     // "New episode of the pod is out. We talk about the" recurs in ~30 posts.
     let j = check_text(data.path(), "bo", "New episode of the pod is out. We talk about the moon and the tide.", &[]);
     assert!(!j["data"]["findings"].to_string().contains("copy_overlap"), "{}", j["data"]["findings"]);
+}
+
+#[test]
+fn a_batch_of_150_plus_words_is_also_judged_on_window_rates() {
+    let data = tempfile::tempdir().unwrap();
+    let corpus = tempfile::tempdir().unwrap();
+    build_social(data.path(), corpus.path());
+
+    let mut r = Lcg(77);
+    let own: Vec<String> = (0..18).map(|_| social_post(&mut r)).collect();
+    let own = check_text(data.path(), "bo", &own.join("\n---\n"), &[]);
+    let d = &own["data"];
+    assert!(d["words"].as_u64().unwrap() >= 150);
+    let families: Vec<&str> = d["score_basis"]["families"].as_array().unwrap().iter().map(|f| f.as_str().unwrap()).collect();
+    for f in ["items", "rhythm", "punctuation", "lexis", "function_words"] {
+        assert!(families.contains(&f), "{f} judged at 150+ words: {families:?}");
+    }
+    assert!(d["metrics"].as_array().unwrap().iter().any(|r| r["family"] == "punctuation"));
+    assert!(d["score_basis"]["window_words"].as_u64().unwrap() >= 150);
+    let parts = &d["score_basis"]["parts"];
+    assert!(parts["items"].is_number() && parts["windows"].is_number(), "{parts}");
+    assert!(d["score_basis"]["note"].as_str().unwrap().contains("Fisher"));
+    assert!(!d["warnings"].to_string().contains("post-level habits only"));
+    // (Templated posts share whole runs with the templated corpus, so copy
+    // findings are expected here; the score is what this test is about.)
+    assert!(d["score"].as_f64().unwrap() >= 10.0, "the author's own posts score as theirs: {}", d["score"]);
+
+    // Post-shaped (one line, a full stop, no emoji or tags) but in another
+    // voice: the item habits fit, the rates don't.
+    let other: Vec<String> = (0..12)
+        .map(|i| format!("Organisational transformation requires leaders, managers, and stakeholders to coordinate considerations, opportunities, and constraints {i}."))
+        .collect();
+    let other = check_text(data.path(), "bo", &other.join("\n---\n"), &[]);
+    let w = |j: &Value| j["data"]["score_basis"]["parts"]["windows"].as_f64().unwrap();
+    assert!(w(&other) < 10.0 && w(&other) < w(&own), "rates expose the other voice: {} vs {}", w(&other), w(&own));
+    assert!(other["data"]["score"].as_f64().unwrap() < own["data"]["score"].as_f64().unwrap());
+    assert!(other["data"]["findings"].as_array().unwrap().iter().any(|f| f["kind"] == "metric_out_of_range" && f["key"] != "item_words"));
 }
 
 #[test]
