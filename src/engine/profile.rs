@@ -252,6 +252,10 @@ pub struct Profile {
     /// For a blend: (component profile, share), shares summing to 1.
     #[serde(default)]
     pub components: Vec<(String, f64)>,
+    /// Scene/section break lines by form ("***", "* * *", "•••", "---"),
+    /// counted from the raw text (they are not prose, so no chunk keeps them).
+    #[serde(default)]
+    pub scene_breaks: BTreeMap<String, u32>,
     pub calibration: Option<Calibration>,
 }
 
@@ -536,6 +540,7 @@ impl Profile {
             openers: openers.into_iter().collect(),
             sentence_lengths,
             components: Vec::new(),
+            scene_breaks: count_scene_breaks(docs),
             calibration: None,
         })
     }
@@ -584,6 +589,7 @@ impl Profile {
             openers: BTreeMap::new(),
             sentence_lengths: Vec::new(),
             components: Vec::new(),
+            scene_breaks: BTreeMap::new(),
             calibration: None,
         };
         let mut names: HashSet<String> = HashSet::new();
@@ -626,6 +632,11 @@ impl Profile {
         out.n_tokens = out.word_counts.values().sum();
         out.proper_nouns = names.into_iter().collect();
         out.proper_nouns.sort();
+        for (p, _) in parts {
+            for (k, v) in &p.scene_breaks {
+                *out.scene_breaks.entry(k.clone()).or_insert(0) += v;
+            }
+        }
         Ok(out)
     }
 
@@ -741,6 +752,39 @@ impl Profile {
                 .collect(),
         )
     }
+}
+
+/// A standalone scene-break line's form, normalised: "***", "* * *", "•••",
+/// "• • •", "---", "#", "~". None for anything else.
+pub fn scene_break_form(line: &str) -> Option<String> {
+    let t = line.trim();
+    if t.is_empty() || t.chars().count() > 12 {
+        return None;
+    }
+    let glyphs: Vec<char> = t.chars().filter(|c| !c.is_whitespace()).collect();
+    let first = *glyphs.first()?;
+    if !"*•#~-=_◆◇·⁂".contains(first) || glyphs.iter().any(|&c| c != first) {
+        return None;
+    }
+    if first == '-' && glyphs.len() < 3 {
+        return None;
+    }
+    Some(t.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+fn count_scene_breaks(docs: &[Doc]) -> BTreeMap<String, u32> {
+    let mut m = BTreeMap::new();
+    for d in docs {
+        let lines: Vec<&str> = d.text.lines().collect();
+        for (i, l) in lines.iter().enumerate() {
+            let blank = |j: Option<&&str>| j.is_none_or(|x| x.trim().is_empty());
+            let standalone = blank(if i == 0 { None } else { lines.get(i - 1) }) && blank(lines.get(i + 1));
+            if let Some(f) = scene_break_form(l).filter(|_| standalone) {
+                *m.entry(f).or_insert(0) += 1;
+            }
+        }
+    }
+    m
 }
 
 /// Where a chunk came from: a short-form item, or a section of a long work.
