@@ -685,27 +685,50 @@ fn long_summary(r: &VoiceReport, fiction: bool) -> Vec<String> {
 
 fn modes_section(c: &Ctxt) -> Option<Section> {
     let m = c.r.modes.as_ref()?;
-    if m.modes.is_empty() {
-        return None;
-    }
+    (!m.modes.is_empty()).then(|| sec("Narration mode", modes_text(m)))
+}
+
+/// The narration modes as instructions. "Pick one per chapter" needs two
+/// real modes to pick from; chapters that mix tenses are no mode to
+/// imitate, so their share is said outright rather than dropped.
+fn modes_text(m: &voice::Modes) -> String {
     let label = |x: &voice::Mode| format!("{} person, {} tense", x.pov, x.tense);
-    let body = if m.modes[0].share >= 0.85 {
-        format!("Narration: {} throughout ({} of the text).\n", label(&m.modes[0]), pct(m.modes[0].share))
-    } else {
-        let list: Vec<String> = m
-            .modes
-            .iter()
-            .filter(|x| x.tense != "mixed")
-            .map(|x| format!("{} ({} of the text)", label(x), pct(x.share)))
-            .collect();
-        format!(
-            "Each chapter holds one mode: {} (measured over {} {}). Pick one per chapter and keep it; never drift between tenses inside a scene (the averages across modes describe no real chapter).\n",
-            list.join("; "),
-            m.sections,
-            m.basis
-        )
+    let pure: Vec<&voice::Mode> = m.modes.iter().filter(|x| x.tense != "mixed").collect();
+    let mixed: f64 = m.modes.iter().filter(|x| x.tense == "mixed").map(|x| x.share).sum();
+    let over = format!("measured over {} {}", m.sections, m.basis);
+    let scene_rule = "change tense only at a scene break, never inside a scene.";
+    let mut body = match pure.as_slice() {
+        [top, ..] if top.share >= 0.85 => format!("Narration: {} throughout ({} of the text).", label(top), pct(top.share)),
+        [only] if only.share > mixed => format!("Narration: {} in most chapters ({} of the text, {over}).", label(only), pct(only.share)),
+        [] | [_] => {
+            let mut povs: Vec<&str> = Vec::new();
+            for x in &m.modes {
+                if !povs.contains(&x.pov) {
+                    povs.push(x.pov);
+                }
+            }
+            let rest = pure.first().map(|x| format!("; the rest is {} ({})", label(x), pct(x.share))).unwrap_or_default();
+            return format!(
+                "Narration: {} person; most chapters mix tenses ({} of the text, {over}), so no one tense describes them{rest}. Keep each scene in one tense: {scene_rule}\n",
+                povs.join(" or "),
+                pct(mixed)
+            );
+        }
+        list => {
+            let list: Vec<String> = list.iter().map(|x| format!("{} ({} of the text)", label(x), pct(x.share))).collect();
+            format!(
+                "Each chapter holds one mode: {} ({over}). Pick one per chapter and keep it; the averages across modes describe no real chapter.",
+                list.join("; ")
+            )
+        }
     };
-    Some(sec("Narration mode", body))
+    if mixed >= 0.1 {
+        let _ = write!(body, " {} of the text is in chapters that mix tenses: {scene_rule}", pct(mixed));
+    } else if pure.len() >= 2 && pure[0].share < 0.85 {
+        body.push_str(" Never drift between tenses inside a scene.");
+    }
+    body.push('\n');
+    body
 }
 
 const PRESENT_TAGS: [&str; 6] = ["says", "asks", "tells", "whispers", "replies", "mutters"];
@@ -1277,6 +1300,37 @@ mod tests {
         assert_eq!(x_chars("hi"), 2);
         assert_eq!(x_chars("see https://example.com/a/very/long/path"), 4 + 23);
         assert_eq!(x_chars("ok 🚀"), 5);
+    }
+
+    fn modes(list: &[(&'static str, &'static str, f64)]) -> voice::Modes {
+        voice::Modes {
+            basis: "sections",
+            sections: 30,
+            modes: list.iter().map(|&(pov, tense, share)| voice::Mode { pov, tense, share, sections: 1 }).collect(),
+        }
+    }
+
+    #[test]
+    fn modes_say_the_mixed_share_and_never_offer_one_choice() {
+        // hf: present-tense first person plus chapters that mix tenses.
+        let t = modes_text(&modes(&[("first", "present", 0.689), ("first", "mixed", 0.274)]));
+        assert!(!t.contains("Each chapter holds one mode"), "{t}");
+        assert!(t.contains("first person, present tense in most chapters (69% of the text"), "{t}");
+        assert!(t.contains("27% of the text is in chapters that mix tenses"), "{t}");
+        // A dual narrative: two real modes to pick from.
+        let t = modes_text(&modes(&[("first", "present", 0.6), ("first", "past", 0.35)]));
+        assert!(t.contains("Each chapter holds one mode: first person, present tense (60% of the text); first person, past tense (35% of the text)"), "{t}");
+        assert!(!t.contains("mix tenses"), "{t}");
+        // Mixed dominates: say the measure can't name a tense.
+        let t = modes_text(&modes(&[("first", "mixed", 0.7), ("first", "past", 0.25)]));
+        assert!(!t.contains("Each chapter holds one mode") && !t.contains("in most chapters ("), "{t}");
+        assert!(t.contains("first person; most chapters mix tenses (70% of the text"), "{t}");
+        assert!(t.contains("the rest is first person, past tense (25%)"), "{t}");
+        let t = modes_text(&modes(&[("third", "mixed", 0.9)]));
+        assert!(t.contains("third person; most chapters mix tenses (90% of the text"), "{t}");
+        assert!(!t.contains("throughout"), "{t}");
+        let t = modes_text(&modes(&[("third", "past", 0.92)]));
+        assert!(t.starts_with("Narration: third person, past tense throughout (92% of the text)."), "{t}");
     }
 
     #[test]
