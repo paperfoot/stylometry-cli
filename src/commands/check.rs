@@ -288,7 +288,7 @@ fn print_texture(t: &Texture) {
         println!("{}", format!("texture: unavailable ({})", t.reason.as_deref().unwrap_or("")).dimmed());
         return;
     }
-    let verdict = if t.pass == Some(true) { "reads like the author".green().to_string() } else { "off the author's".yellow().to_string() };
+    let verdict = if t.pass == Some(true) { "reads like the author".green().to_string() } else { "outside the author's range".yellow().to_string() };
     let usage = t.usage.map(|u| format!("{} passage(s), {} request(s), ${:.4}", u.passages, u.requests, u.cost_usd)).unwrap_or_default();
     println!("texture (JEV, advice only): {verdict} · {usage}");
     if let Some(m) = t.author_measured {
