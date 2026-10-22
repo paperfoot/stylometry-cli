@@ -231,7 +231,7 @@ pub struct ScoreBasis {
     /// Window length in words (long-form), 0 for items.
     pub window_words: usize,
     /// source (each reference window judged against bands without its own
-    /// work) | block (one work: without its own fifth of it) | item
+    /// work) | block (one or two works, or a blend: without its own half of its work) | item
     /// (leave-one-out over items)
     pub holdout: &'static str,
     /// Item kind compared (short-form).
@@ -759,15 +759,17 @@ fn skip_in_window(b: &Band) -> bool {
 }
 
 /// Reference distances: each author window measured against bands built
-/// without its own source (or, for a single work, without its own fifth),
-/// so an unseen piece by the author is compared like with like.
+/// without its own source (with fewer than three works, or for a blend,
+/// without its own half of its work: holding out a whole blend component
+/// would make its windows alien), so an unseen piece by the author is
+/// compared like with like.
 fn reference_distances(p: &Profile, rows: &[&WindowRow], fw: &[String], words: usize) -> (Vec<(f64, f64)>, &'static str) {
     let defs = metrics::defs(fw);
     let presence = metrics::markup_presence(p);
     let mut sources: Vec<u32> = rows.iter().map(|r| r.source(p)).collect();
     sources.sort_unstable();
     sources.dedup();
-    let (folds, holdout): (Vec<usize>, &'static str) = if sources.len() >= 3 {
+    let (folds, holdout): (Vec<usize>, &'static str) = if sources.len() >= 3 && p.kind != crate::engine::profile::ProfileKind::Blend {
         let nf = sources.len().min(10);
         (
             rows.iter()
@@ -776,7 +778,24 @@ fn reference_distances(p: &Profile, rows: &[&WindowRow], fw: &[String], words: u
             "source",
         )
     } else {
-        ((0..rows.len()).map(|i| i * 5 / rows.len().max(1)).collect(), "block")
+        // A contiguous third of every source per fold: big enough that a
+        // held-out block has its own scenes and cast, as an unseen work does.
+        const BLOCKS: usize = 2;
+        let mut seen: HashMap<u32, usize> = HashMap::new();
+        let mut total: HashMap<u32, usize> = HashMap::new();
+        for r in rows {
+            *total.entry(r.source(p)).or_insert(0) += 1;
+        }
+        let folds = rows
+            .iter()
+            .map(|r| {
+                let s = r.source(p);
+                let k = seen.entry(s).or_insert(0);
+                *k += 1;
+                (*k - 1) * BLOCKS / total[&s].max(1)
+            })
+            .collect();
+        (folds, "block")
     };
     let nf = folds.iter().max().map(|m| m + 1).unwrap_or(0);
     let mut out = vec![(0.0, 0.0); rows.len()];
@@ -1213,7 +1232,7 @@ fn check_long(target: &Profile, guards: &[&Profile], avoid: &[String], draft_tex
         note: format!(
             "percentile of the draft's distance among {} of the author's own {words}-word windows (half-overlapping), each judged against bands without its own {}; 50 = as typical as the author's median window",
             refs.len(),
-            if holdout == "source" { "work" } else { "fifth of the work" }
+            if holdout == "source" { "work" } else { "half of its work" }
         ),
     };
 
@@ -1446,7 +1465,7 @@ fn check_short(target: &Profile, guards: &[&Profile], avoid: &[String], draft_te
             hits.push(h);
         }
         // Habits the author rarely shows (but not never: those are hard above).
-        for (f, share) in metrics::ITEM_FEATURES.iter().zip(model.bin_shares(m)) {
+        for (fi, (f, share)) in metrics::ITEM_FEATURES.iter().zip(model.bin_shares(m)).enumerate() {
             if matches!(*f, "item_words" | "first_line_words") || share >= 0.05 {
                 continue;
             }
@@ -1459,7 +1478,7 @@ fn check_short(target: &Profile, guards: &[&Profile], avoid: &[String], draft_te
                 *f,
                 Some(lines[0]),
                 format!("{}: {} — the author's {}s are like this {}", f.replace('_', " "), habit_value(f, m), kind_word(kind), pct(share)),
-                habit_advice(f, &ahabits),
+                habit_advice(f, &ahabits, m, model.zero_share(fi)),
             );
             h.severity = 90.0 + (0.05 - share) * 200.0;
             hits.push(h);
@@ -1641,8 +1660,27 @@ fn habit_covers(feature: &str, never_key: &str) -> bool {
     )
 }
 
-fn habit_advice(feature: &str, h: &metrics::ItemHabits) -> String {
+fn habit_advice(feature: &str, h: &metrics::ItemHabits, m: &ItemMeasure, none_share: f64) -> String {
     let top = |v: &[(String, f64)]| v.iter().take(3).map(|(k, s)| format!("'{k}' {}", pct(*s))).collect::<Vec<_>>().join(", ");
+    let noun = match feature {
+        "emoji_per_item" => Some("emoji"),
+        "hashtags_per_item" => Some("hashtags"),
+        "mentions_per_item" => Some("@mentions"),
+        "links_per_item" => Some("links"),
+        "exclaims_per_item" => Some("exclamation marks"),
+        "questions_per_item" => Some("questions"),
+        "all_caps_words_per_item" => Some("CAPS words"),
+        _ => None,
+    };
+    if let Some(noun) = noun {
+        return if m.get(feature) > 0.0 && none_share >= 0.5 {
+            format!("Cut the {noun}: {} of the author's items have none", pct(none_share))
+        } else if m.get(feature) > 0.0 {
+            format!("Use fewer {noun}: the author's items usually have at most one")
+        } else {
+            format!("Add {noun} the way the author does: {} of their items have some", pct(1.0 - none_share))
+        };
+    }
     match feature {
         "ending" => format!("End the way the author does: {}", top(&h.endings)),
         "layout" => format!("Lay it out the way the author does: {}", top(&h.layouts)),

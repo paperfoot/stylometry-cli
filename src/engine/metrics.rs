@@ -230,6 +230,9 @@ const CORE: &[Core] = &[
     ("opening_paragraph_words", "first paragraph length (words)", Unit::Words,
      "open with a fuller first paragraph",
      "open with a shorter first paragraph"),
+    ("llm_tells_per_1k", "stock LLM words and phrases per 1k words", Unit::Per1k,
+     "",
+     "cut the stock LLM phrasing; say it the author's way"),
 ];
 
 /// Keys that count markdown markup. A corpus of plain .txt books has none,
@@ -243,8 +246,11 @@ pub const MARKUP_MIN_SOURCES: f64 = 0.3;
 
 /// Measures computed from other measures, or too abstract to act on: they
 /// count toward the score but never become a plan step or a finding.
-pub const DERIVED_KEYS: [&str; 6] = [
+/// (`llm_tells_per_1k` is acted on through the llm_tell findings, which
+/// carry the words and lines.)
+pub const DERIVED_KEYS: [&str; 7] = [
     "mattr_500", "mtld", "fk_grade", "sentence_length_autocorr", "sentence_words_cv", "syllables_per_word",
+    "llm_tells_per_1k",
 ];
 
 pub fn is_derived(key: &str) -> bool {
@@ -261,6 +267,11 @@ pub fn is_function_word_key(key: &str) -> bool {
 pub fn family(key: &str) -> &'static str {
     if is_function_word_key(key) {
         return "function_words";
+    }
+    // Its own family: one of ~40 lexis measures it would barely move the
+    // score, yet stock LLM phrasing is the clearest sign a draft isn't theirs.
+    if key == "llm_tells_per_1k" {
+        return "tells";
     }
     if key.starts_with("item_")
         || key.ends_with("_per_item")
@@ -972,6 +983,7 @@ pub fn measure_for(all_paragraphs: &[String], function_words: &[String], short_f
         per_1k(quotes, n),
         per_1k(fences.div_ceil(2), n),
         paragraphs.first().map(|p| text::count_words(p) as f64).unwrap_or(0.0),
+        per_1k(crate::engine::voice::find_tells(&tokens).len(), n),
     ];
     debug_assert_eq!(v.len(), CORE.len());
     for w in function_words {
@@ -1330,7 +1342,9 @@ pub fn distance(values: &[f64], bands: &[Band], window_words: usize, skip: &dyn 
         if b.unmeasured || skip(b) {
             continue;
         }
-        let r = ((v - b.median).abs() / tolerance(b, window_words)).min(3.0);
+        // Fewer stock LLM phrases than the author is never off-voice.
+        let gap = if b.key == "llm_tells_per_1k" { (v - b.median).max(0.0) } else { (v - b.median).abs() };
+        let r = (gap / tolerance(b, window_words)).min(3.0);
         match fam.iter_mut().find(|f| f.0 == b.family) {
             Some(f) => {
                 f.1 += r * r;
@@ -2190,6 +2204,11 @@ impl ItemModel {
     /// Share of the author's items (0–100) at least as surprising as `m`.
     pub fn score(&self, m: &ItemMeasure) -> f64 {
         percentile_above(&self.reference, self.surprisal(m))
+    }
+
+    /// The author's share of items in a feature's first bin (none, for counts).
+    pub fn zero_share(&self, feature: usize) -> f64 {
+        self.counts.get(feature).and_then(|c| c.first()).copied().unwrap_or(0.0) / self.total.max(1e-9)
     }
 
     /// The author's share of items in the same bin as `m`, per feature.
