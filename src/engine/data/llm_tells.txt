@@ -102,3 +102,5 @@ treasure trove
 game-changer
 not just
 not only
+# Fiction overuse: machine scenes turn on "suddenly"; author-relative like the rest.
+suddenly

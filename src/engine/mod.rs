@@ -12,6 +12,7 @@ pub mod lexicon;
 pub mod metrics;
 pub mod model;
 pub mod profile;
+pub mod retrieve;
 pub mod score;
 pub mod store;
 pub mod style;
