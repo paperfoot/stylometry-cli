@@ -1,7 +1,8 @@
-//! `check`: draft feedback against a voice. Findings come most important
-//! first, each with a line and a concrete fix; the summary says whether the
-//! draft passes (no hard failures, at most a fifth of metrics out of range)
-//! and how close it sits to the voice overall.
+//! `check`: one voice score, a short revision plan, and grouped findings
+//! against a voice. The draft passes when it has no hard failures and
+//! scores at least 10 (as typical as the author's own 10th-percentile
+//! passage or post). Authorship verification (voice_match) loads every
+//! profile, so it runs only with --verify, on the final pass.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -9,8 +10,9 @@ use std::path::PathBuf;
 use serde::Serialize;
 
 use crate::commands::input;
-use crate::engine::checks::{self, Finding, MetricRow};
+use crate::engine::checks::{self, Batch, Finding, HabitRow, ItemScore, MetricRow, PlanStep, ScoreBasis, Segment};
 use crate::engine::metrics::Status;
+use crate::engine::profile::Register;
 use crate::engine::score::{self, VoiceMatch};
 use crate::engine::{store, text};
 use crate::error::AppError;
@@ -33,34 +35,49 @@ pub struct CheckArgs {
     pub as_kind: crate::engine::profile::ItemKind,
 }
 
-/// Out-of-range metrics allowed before the draft fails.
-const MAX_OUT_OF_RANGE: f64 = 0.2;
-
-#[derive(Debug, Serialize)]
-pub struct Summary {
-    pub pass: bool,
-    pub hard_failures: usize,
-    /// Metrics not clearly outside the author's range, e.g. "41/86".
-    pub metrics_in_range: String,
-    pub counts: BTreeMap<&'static str, usize>,
-    pub voice_match: Option<VoiceMatch>,
-}
-
 #[derive(Debug, Serialize)]
 pub struct CheckReport {
     pub profile: String,
+    pub register: Register,
     pub words: usize,
-    /// Window length the author's ranges were measured at (the draft's length).
-    pub window_words: usize,
-    /// Author windows of that length behind the ranges.
-    pub windows: usize,
-    /// Few windows (or a short draft): treat ranges as rough guidance.
-    pub directional: bool,
-    pub summary: Summary,
+    /// No hard failures and score ≥ 10.
+    pub pass: bool,
+    /// 0–100: the draft's percentile among the author's own windows (or
+    /// posts) of the same length; 50 = as typical as the author's median.
+    /// Null when the author has too little text at this length.
+    pub score: Option<f64>,
+    /// The continuous gap behind the score (lower is closer): mean squared
+    /// distance from the author's medians in tolerance units, families
+    /// weighted equally; for posts, the mean surprisal of their habits.
+    pub distance: f64,
+    pub score_basis: ScoreBasis,
+    /// high | medium | low: how firmly the score can be read.
+    pub score_reliability: &'static str,
+    pub hard_failures: usize,
+    /// Do these, in order: hard failures first, then one step per family.
+    pub plan: Vec<PlanStep>,
     pub findings: Vec<Finding>,
     /// Findings left out by --limit.
     pub findings_omitted: usize,
+    pub counts: BTreeMap<&'static str, usize>,
+    /// Measures not clearly outside the author's range, e.g. "61/74".
+    pub metrics_in_range: String,
     pub metrics: Vec<MetricRow>,
+    /// Long drafts: ~1,000-word stretches and what drifts in each.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub segments: Vec<Segment>,
+    /// Short drafts: each habit of the draft and how often the author shows it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub habits: Vec<HabitRow>,
+    /// Drafts of several `---`-separated items: each item's score.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub items: Vec<ItemScore>,
+    /// 3+ items: how the batch spreads compared with the author's posts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub batch: Option<Batch>,
+    /// Only with --verify.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub voice_match: Option<VoiceMatch>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
 }
@@ -103,56 +120,60 @@ pub fn run(ctx: Ctx, args: CheckArgs) -> Result<(), AppError> {
     }
 
     let guard_refs: Vec<_> = guards.iter().collect();
-    let checked = checks::check(&target, &guard_refs, &avoid, &draft);
-    let mut warnings = Vec::new();
-    let mut all = store::load_all();
-    if !all.iter().any(|p| p.name == target.name) {
-        all.push(target.clone());
-    }
-    let voice_match = match score::voice_match(&target, &all, &draft) {
-        Ok(v) => Some(v),
-        Err(e) => {
-            warnings.push(format!("voice_match unavailable: {e}"));
-            None
+    let checked = checks::check(&target, &guard_refs, &avoid, &draft, args.as_kind);
+    let mut warnings = checked.warnings.clone();
+    let voice_match = if !args.verify {
+        None
+    } else if words < score::MIN_WORDS {
+        warnings.push(format!(
+            "voice_match skipped: {words} words; it needs {}+ (pool several posts separated by --- lines)",
+            score::MIN_WORDS
+        ));
+        None
+    } else {
+        let mut all = store::load_all();
+        if !all.iter().any(|p| p.name == target.name) {
+            all.push(target.clone());
+        }
+        match score::voice_match(&target, &all, &draft) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                warnings.push(format!("voice_match unavailable: {e}"));
+                None
+            }
         }
     };
-    if words < 1000 {
-        warnings.push(format!(
-            "{words} words is short: rates swing a lot at this length, so treat metric findings as directional (3,000+ words is reliable)"
-        ));
-    }
-    if checked.ranges.directional {
-        warnings.push(format!(
-            "the profile has only {} windows of {} words: ranges are directional",
-            checked.ranges.windows, checked.ranges.window_words
-        ));
-    }
 
+    let hard = checked.hard_failures();
+    let pass = checked.pass();
+    let judged: Vec<&MetricRow> = checked.rows.iter().filter(|r| r.status != Status::Unmeasured).collect();
+    let out = judged.iter().filter(|r| r.status == Status::OutOfRange).count();
     let counts = checks::counts(&checked.findings);
-    let hard = checked.findings.iter().filter(|f| f.hard).count();
-    let total = checked.rows.len();
-    let out = checked.rows.iter().filter(|r| r.status == Status::OutOfRange).count();
-    let pass = hard == 0 && (out as f64) <= MAX_OUT_OF_RANGE * total as f64;
     let mut findings = checked.findings;
     let omitted = findings.len().saturating_sub(args.limit);
     findings.truncate(args.limit);
 
     let report = CheckReport {
         profile: target.name.clone(),
+        register: checked.register,
         words,
-        window_words: checked.ranges.window_words,
-        windows: checked.ranges.windows,
-        directional: checked.ranges.directional || words < 1000,
-        summary: Summary {
-            pass,
-            hard_failures: hard,
-            metrics_in_range: format!("{}/{}", total - out, total),
-            counts,
-            voice_match,
-        },
+        pass,
+        score: checked.score,
+        distance: checked.distance,
+        score_basis: checked.basis,
+        score_reliability: checked.reliability,
+        hard_failures: hard,
+        plan: checked.plan,
         findings,
         findings_omitted: omitted,
+        counts,
+        metrics_in_range: format!("{}/{}", judged.len() - out, judged.len()),
         metrics: checked.rows,
+        segments: checked.segments,
+        habits: checked.habits,
+        items: checked.items,
+        batch: checked.batch,
+        voice_match,
         warnings,
     };
 
@@ -161,13 +182,34 @@ pub fn run(ctx: Ctx, args: CheckArgs) -> Result<(), AppError> {
         .as_ref()
         .map(|f| f.display().to_string())
         .unwrap_or_else(|| "draft.md".into());
-    let next = vec![
-        if pass {
-            format!("{bin} compare {draft_arg} --profile {}", report.profile)
-        } else {
-            format!("Revise the findings (hard first), then: {bin} check {draft_arg} --profile {}", report.profile)
-        },
-    ];
+    let as_flag = if target.register.is_short_form() {
+        match serde_json::to_value(args.as_kind).ok().and_then(|v| v.as_str().map(str::to_string)) {
+            Some(k) if k != "post" => format!(" --as {k}"),
+            _ => String::new(),
+        }
+    } else {
+        String::new()
+    };
+    let p = &report.profile;
+    let next = if !pass {
+        vec![
+            format!("Apply the plan (hard steps first), then re-check: {bin} check {draft_arg} --profile {p}{as_flag}"),
+            format!("Few-shot examples of the author for the same task: {bin} examples {p} --like {draft_arg}"),
+        ]
+    } else if args.verify {
+        vec![format!("Done: the draft passes. Optional: {bin} compare {draft_arg} --profile {p}")]
+    } else if !report.plan.is_empty() {
+        // Passing with steps left (LLM tells, a drifting rate): closer is better.
+        vec![
+            format!(
+                "It passes; to get closer to the author, apply the {} plan step(s) and re-check: {bin} check {draft_arg} --profile {p}{as_flag}",
+                report.plan.len()
+            ),
+            format!("Final pass with authorship verification: {bin} check {draft_arg} --profile {p}{as_flag} --verify"),
+        ]
+    } else {
+        vec![format!("Final pass with authorship verification: {bin} check {draft_arg} --profile {p}{as_flag} --verify")]
+    };
     if args.strict && !pass {
         let v = serde_json::to_value(&report).map_err(|_| AppError::Serialization)?;
         return Err(AppError::CheckFailed(v));
@@ -177,37 +219,48 @@ pub fn run(ctx: Ctx, args: CheckArgs) -> Result<(), AppError> {
 
 fn print_human(r: &CheckReport) {
     use owo_colors::OwoColorize;
-    let verdict = if r.summary.pass { "PASS".green().bold().to_string() } else { "FAIL".red().bold().to_string() };
+    let verdict = if r.pass { "PASS".green().bold().to_string() } else { "FAIL".red().bold().to_string() };
+    let score = r.score.map(|s| format!("{s:.0}/100")).unwrap_or_else(|| "n/a".into());
     println!(
-        "{verdict} {} words vs {} · metrics in range {} · hard failures {}",
-        r.words, r.profile, r.summary.metrics_in_range, r.summary.hard_failures
+        "{verdict} score {score} ({} reliability) · {} words vs {} ({}) · hard failures {}",
+        r.score_reliability,
+        r.words,
+        r.profile,
+        r.register.as_str(),
+        r.hard_failures
     );
-    if let Some(v) = &r.summary.voice_match {
-        println!(
-            "voice match: typicality {:.2}, nearest {}, {}",
-            v.typicality, v.nearest_profile, v.verdict
-        );
+    println!("{}", r.score_basis.note.dimmed());
+    if let Some(v) = &r.voice_match {
+        println!("voice match: typicality {:.2}, nearest {}, {}", v.typicality, v.nearest_profile, v.verdict);
     }
-    let counts: Vec<String> = r
-        .summary
-        .counts
-        .iter()
-        .filter(|(_, n)| **n > 0)
-        .map(|(k, n)| format!("{k} {n}"))
-        .collect();
-    if !counts.is_empty() {
-        println!("{}", counts.join(" · ").dimmed());
+    if !r.plan.is_empty() {
+        println!("{}", "plan".bold());
+        for (i, s) in r.plan.iter().enumerate() {
+            let tag = if s.hard { " [hard]".red().to_string() } else { String::new() };
+            println!("  {}. {}{tag}", i + 1, s.action);
+            println!("     {}", s.why.dimmed());
+        }
     }
     for f in &r.findings {
-        let line = f.line.map(|l| format!("L{l}")).unwrap_or_else(|| "--".into());
-        println!("{:>5} {} {}", line.dimmed(), f.kind.yellow(), f.message);
-        if !f.excerpt.is_empty() {
-            println!("      {}", f.excerpt.dimmed());
+        let lines = if f.lines.is_empty() {
+            "--".to_string()
+        } else {
+            format!("L{}", f.lines.iter().take(6).map(|l| l.to_string()).collect::<Vec<_>>().join(","))
+        };
+        let count = if f.count > 1 { format!(" ×{}", f.count) } else { String::new() };
+        println!("{:>10} {}{count} {}", lines.dimmed(), f.kind.yellow(), f.message);
+        for e in &f.excerpts {
+            println!("           {}", e.dimmed());
         }
-        println!("      → {}", f.suggestion);
+        println!("           → {}", f.suggestion);
     }
     if r.findings_omitted > 0 {
         println!("{}", format!("… {} more (raise -n)", r.findings_omitted).dimmed());
+    }
+    for s in &r.segments {
+        if !s.out_of_range.is_empty() {
+            println!("{} L{}–{} ({} words): {}", "segment".dimmed(), s.lines[0], s.lines[1], s.words, s.out_of_range.join(", "));
+        }
     }
     for w in &r.warnings {
         println!("{} {w}", "warning:".yellow());
