@@ -1,10 +1,10 @@
-//! Text ingestion: corpus reading, light cleaning, tokenization, chunking,
-//! and character n-gram extraction.
+//! Text ingestion: corpus reading, light cleaning, tokenization, paragraph
+//! and sentence segmentation, dialogue detection, and character n-grams.
 //!
-//! All features downstream are derived from two views of a text:
-//!   - word tokens (lowercased) -> most-frequent-word features
-//!   - character trigrams       -> character n-gram features (PAN's second
-//!     strongest authorship signal, robust to topic)
+//! All features downstream are derived from a few views of a text:
+//!   - word tokens (lowercased, curly apostrophes folded to ') -> vocabulary
+//!   - character trigrams -> character n-gram features (robust to topic)
+//!   - paragraphs and sentences -> rhythm, openers, punctuation, dialogue
 
 use std::path::Path;
 
@@ -13,19 +13,27 @@ use walkdir::WalkDir;
 
 use crate::error::AppError;
 
-/// Read a corpus from a file or a directory (recursively concatenating
-/// `.md`, `.txt`, and `.markdown` files). Applies light cleaning to strip
-/// epub/markdown conversion cruft that would pollute the fingerprint.
-pub fn read_corpus(path: &Path) -> Result<String, AppError> {
+/// One source text: a file of the corpus, or an inline/stdin query.
+#[derive(Debug, Clone)]
+pub struct Doc {
+    pub name: String,
+    pub text: String,
+}
+
+/// Read a corpus from a file or a directory (recursively collecting `.md`,
+/// `.txt`, `.markdown` and `.text` files, sorted by path so chunking is
+/// reproducible). Each file stays a separate `Doc`: chunks never straddle
+/// files, and calibration can hold out whole works.
+pub fn read_docs(path: &Path) -> Result<Vec<Doc>, AppError> {
     if path.is_file() {
         let raw = std::fs::read_to_string(path)?;
-        return Ok(clean(&raw));
+        return Ok(vec![Doc {
+            name: file_label(path),
+            text: clean(&raw),
+        }]);
     }
     if path.is_dir() {
-        let mut buf = String::new();
-        let mut files = 0usize;
-        // Sorted traversal so multi-file profile chunk boundaries are
-        // reproducible regardless of filesystem iteration order.
+        let mut docs = Vec::new();
         for entry in WalkDir::new(path)
             .sort_by_file_name()
             .into_iter()
@@ -42,24 +50,35 @@ pub fn read_corpus(path: &Path) -> Result<String, AppError> {
                 .to_lowercase();
             if matches!(ext.as_str(), "md" | "txt" | "markdown" | "text") {
                 if let Ok(raw) = std::fs::read_to_string(p) {
-                    buf.push_str(&clean(&raw));
-                    buf.push('\n');
-                    files += 1;
+                    let name = p
+                        .strip_prefix(path)
+                        .map(|r| r.display().to_string())
+                        .unwrap_or_else(|_| file_label(p));
+                    docs.push(Doc {
+                        name,
+                        text: clean(&raw),
+                    });
                 }
             }
         }
-        if files == 0 {
+        if docs.is_empty() {
             return Err(AppError::InvalidInput(format!(
                 "no .md/.txt files found under {}",
                 path.display()
             )));
         }
-        return Ok(buf);
+        return Ok(docs);
     }
     Err(AppError::InvalidInput(format!(
-        "corpus path does not exist: {}",
+        "path does not exist: {}",
         path.display()
     )))
+}
+
+fn file_label(p: &Path) -> String {
+    p.file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| p.display().to_string())
 }
 
 /// Strip common epub->markdown conversion artifacts (cover images, raw SVG/HTML,
@@ -90,10 +109,24 @@ pub fn clean(raw: &str) -> String {
     out
 }
 
+/// Fold typographic apostrophes so "don’t" and "don't" are one word.
+#[inline]
+fn fold_apostrophes(w: &str) -> String {
+    w.replace(['\u{2019}', '\u{02BC}'], "'")
+}
+
 /// Lowercased word tokens (Unicode word segmentation). Keeps intra-word
-/// apostrophes that `unicode_words` already folds in (e.g. "don't").
+/// apostrophes (e.g. "don't"), with curly apostrophes folded to '.
 pub fn word_tokens(text: &str) -> Vec<String> {
-    text.unicode_words().map(|w| w.to_lowercase()).collect()
+    text.unicode_words()
+        .map(|w| fold_apostrophes(&w.to_lowercase()))
+        .collect()
+}
+
+/// Word tokens with their original case (apostrophes folded). Used where
+/// capitalization matters: proper-noun detection.
+pub fn word_tokens_cased(text: &str) -> Vec<String> {
+    text.unicode_words().map(fold_apostrophes).collect()
 }
 
 /// Word count under the same Unicode segmentation the features use. This is
@@ -129,38 +162,197 @@ pub fn char_trigrams(text: &str) -> Vec<String> {
     chars.windows(3).map(|w| w.iter().collect()).collect()
 }
 
-/// Split a text into chunks of approximately `chunk_words` words each, where
-/// "word" means a Unicode word (same segmentation as the features), not a
-/// whitespace token — punctuation-only tokens don't count toward chunk size.
-/// Chunk boundaries fall on whitespace so the raw text (punctuation included)
-/// is preserved for trigram extraction. The trailing remainder is merged into
-/// the previous chunk if it is shorter than half a chunk, so we never produce
-/// a tiny, high-variance final sample.
-pub fn chunk_by_words(text: &str, chunk_words: usize) -> Vec<String> {
-    let tokens: Vec<&str> = text.split_whitespace().collect();
-    if tokens.is_empty() {
-        return Vec::new();
-    }
-    let chunk_words = chunk_words.max(50);
-    let mut chunks: Vec<String> = Vec::new();
+/// Prose paragraphs: blocks separated by blank lines, internal line breaks
+/// joined with spaces. Headings are dropped: markdown `#` lines, and short
+/// blocks (under 5 words) with no sentence-final punctuation ("CHAPTER IV",
+/// "Part Two"), since they are not prose and would distort rhythm stats.
+pub fn paragraphs(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
     let mut cur: Vec<&str> = Vec::new();
+    let mut flush = |cur: &mut Vec<&str>, out: &mut Vec<String>| {
+        if cur.is_empty() {
+            return;
+        }
+        let joined = cur.join(" ");
+        cur.clear();
+        let t = joined.trim();
+        if t.is_empty() || t.starts_with('#') {
+            return;
+        }
+        let ends_like_prose = t
+            .trim_end_matches(['"', '\'', '\u{201D}', '\u{2019}', ')', '*', '_'])
+            .ends_with(['.', '!', '?', ':', ';', ',', '\u{2026}', '\u{2014}', '-']);
+        if count_words(t) < 5 && !ends_like_prose {
+            return;
+        }
+        out.push(t.to_string());
+    };
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            flush(&mut cur, &mut out);
+        } else {
+            cur.push(line.trim());
+        }
+    }
+    flush(&mut cur, &mut out);
+    out
+}
+
+/// Abbreviations whose trailing period does not end a sentence.
+const ABBREVIATIONS: [&str; 26] = [
+    "mr", "mrs", "ms", "dr", "st", "mt", "jr", "sr", "prof", "capt", "col", "gen", "lt",
+    "sgt", "rev", "hon", "no", "vs", "etc", "e.g", "i.e", "cf", "fig", "vol", "approx", "esq",
+];
+
+/// Split a paragraph into sentences. UAX#29 sentence boundaries, then two
+/// repairs: a split after a known abbreviation or a single-letter initial is
+/// undone, and a "sentence" starting in lowercase is glued back to its
+/// predecessor (`"Why?" he asked.` is one sentence, not two).
+pub fn sentences(paragraph: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for raw in paragraph.unicode_sentences() {
+        let s = raw.trim();
+        if s.is_empty() {
+            continue;
+        }
+        let glue = match out.last() {
+            None => false,
+            Some(prev) => ends_with_abbreviation(prev) || starts_lowercase(s),
+        };
+        if glue {
+            let prev = out.last_mut().unwrap();
+            prev.push(' ');
+            prev.push_str(s);
+        } else {
+            out.push(s.to_string());
+        }
+    }
+    out
+}
+
+fn ends_with_abbreviation(s: &str) -> bool {
+    let t = s.trim_end();
+    if !t.ends_with('.') {
+        return false;
+    }
+    let last = t[..t.len() - 1]
+        .rsplit(|c: char| c.is_whitespace() || c == '(' || c == '"' || c == '\u{201C}')
+        .next()
+        .unwrap_or("");
+    let lw = last.to_lowercase();
+    let single_initial = last.chars().count() == 1 && last.chars().all(|c| c.is_uppercase());
+    single_initial || ABBREVIATIONS.contains(&lw.as_str())
+}
+
+fn starts_lowercase(s: &str) -> bool {
+    s.chars()
+        .find(|c| c.is_alphanumeric())
+        .map(|c| c.is_lowercase())
+        .unwrap_or(false)
+}
+
+/// The quoted (dialogue) spans of a paragraph. Handles “curly doubles”,
+/// straight "doubles", and ‘curly singles’ (British convention), telling an
+/// opening ‘ from an apostrophe by what precedes it. Quote state resets at
+/// the paragraph end, matching the convention that a speech continuing into
+/// the next paragraph omits its closing mark.
+pub fn quoted_spans(paragraph: &str) -> Vec<String> {
+    let chars: Vec<char> = paragraph.chars().collect();
+    let mut spans = Vec::new();
+    let mut open: Option<char> = None;
+    let mut cur = String::new();
+    for (i, &c) in chars.iter().enumerate() {
+        let prev = if i == 0 { None } else { Some(chars[i - 1]) };
+        let next = chars.get(i + 1).copied();
+        let at_word_start = prev.is_none_or(|p| p.is_whitespace() || "([{\u{2014}-".contains(p));
+        let at_word_end = next.is_none_or(|n| !n.is_alphanumeric());
+        match open {
+            None => {
+                let opens = c == '\u{201C}'
+                    || c == '"'
+                    || (c == '\u{2018}' && at_word_start)
+                    || (c == '\'' && at_word_start && next.is_some_and(|n| n.is_alphabetic()));
+                if opens {
+                    open = Some(c);
+                }
+            }
+            Some(o) => {
+                let closes = match o {
+                    '\u{201C}' => c == '\u{201D}',
+                    '"' => c == '"',
+                    '\u{2018}' => c == '\u{2019}' && at_word_end,
+                    _ => c == '\'' && at_word_end && prev.is_some_and(|p| !p.is_whitespace()),
+                };
+                if closes {
+                    spans.push(std::mem::take(&mut cur));
+                    open = None;
+                } else {
+                    cur.push(c);
+                }
+            }
+        }
+    }
+    if open.is_some() && !cur.trim().is_empty() {
+        spans.push(cur);
+    }
+    spans
+}
+
+/// Words inside dialogue quotes in a paragraph.
+pub fn dialogue_words(paragraph: &str) -> usize {
+    quoted_spans(paragraph).iter().map(|s| count_words(s)).sum()
+}
+
+/// Paragraph-aligned chunks of roughly `target_words` words: paragraphs are
+/// accumulated until the target is reached; a paragraph longer than twice
+/// the target is split on sentence boundaries. A trailing remainder under
+/// half the target is merged into the previous chunk. Chunks are therefore
+/// coherent passages (usable as exemplars), never cut mid-sentence.
+pub fn chunk_paragraphs(paragraphs: &[String], target_words: usize) -> Vec<Vec<String>> {
+    let target = target_words.max(50);
+    // Pieces: whole paragraphs, or sentence groups of an over-long paragraph.
+    let mut pieces: Vec<(String, usize)> = Vec::new();
+    for p in paragraphs {
+        let n = count_words(p);
+        if n <= 2 * target {
+            pieces.push((p.clone(), n));
+            continue;
+        }
+        let mut buf = String::new();
+        let mut bn = 0usize;
+        for s in sentences(p) {
+            let sn = count_words(&s);
+            if !buf.is_empty() {
+                buf.push(' ');
+            }
+            buf.push_str(&s);
+            bn += sn;
+            if bn >= target {
+                pieces.push((std::mem::take(&mut buf), bn));
+                bn = 0;
+            }
+        }
+        if !buf.is_empty() {
+            pieces.push((buf, bn));
+        }
+    }
+
+    let mut chunks: Vec<Vec<String>> = Vec::new();
+    let mut cur: Vec<String> = Vec::new();
     let mut cur_words = 0usize;
-    for tok in tokens {
-        cur.push(tok);
-        cur_words += tok.unicode_words().count();
-        if cur_words >= chunk_words {
-            chunks.push(cur.join(" "));
-            cur.clear();
+    for (text, n) in pieces {
+        cur.push(text);
+        cur_words += n;
+        if cur_words >= target {
+            chunks.push(std::mem::take(&mut cur));
             cur_words = 0;
         }
     }
     if !cur.is_empty() {
-        if !chunks.is_empty() && cur_words < chunk_words / 2 {
-            let prev = chunks.last_mut().unwrap();
-            prev.push(' ');
-            prev.push_str(&cur.join(" "));
+        if !chunks.is_empty() && cur_words < target / 2 {
+            chunks.last_mut().unwrap().extend(cur);
         } else {
-            chunks.push(cur.join(" "));
+            chunks.push(cur);
         }
     }
     chunks
@@ -171,33 +363,54 @@ mod tests {
     use super::*;
 
     #[test]
-    fn chunking_counts_unicode_words_not_whitespace_tokens() {
-        // 120 words + 120 punctuation-only tokens. With whitespace counting
-        // this would split at token 100; with word counting the first chunk
-        // must contain >= 100 actual words.
-        let text = "word — ".repeat(120);
-        let chunks = chunk_by_words(&text, 100);
-        assert!(!chunks.is_empty());
-        assert!(
-            count_words(&chunks[0]) >= 100,
-            "first chunk has {} words, expected >= 100",
-            count_words(&chunks[0])
-        );
-    }
-
-    #[test]
-    fn tiny_trailing_chunk_merges_into_predecessor() {
-        let text = "alpha beta ".repeat(130); // 260 words at chunk 100 -> 2 full + 60 tail
-        let chunks = chunk_by_words(&text, 100);
-        assert_eq!(chunks.len(), 3); // 60 >= 100/2, kept separate
-        let text = "alpha beta ".repeat(110); // 220 words -> 20-word tail merges
-        let chunks = chunk_by_words(&text, 100);
-        assert_eq!(chunks.len(), 2);
-        assert!(count_words(chunks.last().unwrap()) >= 100);
-    }
-
-    #[test]
     fn count_words_ignores_punctuation_tokens() {
         assert_eq!(count_words("hello — world ... !"), 2);
+    }
+
+    #[test]
+    fn curly_apostrophes_fold_into_one_word() {
+        assert_eq!(word_tokens("Don’t"), vec!["don't".to_string()]);
+    }
+
+    #[test]
+    fn paragraphs_drop_headings_and_join_lines() {
+        let t = "# Title\n\nCHAPTER ONE\n\nIt was a dark\nand stormy night.\n\nShe left.";
+        let p = paragraphs(t);
+        assert_eq!(p, vec!["It was a dark and stormy night.", "She left."]);
+    }
+
+    #[test]
+    fn sentences_repair_abbreviations_and_dialogue_tags() {
+        let s = sentences("Mr. Smith arrived. \"Why?\" he asked. Nobody knew.");
+        assert_eq!(s.len(), 3, "{s:?}");
+        assert!(s[0].starts_with("Mr. Smith"));
+        assert!(s[1].contains("he asked"));
+    }
+
+    #[test]
+    fn dialogue_detects_curly_straight_and_single_quotes() {
+        assert_eq!(dialogue_words("“Come here,” she said. “Now.”"), 3);
+        assert_eq!(dialogue_words("\"Come here,\" she said."), 2);
+        assert_eq!(dialogue_words("‘Don’t go,’ he said."), 2);
+        assert_eq!(dialogue_words("It wasn't his fault, he thought."), 0);
+    }
+
+    #[test]
+    fn chunks_are_paragraph_aligned_and_merge_small_tails() {
+        let para = "word ".repeat(60).trim().to_string() + ".";
+        let paras: Vec<String> = (0..7).map(|_| para.clone()).collect(); // 420 words
+        let chunks = chunk_paragraphs(&paras, 100);
+        // 60+60 = 120 >= 100 -> chunks of 2 paragraphs; 7th (60 >= 50) stands alone.
+        assert_eq!(chunks.len(), 4);
+        assert!(chunks.iter().all(|c| c.iter().all(|p| p.ends_with('.'))));
+    }
+
+    #[test]
+    fn long_paragraph_splits_on_sentences() {
+        let sentence = "One two three four five six seven eight nine ten. ";
+        let para = sentence.repeat(30); // 300 words in one paragraph
+        let chunks = chunk_paragraphs(&[para], 100);
+        assert_eq!(chunks.len(), 3);
+        assert!(chunks.iter().all(|c| c[0].trim_end().ends_with('.')));
     }
 }

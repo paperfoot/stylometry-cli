@@ -1,8 +1,15 @@
 pub mod agent_info;
+pub mod analyze;
+pub mod background;
 pub mod calibrate;
+pub mod check;
 pub mod compare;
 pub mod config;
 pub mod contract;
+pub mod diff;
+pub mod doctor;
+pub mod guide;
+pub mod input;
 pub mod profile;
 pub mod skill;
 pub mod update;

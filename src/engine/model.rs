@@ -1,11 +1,14 @@
 //! The shared reference model: the most-frequent feature vocabulary and the
-//! per-feature mean/SD, computed across ALL loaded profiles' chunks.
+//! per-feature mean/SD, computed across ALL loaded profiles' passages at one
+//! analysis length.
 //!
 //! This is the Burrows-Delta reference distribution. z-scoring against it is
 //! what makes a frequency "unusual relative to writers in general" rather than
-//! just "common", which is the whole point of Delta over raw cosine.
+//! just "common", which is the whole point of Delta over raw cosine. Feature
+//! spread depends on passage length, so a model is built per length: `k`
+//! consecutive base chunks per passage.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -34,20 +37,32 @@ pub struct ReferenceModel {
     pub vocab: Vocab,
     pub mean: Vec<f64>,
     pub sd: Vec<f64>,
+    /// Base chunks per passage this model was fit at.
+    #[serde(default = "one")]
+    pub k: usize,
 }
 
-fn top_keys(counts: &HashMap<String, u64>, n: usize) -> Vec<String> {
-    let mut v: Vec<(&String, &u64)> = counts.iter().collect();
+fn one() -> usize {
+    1
+}
+
+fn top_keys(counts: &HashMap<String, u64>, n: usize, skip: &HashSet<&str>) -> Vec<String> {
+    let mut v: Vec<(&String, &u64)> = counts
+        .iter()
+        .filter(|(k, _)| !skip.contains(k.as_str()))
+        .collect();
     v.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
     v.into_iter().take(n).map(|(k, _)| k.clone()).collect()
 }
 
 impl ReferenceModel {
-    /// Build from profiles, selecting the top `n_words` words and `n_trigrams`
-    /// trigrams by total count across all profiles.
-    pub fn build(profiles: &[Profile], n_words: usize, n_trigrams: usize) -> ReferenceModel {
+    /// Build from profiles at passage length `k` base chunks, selecting the
+    /// top `n_words` words (proper nouns excluded: names are topic, not
+    /// style) and `n_trigrams` trigrams by total count across all profiles.
+    pub fn build(profiles: &[Profile], n_words: usize, n_trigrams: usize, k: usize) -> ReferenceModel {
         let mut gw: HashMap<String, u64> = HashMap::new();
         let mut gt: HashMap<String, u64> = HashMap::new();
+        let mut names: HashSet<&str> = HashSet::new();
         for p in profiles {
             for (k, v) in &p.word_counts {
                 *gw.entry(k.clone()).or_insert(0) += *v;
@@ -55,39 +70,25 @@ impl ReferenceModel {
             for (k, v) in &p.trigram_counts {
                 *gt.entry(k.clone()).or_insert(0) += *v;
             }
+            names.extend(p.proper_nouns.iter().map(String::as_str));
         }
         let vocab = Vocab {
-            words: top_keys(&gw, n_words),
-            trigrams: top_keys(&gt, n_trigrams),
+            words: top_keys(&gw, n_words, &names),
+            trigrams: top_keys(&gt, n_trigrams, &HashSet::new()),
+        };
+        let mut model = ReferenceModel {
+            mean: vec![0.0; vocab.dim()],
+            sd: vec![1.0; vocab.dim()],
+            vocab,
+            k: k.max(1),
         };
 
-        // Index lookup for fast vectorization.
-        let widx: HashMap<&str, usize> = vocab
-            .words
-            .iter()
-            .enumerate()
-            .map(|(i, w)| (w.as_str(), i))
-            .collect();
-        let off = vocab.words.len();
-        let tidx: HashMap<&str, usize> = vocab
-            .trigrams
-            .iter()
-            .enumerate()
-            .map(|(i, w)| (w.as_str(), i + off))
-            .collect();
-
-        let dim = vocab.dim();
+        let dim = model.vocab.dim();
         let mut sum = vec![0.0f64; dim];
         let mut sumsq = vec![0.0f64; dim];
         let mut n_docs = 0usize;
-
         for p in profiles {
-            for (wf, tf) in p
-                .chunk_word_freqs
-                .iter()
-                .zip(p.chunk_trigram_freqs.iter())
-            {
-                let v = vectorize_with_index(wf, tf, &widx, &tidx, dim);
+            for v in model.raw_vectors(p) {
                 for j in 0..dim {
                     sum[j] += v[j];
                     sumsq[j] += v[j] * v[j];
@@ -95,39 +96,23 @@ impl ReferenceModel {
                 n_docs += 1;
             }
         }
-
         let n = n_docs.max(1) as f64;
-        let mut mean = vec![0.0; dim];
-        let mut sd = vec![1.0; dim];
         for j in 0..dim {
-            mean[j] = sum[j] / n;
-            let var = (sumsq[j] / n) - mean[j] * mean[j];
+            model.mean[j] = sum[j] / n;
+            let var = (sumsq[j] / n) - model.mean[j] * model.mean[j];
             // Constant features (var ~ 0) get sd=1 so their z-score is 0 and
             // they contribute nothing rather than exploding.
-            sd[j] = if var > 1e-12 { var.sqrt() } else { 1.0 };
+            model.sd[j] = if var > 1e-12 { var.sqrt() } else { 1.0 };
         }
-
-        ReferenceModel { vocab, mean, sd }
+        model
     }
 
     /// Raw relative-frequency vector for a feature pair over this vocab.
     pub fn vectorize(&self, wf: &HashMap<String, f64>, tf: &HashMap<String, f64>) -> Vec<f64> {
-        let widx: HashMap<&str, usize> = self
-            .vocab
-            .words
-            .iter()
-            .enumerate()
-            .map(|(i, w)| (w.as_str(), i))
-            .collect();
-        let off = self.vocab.words.len();
-        let tidx: HashMap<&str, usize> = self
-            .vocab
-            .trigrams
-            .iter()
-            .enumerate()
-            .map(|(i, w)| (w.as_str(), i + off))
-            .collect();
-        vectorize_with_index(wf, tf, &widx, &tidx, self.vocab.dim())
+        let mut v = Vec::with_capacity(self.vocab.dim());
+        v.extend(self.vocab.words.iter().map(|w| wf.get(w).copied().unwrap_or(0.0)));
+        v.extend(self.vocab.trigrams.iter().map(|t| tf.get(t).copied().unwrap_or(0.0)));
+        v
     }
 
     /// Relative-frequency vector computed directly from raw text.
@@ -154,40 +139,26 @@ impl ReferenceModel {
             .collect()
     }
 
-    /// Z-scored vectors for every chunk of a profile.
-    pub fn chunk_zvectors(&self, p: &Profile) -> Vec<Vec<f64>> {
-        p.chunk_word_freqs
+    /// Raw vectors of every `k`-chunk passage of a profile.
+    pub fn raw_vectors(&self, p: &Profile) -> Vec<Vec<f64>> {
+        p.spans(self.k)
             .iter()
-            .zip(p.chunk_trigram_freqs.iter())
-            .map(|(wf, tf)| self.zscore(&self.vectorize(wf, tf)))
+            .map(|span| {
+                let (wf, tf) = p.span_freqs(span);
+                self.vectorize(&wf, &tf)
+            })
             .collect()
     }
 
-    /// The author's centroid in z-space (mean of chunk z-vectors).
-    pub fn centroid(&self, p: &Profile) -> Vec<f64> {
-        mean_vec(&self.chunk_zvectors(p), self.vocab.dim())
+    /// Z-scored vectors for every `k`-chunk passage of a profile.
+    pub fn passage_zvectors(&self, p: &Profile) -> Vec<Vec<f64>> {
+        self.raw_vectors(p).iter().map(|v| self.zscore(v)).collect()
     }
-}
 
-fn vectorize_with_index(
-    wf: &HashMap<String, f64>,
-    tf: &HashMap<String, f64>,
-    widx: &HashMap<&str, usize>,
-    tidx: &HashMap<&str, usize>,
-    dim: usize,
-) -> Vec<f64> {
-    let mut v = vec![0.0f64; dim];
-    for (k, &freq) in wf {
-        if let Some(&i) = widx.get(k.as_str()) {
-            v[i] = freq;
-        }
+    /// The author's centroid in z-space (mean of passage z-vectors).
+    pub fn centroid(&self, p: &Profile) -> Vec<f64> {
+        mean_vec(&self.passage_zvectors(p), self.vocab.dim())
     }
-    for (k, &freq) in tf {
-        if let Some(&i) = tidx.get(k.as_str()) {
-            v[i] = freq;
-        }
-    }
-    v
 }
 
 pub fn mean_vec(vectors: &[Vec<f64>], dim: usize) -> Vec<f64> {
@@ -207,31 +178,13 @@ pub fn mean_vec(vectors: &[Vec<f64>], dim: usize) -> Vec<f64> {
     m
 }
 
-/// A stable signature of the reference set + feature settings. A calibration is
-/// only valid against the exact reference it was fit on; `compare` recomputes
-/// this and flags the calibration stale if the profile set OR its content
-/// changed. Includes a content hash per profile so swapping in a different
-/// profile with identical chunk/token counts is still detected.
+/// A stable signature of the profile set + feature settings: name, size, and
+/// creation time per profile. A changed signature means the imposter pool or
+/// a profile's content changed since calibration.
 pub fn reference_signature(profiles: &[Profile], n_words: usize, n_trigrams: usize) -> String {
-    use std::hash::{Hash, Hasher};
     let mut parts: Vec<String> = profiles
         .iter()
-        .map(|p| {
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            let mut wc: Vec<(&String, &u64)> = p.word_counts.iter().collect();
-            wc.sort();
-            let mut tc: Vec<(&String, &u64)> = p.trigram_counts.iter().collect();
-            tc.sort();
-            for (k, v) in wc {
-                k.hash(&mut h);
-                v.hash(&mut h);
-            }
-            for (k, v) in tc {
-                k.hash(&mut h);
-                v.hash(&mut h);
-            }
-            format!("{}:{}:{}:{:x}", p.name, p.n_chunks, p.n_tokens, h.finish())
-        })
+        .map(|p| format!("{}:{}:{}:{}", p.name, p.chunks.len(), p.n_tokens, p.created))
         .collect();
     parts.sort();
     format!("mfw={n_words};tri={n_trigrams};{}", parts.join("|"))

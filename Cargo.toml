@@ -1,11 +1,11 @@
 [package]
 # crates.io package name; the installed binary is `stylometry` (see [[bin]]).
 name = "stylometry-cli"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.85"
-description = "Authorship-verification stylometry CLI: build author profiles and verify authorship with calibrated Burrows/Cosine Delta. Local, agent-friendly, single binary."
-license = "MIT"
+description = "Analyse a writer's voice, brief AI agents to write in it, and check drafts against it: signature words, synonym habits, rhythm, LLM tells, and calibrated authorship verification. Local, single binary."
+license = "MIT AND CC-BY-SA-4.0"
 repository = "https://github.com/paperfoot/stylometry-cli"
 readme = "README.md"
 keywords = ["stylometry", "authorship", "forensics", "nlp", "cli"]
@@ -31,6 +31,7 @@ figment = { version = "0.10", features = ["toml", "env"] }
 directories = "6"
 unicode-segmentation = "1"
 walkdir = "2"
+ureq = "3"
 
 [dev-dependencies]
 assert_cmd = "2"

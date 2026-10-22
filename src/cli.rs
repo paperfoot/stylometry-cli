@@ -2,13 +2,11 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-use crate::engine;
-
 #[derive(Parser)]
 #[command(
     name = "stylometry",
     version,
-    about = "Stylometry: author profiles + calibrated authorship verification"
+    about = "Analyse a writer's voice, brief an agent to write in it, and check drafts against it"
 )]
 pub struct Cli {
     /// Force JSON output even in a terminal
@@ -25,30 +23,85 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Build, list, show, and remove author profiles
+    /// Build, list, show, rebuild, and remove voice profiles
     Profile {
         #[command(subcommand)]
         action: ProfileAction,
     },
-    /// Compare a text against a profile and return a verdict
-    Compare {
-        /// Profile to compare against
-        #[arg(long)]
+    /// Voice report: signature and avoided words, synonym habits, rhythm, punctuation
+    Analyze {
+        /// Profile name, or a path to a file/folder to analyse without saving a profile
+        source: String,
+        /// Items per list (signature words, phrases, ...)
+        #[arg(short = 'n', long, default_value_t = 25)]
+        limit: usize,
+    },
+    /// Style brief (Markdown) an agent can follow to write in a profile's voice
+    Guide {
+        /// Profile name
         profile: String,
-        /// Path to a text file to score ('-' or piped stdin also work)
+        /// Exemplar passages from the author's own text to include
+        #[arg(long, default_value_t = 3)]
+        exemplars: usize,
+        /// Items per word list
+        #[arg(short = 'n', long, default_value_t = 30)]
+        limit: usize,
+        /// Write the brief to this file instead of only returning it
+        #[arg(short = 'o', long)]
+        out: Option<PathBuf>,
+    },
+    /// Check a draft against a voice: off-voice words with the author's preferred alternative, LLM tells, rhythm drift, and a voice-match score
+    Check {
+        /// Draft file ('-' reads stdin)
         file: Option<PathBuf>,
+        /// Profile to check against
+        #[arg(short = 'p', long)]
+        profile: String,
+        /// Inline text instead of a file
+        #[arg(long, conflicts_with = "file")]
+        text: Option<String>,
+        /// Maximum findings to return, most important first
+        #[arg(short = 'n', long, default_value_t = 50)]
+        limit: usize,
+    },
+    /// Contrast two voices: what each uses that the other doesn't
+    Diff {
+        /// First profile name or path
+        a: String,
+        /// Second profile name or path
+        b: String,
+        /// Items per list
+        #[arg(short = 'n', long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Authorship verification: was this text written by the profile's author?
+    Compare {
+        /// Text file to score ('-' reads stdin)
+        file: Option<PathBuf>,
+        /// Profile to compare against
+        #[arg(short = 'p', long)]
+        profile: String,
         /// Inline text instead of a file
         #[arg(long, conflicts_with = "file")]
         text: Option<String>,
     },
-    /// Calibrate a profile's verifier against the other profiles (imposters)
+    /// Fit a profile's verifier (P(same author) per text length) against background and other profiles
     Calibrate {
         /// Profile to calibrate
-        name: String,
+        profile: String,
+    },
+    /// Manage the background of reference authors (public-domain books) used for calibration and comparison
+    Background {
+        #[command(subcommand)]
+        action: BackgroundAction,
     },
     /// Machine-readable capability manifest
     #[command(visible_alias = "info")]
-    AgentInfo,
+    AgentInfo {
+        /// Inspect a canonical command or group, e.g. "check" or "profile build"
+        #[arg(long, value_name = "PATH")]
+        command: Option<String>,
+    },
     /// Manage skill file installation
     Skill {
         #[command(subcommand)]
@@ -59,6 +112,8 @@ pub enum Commands {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// Diagnose setup: data dir, profiles, background, calibration state
+    Doctor,
     /// Distribution-aware update check/apply
     Update {
         /// Check only, don't install
@@ -75,24 +130,44 @@ pub enum Commands {
 
 #[derive(Subcommand)]
 pub enum ProfileAction {
-    /// Build a profile by analysing a corpus (a file or a directory of .md/.txt)
+    /// Build a profile from a corpus (a file, or a folder of .md/.txt; each file is one work)
     Build {
         /// Profile name (letters, digits, '-', '_')
         name: String,
         /// Corpus path: a file or a directory
         #[arg(long)]
         corpus: PathBuf,
-        /// Words per analysis chunk
-        #[arg(long, default_value_t = engine::DEFAULT_CHUNK_WORDS)]
-        chunk_size: usize,
+        /// Mark as a background (reference) author rather than a voice to write in
+        #[arg(long)]
+        background: bool,
         /// Overwrite an existing profile
         #[arg(long)]
         force: bool,
     },
-    /// List all profiles
-    List,
-    /// Show a profile's fingerprint summary
+    /// Blend weighted profiles into a new target voice, e.g. --from hoover=0.6 --from fisher=0.4
+    Blend {
+        /// Name for the blended voice
+        name: String,
+        /// Component as PROFILE=SHARE (repeat; shares are normalized)
+        #[arg(long = "from", value_name = "PROFILE=SHARE", required = true)]
+        from: Vec<String>,
+        /// Overwrite an existing profile
+        #[arg(long)]
+        force: bool,
+    },
+    /// List voice profiles
+    List {
+        /// Include background (reference) profiles
+        #[arg(long)]
+        all: bool,
+    },
+    /// Show a profile's summary: size, works, calibration
     Show {
+        /// Profile name
+        name: String,
+    },
+    /// Re-analyse a profile from its stored text (after an upgrade); drops calibration
+    Rebuild {
         /// Profile name
         name: String,
     },
@@ -100,7 +175,22 @@ pub enum ProfileAction {
     Remove {
         /// Profile name
         name: String,
+        /// Confirm the deletion
+        #[arg(long)]
+        confirm: bool,
     },
+}
+
+#[derive(Subcommand)]
+pub enum BackgroundAction {
+    /// Download and build the reference authors from Project Gutenberg (one-time, ~40 books)
+    Fetch {
+        /// Rebuild background profiles that already exist
+        #[arg(long)]
+        force: bool,
+    },
+    /// Show which reference authors are installed
+    Status,
 }
 
 #[derive(Subcommand)]

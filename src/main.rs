@@ -1,9 +1,12 @@
-//! stylometry -- authorship verification CLI.
+//! stylometry -- analyse a writer's voice, brief agents to write in it, and
+//! check drafts against it.
 //!
-//! Build per-author profiles by fingerprinting their writing, then verify new
-//! text against them with calibrated Burrows/Cosine Delta. Local, single
-//! static binary, agent-friendly (JSON envelope, semantic exit codes,
-//! agent-info manifest). Built on the agent-cli-framework patterns.
+//! Build per-author voice profiles from their writing; report their habits
+//! (signature and avoided words, synonym choices, rhythm, punctuation);
+//! produce a style brief an agent can follow; check drafts line by line; and
+//! verify authorship with calibrated Burrows/Cosine Delta. Local, single
+//! binary, agent-friendly (JSON envelope, semantic exit codes, agent-info
+//! manifest). Built on the agent-cli-framework patterns.
 
 mod cli;
 mod commands;
@@ -14,13 +17,15 @@ mod output;
 
 use clap::Parser;
 
-use cli::{Cli, Commands, ConfigAction, ProfileAction, SkillAction};
+use cli::{BackgroundAction, Cli, Commands, ConfigAction, ProfileAction, SkillAction};
 use output::{Ctx, Format};
 
-/// Pre-scan argv for --json before clap parses, so --json is honored even on
-/// help, version, and parse-error paths where the Cli struct isn't populated.
+/// Pre-scan argv for --json (up to the `--` delimiter) before clap parses, so
+/// --json is honored even on help, version, and parse-error paths.
 fn has_json_flag() -> bool {
-    std::env::args_os().any(|a| a == "--json")
+    std::env::args_os()
+        .take_while(|a| a != "--")
+        .any(|a| a == "--json")
 }
 
 fn main() {
@@ -33,14 +38,17 @@ fn main() {
                 e.kind(),
                 clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
             ) {
-                let format = Format::detect(json_flag);
-                match format {
-                    Format::Json => {
-                        output::print_help_json(e);
-                        std::process::exit(0);
-                    }
-                    Format::Human => e.exit(),
+                if json_flag {
+                    let code = match output::print_help_json(e) {
+                        Ok(()) => 0,
+                        Err(err) => {
+                            output::print_error(Format::Json, &err);
+                            err.exit_code()
+                        }
+                    };
+                    std::process::exit(code);
                 }
+                e.exit();
             }
             let format = Format::detect(json_flag);
             output::print_clap_error(format, &e);
@@ -55,20 +63,45 @@ fn main() {
             ProfileAction::Build {
                 name,
                 corpus,
-                chunk_size,
+                background,
                 force,
-            } => commands::profile::build(ctx, name, corpus, chunk_size, force),
-            ProfileAction::List => commands::profile::list(ctx),
+            } => commands::profile::build(ctx, name, corpus, background, force),
+            ProfileAction::Blend { name, from, force } => {
+                commands::profile::blend(ctx, name, from, force)
+            }
+            ProfileAction::List { all } => commands::profile::list(ctx, all),
             ProfileAction::Show { name } => commands::profile::show(ctx, name),
-            ProfileAction::Remove { name } => commands::profile::remove(ctx, name),
+            ProfileAction::Rebuild { name } => commands::profile::rebuild(ctx, name),
+            ProfileAction::Remove { name, confirm } => {
+                commands::profile::remove(ctx, name, confirm)
+            }
         },
+        Commands::Analyze { source, limit } => commands::analyze::run(ctx, source, limit),
+        Commands::Guide {
+            profile,
+            exemplars,
+            limit,
+            out,
+        } => commands::guide::run(ctx, profile, exemplars, limit, out),
+        Commands::Check {
+            file,
+            profile,
+            text,
+            limit,
+        } => commands::check::run(ctx, profile, file, text, limit),
+        Commands::Diff { a, b, limit } => commands::diff::run(ctx, a, b, limit),
         Commands::Compare {
             profile,
             file,
             text,
         } => commands::compare::run(ctx, profile, file, text),
-        Commands::Calibrate { name } => commands::calibrate::run(ctx, name),
-        Commands::AgentInfo => {
+        Commands::Calibrate { profile } => commands::calibrate::run(ctx, profile),
+        Commands::Background { action } => match action {
+            BackgroundAction::Fetch { force } => commands::background::fetch(ctx, force),
+            BackgroundAction::Status => commands::background::status(ctx),
+        },
+        Commands::AgentInfo { command } => {
+            let _ = command;
             commands::agent_info::run();
             Ok(())
         }
@@ -80,6 +113,7 @@ fn main() {
             ConfigAction::Show => config::load().and_then(|cfg| commands::config::show(ctx, &cfg)),
             ConfigAction::Path => commands::config::path(ctx),
         },
+        Commands::Doctor => commands::doctor::run(ctx),
         Commands::Update { check } => {
             config::load().and_then(|cfg| commands::update::run(ctx, check, &cfg))
         }

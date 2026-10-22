@@ -1,158 +1,322 @@
-//! `profile` subcommands: build / list / show / remove.
+//! `profile` subcommands: build / list / show / rebuild / remove.
 
 use std::path::PathBuf;
 
 use serde::Serialize;
 
-use crate::engine::{profile::Profile, store, text};
+use crate::engine::profile::{Profile, ProfileKind, BASE_CHUNK_WORDS};
+use crate::engine::{store, text};
 use crate::error::AppError;
 use crate::output::{self, Ctx};
+
+const BIN: &str = env!("CARGO_BIN_NAME");
 
 #[derive(Serialize)]
 struct BuiltProfile {
     name: String,
-    tokens: u64,
-    chunks: usize,
-    chunk_size: usize,
+    kind: ProfileKind,
+    words: u64,
+    works: usize,
+    passages: usize,
     path: String,
+}
+
+fn built(p: &Profile, path: PathBuf) -> BuiltProfile {
+    BuiltProfile {
+        name: p.name.clone(),
+        kind: p.kind,
+        words: p.n_tokens,
+        works: p.sources.len(),
+        passages: p.chunks.len(),
+        path: path.display().to_string(),
+    }
+}
+
+fn print_built(ctx: Ctx, data: &BuiltProfile, verb: &str) -> Result<(), AppError> {
+    let next = if data.kind == ProfileKind::Author {
+        vec![
+            format!("{BIN} analyze {}", data.name),
+            format!("{BIN} guide {}", data.name),
+            format!("{BIN} check draft.md --profile {}", data.name),
+        ]
+    } else {
+        vec![]
+    };
+    output::print_success_with(ctx, data, &next, |d| {
+        use owo_colors::OwoColorize;
+        println!(
+            "{verb} profile {} ({} words, {} work(s), {} passages)",
+            d.name.green().bold(),
+            d.words,
+            d.works,
+            d.passages
+        );
+        println!("  {}", d.path.dimmed());
+    })
 }
 
 pub fn build(
     ctx: Ctx,
     name: String,
     corpus: PathBuf,
-    chunk_size: usize,
+    background: bool,
     force: bool,
 ) -> Result<(), AppError> {
     if store::exists(&name) && !force {
-        return Err(AppError::InvalidInput(format!(
-            "profile '{name}' already exists; pass --force to overwrite"
-        )));
+        return Err(AppError::input(
+            format!("profile '{name}' already exists"),
+            format!("Pass --force to overwrite: {BIN} profile build {name} --corpus <path> --force"),
+        ));
     }
-    let text = text::read_corpus(&corpus)?;
-    let profile = Profile::build(&name, &text, chunk_size)?;
-    let path = store::save(&profile)?;
-
-    let data = BuiltProfile {
-        name: profile.name.clone(),
-        tokens: profile.n_tokens,
-        chunks: profile.n_chunks,
-        chunk_size: profile.chunk_size,
-        path: path.display().to_string(),
+    let docs = text::read_docs(&corpus)?;
+    let kind = if background {
+        ProfileKind::Background
+    } else {
+        ProfileKind::Author
     };
-    output::print_success_or(ctx, &data, |d| {
+    let profile = Profile::build(&name, &docs, kind)?;
+    let path = store::save(&profile)?;
+    print_built(ctx, &built(&profile, path), "Built")
+}
+
+pub fn blend(ctx: Ctx, name: String, from: Vec<String>, force: bool) -> Result<(), AppError> {
+    if store::exists(&name) && !force {
+        return Err(AppError::input(
+            format!("profile '{name}' already exists"),
+            format!("Pass --force to overwrite: {BIN} profile blend {name} --from a=0.6 --from b=0.4 --force"),
+        ));
+    }
+    let mut parts = Vec::new();
+    for spec in &from {
+        let (pname, share) = spec.split_once('=').ok_or_else(|| {
+            AppError::input(
+                format!("bad --from '{spec}': expected PROFILE=SHARE"),
+                format!("Example: {BIN} profile blend {name} --from hoover=0.6 --from fisher=0.4"),
+            )
+        })?;
+        let share: f64 = share.trim().parse().map_err(|_| {
+            AppError::input(
+                format!("bad share in --from '{spec}': not a number"),
+                format!("Example: {BIN} profile blend {name} --from hoover=0.6 --from fisher=0.4"),
+            )
+        })?;
+        parts.push((store::load(pname.trim())?, share));
+    }
+    let profile = Profile::blend(&name, &parts)?;
+    let path = store::save(&profile)?;
+    let data = built(&profile, path);
+    let next = vec![
+        format!("{BIN} analyze {name}"),
+        format!("{BIN} guide {name}"),
+        format!("{BIN} check draft.md --profile {name}"),
+    ];
+    output::print_success_with(ctx, &data, &next, |d| {
         use owo_colors::OwoColorize;
-        println!(
-            "Built profile {} ({} tokens, {} chunks)",
-            d.name.green().bold(),
-            d.tokens,
-            d.chunks
-        );
+        let mix: Vec<String> = profile
+            .components
+            .iter()
+            .map(|(n, s)| format!("{n} {:.0}%", s * 100.0))
+            .collect();
+        println!("Blended {} from {}", d.name.green().bold(), mix.join(" + "));
         println!("  {}", d.path.dimmed());
-    });
-    Ok(())
+    })
+}
+
+pub fn rebuild(ctx: Ctx, name: String) -> Result<(), AppError> {
+    if let Ok(p) = store::load(&name) {
+        if p.kind == ProfileKind::Blend {
+            return Err(AppError::input(
+                format!("'{name}' is a blend; rebuild its components, then re-blend"),
+                format!("Re-blend with: {BIN} profile blend {name} --from <a>=<share> --from <b>=<share> --force"),
+            ));
+        }
+    }
+    let (kind, docs) = store::load_text(&name)?;
+    let profile = Profile::build(&name, &docs, kind)?;
+    let path = store::save(&profile)?;
+    print_built(ctx, &built(&profile, path), "Rebuilt")
 }
 
 #[derive(Serialize)]
 struct ProfileSummary {
     name: String,
-    tokens: u64,
-    chunks: usize,
+    kind: ProfileKind,
+    words: u64,
+    works: usize,
     calibrated: bool,
 }
 
-pub fn list(ctx: Ctx) -> Result<(), AppError> {
-    let mut rows = Vec::new();
-    for name in store::list_names() {
-        if let Ok(p) = store::load(&name) {
-            rows.push(ProfileSummary {
-                name: p.name,
-                tokens: p.n_tokens,
-                chunks: p.n_chunks,
-                calibrated: p.calibration.is_some(),
-            });
-        }
-    }
-    output::print_success_or(ctx, &rows, |rows| {
-        use comfy_table::{Table, presets::UTF8_FULL};
-        if rows.is_empty() {
-            println!("No profiles yet. Build one with: stylometry profile build <name> --corpus <path>");
-            return;
-        }
-        let mut t = Table::new();
-        t.load_preset(UTF8_FULL)
-            .set_header(vec!["profile", "tokens", "chunks", "calibrated"]);
-        for r in rows {
-            t.add_row(vec![
-                r.name.clone(),
-                r.tokens.to_string(),
-                r.chunks.to_string(),
-                if r.calibrated { "yes" } else { "no" }.to_string(),
-            ]);
-        }
-        println!("{t}");
-    });
-    Ok(())
+#[derive(Serialize)]
+struct Outdated {
+    name: String,
+    error: String,
 }
 
 #[derive(Serialize)]
-struct TopWord {
-    word: String,
-    count: u64,
+struct ProfileList {
+    profiles: Vec<ProfileSummary>,
+    /// Profiles that exist on disk but can't be used (older schema, corrupt).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    unusable: Vec<Outdated>,
+    background_installed: usize,
+}
+
+pub fn list(ctx: Ctx, all: bool) -> Result<(), AppError> {
+    let mut profiles = Vec::new();
+    let mut unusable = Vec::new();
+    let mut background_installed = 0;
+    for name in store::list_names() {
+        match store::load(&name) {
+            Ok(p) => {
+                if p.kind == ProfileKind::Background {
+                    background_installed += 1;
+                    if !all {
+                        continue;
+                    }
+                }
+                profiles.push(ProfileSummary {
+                    name: p.name,
+                    kind: p.kind,
+                    words: p.n_tokens,
+                    works: p.sources.len(),
+                    calibrated: p.calibration.is_some(),
+                });
+            }
+            Err(e) => unusable.push(Outdated {
+                name,
+                error: e.to_string(),
+            }),
+        }
+    }
+    let data = ProfileList {
+        profiles,
+        unusable,
+        background_installed,
+    };
+    let mut next = Vec::new();
+    if data.profiles.iter().all(|p| p.kind == ProfileKind::Background) {
+        next.push(format!("{BIN} profile build <name> --corpus <folder-of-md-or-txt>"));
+    }
+    if data.background_installed == 0 {
+        next.push(format!("{BIN} background fetch"));
+    }
+    output::print_success_with(ctx, &data, &next, |d| {
+        use comfy_table::{Table, presets::UTF8_FULL};
+        use owo_colors::OwoColorize;
+        if d.profiles.is_empty() {
+            println!("No voice profiles yet.");
+        } else {
+            let mut t = Table::new();
+            t.load_preset(UTF8_FULL)
+                .set_header(vec!["profile", "kind", "words", "works", "calibrated"]);
+            for r in &d.profiles {
+                t.add_row(vec![
+                    r.name.clone(),
+                    format!("{:?}", r.kind).to_lowercase(),
+                    r.words.to_string(),
+                    r.works.to_string(),
+                    if r.calibrated { "yes" } else { "no" }.to_string(),
+                ]);
+            }
+            println!("{t}");
+        }
+        println!("{} background author(s) installed", d.background_installed);
+        for u in &d.unusable {
+            println!("  {} {}: {}", "unusable".yellow(), u.name, u.error);
+        }
+    })
 }
 
 #[derive(Serialize)]
 struct ShowProfile {
     name: String,
-    tokens: u64,
-    chunks: usize,
-    chunk_size: usize,
+    kind: ProfileKind,
+    words: u64,
+    passages: usize,
+    passage_words: usize,
+    works: Vec<crate::engine::profile::Source>,
     distinct_words: usize,
-    distinct_trigrams: usize,
-    top_words: Vec<TopWord>,
-    calibration: Option<crate::engine::profile::Calibration>,
+    proper_nouns: usize,
+    calibration: Option<CalibrationSummary>,
+}
+
+#[derive(Serialize)]
+struct CalibrationSummary {
+    imposters: usize,
+    cross_work: bool,
+    bands: Vec<BandSummary>,
+}
+
+#[derive(Serialize)]
+struct BandSummary {
+    words: usize,
+    auc: f64,
+    holdout_accuracy: Option<f64>,
 }
 
 pub fn show(ctx: Ctx, name: String) -> Result<(), AppError> {
     let p = store::load(&name)?;
-    let mut tw: Vec<(&String, &u64)> = p.word_counts.iter().collect();
-    tw.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
-    let top_words: Vec<TopWord> = tw
-        .into_iter()
-        .take(15)
-        .map(|(w, c)| TopWord {
-            word: w.clone(),
-            count: *c,
-        })
-        .collect();
-
     let data = ShowProfile {
         name: p.name.clone(),
-        tokens: p.n_tokens,
-        chunks: p.n_chunks,
-        chunk_size: p.chunk_size,
+        kind: p.kind,
+        words: p.n_tokens,
+        passages: p.chunks.len(),
+        passage_words: BASE_CHUNK_WORDS,
+        works: p.sources.clone(),
         distinct_words: p.word_counts.len(),
-        distinct_trigrams: p.trigram_counts.len(),
-        top_words,
-        calibration: p.calibration.clone(),
+        proper_nouns: p.proper_nouns.len(),
+        calibration: p.calibration.as_ref().map(|c| CalibrationSummary {
+            imposters: c.imposters,
+            cross_work: c.cross_work,
+            bands: c
+                .bands
+                .iter()
+                .map(|b| BandSummary {
+                    words: b.words,
+                    auc: b.auc,
+                    holdout_accuracy: b.holdout_accuracy,
+                })
+                .collect(),
+        }),
     };
-    output::print_success_or(ctx, &data, |d| {
+    let next = vec![format!("{BIN} analyze {name}")];
+    output::print_success_with(ctx, &data, &next, |d| {
         use owo_colors::OwoColorize;
-        println!("{} — {} tokens, {} chunks", d.name.green().bold(), d.tokens, d.chunks);
-        match &d.calibration {
-            Some(c) => println!(
-                "  calibrated: AUC {:.3}, accuracy {:.3}, threshold δ={:.3} ({} imposters)",
-                c.auc, c.c_at_1, c.threshold, c.imposters
-            ),
-            None => println!("  not calibrated (run: stylometry calibrate {})", d.name),
+        println!(
+            "{} — {} words in {} work(s), {} passages",
+            d.name.green().bold(),
+            d.words,
+            d.works.len(),
+            d.passages
+        );
+        for w in &d.works {
+            println!("  {} ({} words)", w.name.dimmed(), w.words);
         }
-        let words: Vec<String> = d.top_words.iter().map(|t| t.word.clone()).collect();
-        println!("  top words: {}", words.join(", ").dimmed());
-    });
-    Ok(())
+        match &d.calibration {
+            Some(c) => {
+                for b in &c.bands {
+                    println!(
+                        "  calibrated @{} words: AUC {:.3}, holdout accuracy {}",
+                        b.words,
+                        b.auc,
+                        b.holdout_accuracy
+                            .map(|a| format!("{a:.3}"))
+                            .unwrap_or_else(|| "n/a".into())
+                    );
+                }
+            }
+            None => println!("  not calibrated (run: {BIN} calibrate {})", d.name),
+        }
+    })
 }
 
-pub fn remove(ctx: Ctx, name: String) -> Result<(), AppError> {
+pub fn remove(ctx: Ctx, name: String, confirm: bool) -> Result<(), AppError> {
+    if !confirm {
+        return Err(AppError::input(
+            format!("removing profile '{name}' needs confirmation"),
+            format!("Re-run with --confirm: {BIN} profile remove {name} --confirm"),
+        ));
+    }
     store::remove(&name)?;
     #[derive(Serialize)]
     struct Removed {
@@ -160,6 +324,5 @@ pub fn remove(ctx: Ctx, name: String) -> Result<(), AppError> {
     }
     output::print_success_or(ctx, &Removed { removed: name.clone() }, |d| {
         println!("Removed profile {}", d.removed);
-    });
-    Ok(())
+    })
 }

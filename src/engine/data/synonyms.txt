@@ -1,0 +1,196 @@
+# Synonym groups where the choice is a matter of voice, not meaning.
+# One group per line, comma-separated, lowercase; multi-word members are
+# matched as phrases. Inflected forms are their own groups (said / says).
+# A writer who reaches for one member and never the others has a habit worth
+# keeping; a draft that swaps in another member is drifting off-voice.
+#
+# Groups are deliberately narrow: members must be interchangeable in most
+# contexts, and a word appears in at most one group. Polysemous words whose
+# main sense is something else ("novel", "home", "like", "left", "so") are
+# left out on purpose: a wrong suggestion is worse than none.
+
+# ── Connectives ──────────────────────────────────────────────────────────────
+but, however, yet
+also, as well, additionally, furthermore, moreover, in addition
+therefore, thus, hence, consequently, accordingly
+although, though, even though, albeit
+besides, anyway, in any case, at any rate
+nevertheless, nonetheless, even so, all the same
+afterwards, after that, subsequently
+finally, eventually, at last, in the end, ultimately
+instead, in place of
+indeed, in fact, actually
+for example, for instance
+in short, in brief, in a word, to sum up
+meanwhile, in the meantime, meantime
+while, whilst
+among, amongst
+toward, towards
+until, till
+upon, on
+
+# ── Hedges and intensifiers ─────────────────────────────────────────────────
+very, really, extremely, incredibly, terribly, awfully, highly, exceedingly
+quite, rather, fairly, pretty, somewhat
+perhaps, maybe, possibly
+almost, nearly, practically, virtually
+completely, totally, entirely, utterly, wholly, absolutely
+just, simply, merely
+suddenly, all of a sudden, abruptly
+quickly, swiftly, rapidly
+slowly, gradually
+often, frequently
+sometimes, occasionally, at times, now and then
+always, invariably, constantly
+usually, normally, generally, typically
+clearly, obviously, evidently
+certainly, surely, definitely, undoubtedly
+apparently, seemingly
+especially, particularly, notably
+
+# ── Dialogue tags ───────────────────────────────────────────────────────────
+said, remarked, stated, declared, replied, responded, answered, exclaimed, murmured, muttered
+asked, inquired, enquired, queried
+says, remarks, states, declares, replies, responds, exclaims, murmurs, mutters
+whispered, breathed
+shouted, yelled, cried, screamed, bellowed, hollered
+
+# ── Common verbs ────────────────────────────────────────────────────────────
+use, utilize, utilise, employ
+used, utilized, utilised, employed
+start, begin, commence
+started, began, commenced
+finish, conclude
+finished, concluded
+stop, cease, halt
+stopped, ceased, halted
+get, obtain, acquire
+got, obtained, acquired
+help, assist
+helped, assisted
+show, demonstrate, reveal
+showed, demonstrated, revealed
+try, attempt, endeavour, endeavor
+tried, attempted, endeavoured, endeavored
+need, require
+needs, requires
+needed, required
+buy, purchase
+bought, purchased
+make, create, produce
+made, created, produced
+think, believe, reckon, suppose
+thought, believed, reckoned, supposed
+look, gaze, stare, peer, glance
+looked, gazed, stared, peered, glanced
+walk, stroll, amble, stride, saunter
+walked, strolled, ambled, strode, sauntered
+ran, dashed, sprinted, raced
+smile, grin, smirk, beam
+smiled, grinned, smirked, beamed
+laugh, chuckle, giggle, snicker, chortle
+laughed, chuckled, giggled, snickered, chortled
+grab, seize, snatch, grasp
+grabbed, seized, snatched, grasped
+went, headed, proceeded
+come, arrive
+came, arrived
+tell, inform, notify
+told, informed, notified
+explain, clarify, elucidate
+explained, clarified, elucidated
+understand, comprehend
+understood, comprehended
+want, wish, desire
+wanted, wished, desired
+enjoy, adore, relish
+liked, enjoyed, adored, relished
+hate, detest, loathe, despise
+hated, detested, loathed, despised
+see, notice, observe
+saw, noticed, observed
+seem, appear
+seemed, appeared
+keep, retain, maintain
+kept, retained, maintained
+choose, pick, select, opt
+chose, picked, selected, opted
+change, alter, modify
+changed, altered, modified
+improve, enhance, boost
+improved, enhanced, boosted
+fix, repair, mend
+fixed, repaired, mended
+build, construct
+built, constructed
+find, discover, locate
+found, discovered, located
+hide, conceal
+hid, concealed
+allow, let, permit, enable
+allowed, permitted, enabled
+
+# ── Common adjectives ───────────────────────────────────────────────────────
+big, large, huge, enormous, vast, massive, immense, gigantic
+small, little, tiny
+good, great, excellent, superb, wonderful
+bad, awful, terrible, dreadful, horrible
+important, significant, crucial, vital, essential, pivotal
+main, chief, principal, primary
+many, numerous, countless, a lot of, lots of, plenty of
+enough, sufficient, adequate
+happy, glad, pleased, delighted, cheerful
+sad, unhappy, miserable, sorrowful, gloomy
+angry, furious, irate, livid
+afraid, scared, frightened, terrified, fearful
+tired, weary, exhausted, fatigued
+strange, odd, weird, peculiar, bizarre, queer
+beautiful, lovely, gorgeous, stunning
+ugly, hideous, unsightly
+clever, smart, intelligent, brilliant
+stupid, foolish, idiotic
+rich, wealthy, affluent
+impoverished, destitute, penniless
+quiet, silent, hushed
+loud, noisy, deafening
+fast, quick, rapid, swift
+difficult, tough, challenging
+easy, simple, effortless, straightforward
+old, elderly, aged, ancient
+whole, entire, complete
+real, genuine, authentic
+wrong, incorrect, mistaken
+sure, certain, confident
+different, distinct
+similar, alike, comparable
+obvious, evident, apparent
+unique, distinctive, singular
+interesting, fascinating, intriguing, compelling
+funny, amusing, humorous, hilarious
+
+# ── Common nouns ────────────────────────────────────────────────────────────
+house, dwelling, residence
+car, automobile, vehicle
+job, occupation, profession
+problem, issue, difficulty
+idea, notion, concept
+kid, child, youngster
+kids, children, youngsters
+people, persons, folk, folks, individuals
+man, fellow, chap, guy, bloke, gentleman
+men, fellows, chaps, guys, blokes, gentlemen
+woman, lady
+women, ladies
+friend, mate, pal, companion, buddy
+friends, mates, pals, companions, buddies
+shop, store
+film, movie
+holiday, vacation
+rubbish, garbage, trash
+talk, conversation, chat, discussion
+mistake, error, blunder
+chance, opportunity
+kind, sort, type
+moment, instant
+journey, trip, voyage
+story, tale, narrative

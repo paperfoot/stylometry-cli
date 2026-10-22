@@ -1,0 +1,104 @@
+# Words and phrases over-represented in LLM-generated prose relative to
+# human writing (2023-2026 detection literature and common editorial lists).
+# One per line, lowercase. A tell is only flagged in a draft when the target
+# author's own corpus uses it less often than the draft does: if the author
+# genuinely writes "tapestry", it is their voice, not a tell.
+delve
+delves
+delving
+tapestry
+testament
+a testament to
+underscore
+underscores
+underscoring
+pivotal
+intricate
+intricacies
+multifaceted
+nuanced
+realm
+realms
+landscape
+navigate
+navigating
+seamless
+seamlessly
+robust
+leverage
+leveraging
+foster
+fostering
+embark
+embarked
+embarking
+journey
+unwavering
+unravel
+unveil
+unveiled
+vibrant
+bustling
+meticulous
+meticulously
+resonate
+resonates
+resonated
+profound
+profoundly
+paramount
+myriad
+plethora
+showcase
+showcasing
+elevate
+elevated
+harness
+holistic
+synergy
+dynamic
+transformative
+groundbreaking
+cutting-edge
+ever-evolving
+in today's world
+it's important to note
+it is important to note
+it's worth noting
+it is worth noting
+in conclusion
+in summary
+ultimately
+moreover
+furthermore
+additionally
+notably
+indeed
+whispering
+whispers of
+a symphony of
+a dance of
+a beacon of
+a sense of
+the weight of
+the air was thick
+sent shivers down
+couldn't help but
+a mix of
+palpable
+tangible
+visceral
+ethereal
+enigmatic
+labyrinthine
+kaleidoscope
+amidst
+the fabric of
+interplay
+underpinning
+commendable
+noteworthy
+treasure trove
+game-changer
+not just
+not only
