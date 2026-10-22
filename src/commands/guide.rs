@@ -693,6 +693,8 @@ struct Hand {
     abbrevs: Vec<(&'static str, f64)>,
     /// Short-form: lowercase starts, no final full stop.
     loose: Vec<String>,
+    /// Spaced-dot ellipses (". . .") per 1,000 words.
+    spaced_dots_per_1k: f64,
 }
 
 impl Hand {
@@ -741,10 +743,12 @@ fn hand_of(c: &Ctxt, habits: Option<&ItemHabits>) -> Hand {
     let p = c.p;
     let words = p.n_tokens.max(1) as f64;
     let mut counts = [0usize; 4];
+    let mut spaced_dots = 0;
     for para in p.chunks.iter().flat_map(|ch| ch.paragraphs.iter()) {
         for (n, m) in counts.iter_mut().zip(doubled_marks(para)) {
             *n += m;
         }
+        spaced_dots += para.matches(". . .").count();
     }
     let doubled = DOUBLED.iter().zip(counts).filter(|(_, n)| *n > 0).map(|(f, n)| (*f, n)).collect();
     let abbrevs = [("etc", "etc"), ("e.g", "e.g."), ("i.e", "i.e.")]
@@ -771,7 +775,7 @@ fn hand_of(c: &Ctxt, habits: Option<&ItemHabits>) -> Hand {
             loose.push(format!("no final full stop ({} of {})", pct(bare), item_noun(c)));
         }
     }
-    Hand { doubled, words: p.n_tokens as usize, abbrevs, loose }
+    Hand { doubled, words: p.n_tokens as usize, abbrevs, loose, spaced_dots_per_1k: spaced_dots as f64 * 1000.0 / words }
 }
 
 /// Mechanics from the author's bands (`double_punct_per_1k`,
@@ -817,7 +821,10 @@ fn mechanics_lines(bands: &[Band], h: &Hand) -> Vec<String> {
         };
         out.push(format!("Doubled marks: rare ({} in {} words){advice}.", seen.join(", "), h.words));
     }
-    let spaced = band("space_before_punct_per_1k").filter(|b| b.median >= 0.5);
+    // "word . . ." opens with a space before a dot: a book set with spaced
+    // ellipses has no spacing habit for them, and must not be called
+    // informal or asked for "word ,".
+    let spaced = band("space_before_punct_per_1k").filter(|b| b.median - h.spaced_dots_per_1k >= 0.5);
     if let Some(b) = spaced {
         out.push(format!(
             "A space before punctuation (\"word ,\", \"word ?\"): typically {} per 1,000 words.",
@@ -1870,6 +1877,7 @@ mod tests {
             words: 10_000,
             abbrevs: vec![("e.g.", 0.7)],
             loose: vec!["no final full stop (10% of posts)".into()],
+            ..Default::default()
         };
         let t = mechanics_lines(&bands, &hand).join("\n");
         assert!(t.contains("Doubled marks: \"..\" (typically 3.0 per 1,000 words, up to 6.0)."), "{t}");
@@ -1888,6 +1896,16 @@ mod tests {
         assert!(t.contains("Doubled marks (!!, ?!, ..): never."), "{t}");
         assert!(t.contains("Polish: edited copy, standard spelling and punctuation (uses \"etc\")."), "{t}");
         assert!(!t.contains("space before"), "an occasional stray space is no habit: {t}");
+        // Review: a book set with ". . ." measured 0.9 spaces before a mark
+        // per 1,000 words, all of them its ellipses.
+        let book = vec![mk_band("double_punct_per_1k", 0.0, 0.0, 0.0), mk_band("space_before_punct_per_1k", 0.0, 0.9, 2.0)];
+        let dots = Hand { spaced_dots_per_1k: 1.1, ..Default::default() };
+        let t = mechanics_lines(&book, &dots).join("\n");
+        assert!(!t.contains("space before") && !t.contains("informal"), "{t}");
+        // A writer who spaces "word ?" as well keeps that habit.
+        let both = vec![mk_band("double_punct_per_1k", 0.0, 0.0, 0.0), mk_band("space_before_punct_per_1k", 1.0, 3.0, 6.0)];
+        let t = mechanics_lines(&both, &dots).join("\n");
+        assert!(t.contains("A space before punctuation") && t.contains("Polish: informal. Keeps the space before a mark"), "{t}");
         // Without the mechanics measures there is nothing to say.
         assert!(mechanics_lines(&[], &hand).is_empty());
     }
