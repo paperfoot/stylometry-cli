@@ -1195,6 +1195,17 @@ pub fn assess_with(jev: &Jev, p: &Profile, draft: &str) -> Texture {
             jev.halted().unwrap_or_else(|| "network, timeout or a bad response".into())
         ));
     }
+    // A verdict on part of a draft could pass a chapter whose unread
+    // passages are off: when the budget or the breaker cut it, say so.
+    let answered = answers.iter().filter(|a| a.is_some()).count();
+    if jev.usage().skipped > before.skipped {
+        return Texture::unavailable(format!(
+            "{}: judged {answered} of the draft's {} {} before it stopped; the rest of the check is unchanged",
+            jev.halted().unwrap_or_else(|| "JEV stopped".into()),
+            ps.len(),
+            unit.plural()
+        ));
+    }
     let sent = jev.usage().requests - before.requests;
     let (sc, author_measured) = match load_fresh(p, &jev.model) {
         Some(sc) => (sc, None),

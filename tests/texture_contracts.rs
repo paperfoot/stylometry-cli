@@ -510,7 +510,7 @@ fn a_hanging_server_costs_one_timeout_not_one_per_passage() {
     let took = started.elapsed();
     let t = &v["data"]["texture"];
     assert_eq!(t["status"], "unavailable", "{t}");
-    assert!(t["reason"].as_str().unwrap().contains("in a row"), "{t}");
+    assert!(t["reason"].as_str().unwrap().contains("failed in a row"), "{t}");
     assert!(took < Duration::from_secs(4), "about one 500 ms timeout for 20 passages: {took:?}");
 
     // guide measures the author's 240 passages lazily: the breaker stops it too.
@@ -518,7 +518,7 @@ fn a_hanging_server_costs_one_timeout_not_one_per_passage() {
     let g = json_of(jev(data.path(), &hang), &["guide", "ann"]);
     assert!(started.elapsed() < Duration::from_secs(4), "{:?}", started.elapsed());
     assert_eq!(g["data"]["texture"]["status"], "unavailable");
-    assert!(g["data"]["texture"]["reason"].as_str().unwrap().contains("in a row"), "{}", g["data"]["texture"]);
+    assert!(g["data"]["texture"]["reason"].as_str().unwrap().contains("failed in a row"), "{}", g["data"]["texture"]);
     assert!(!data.path().join("profiles/ann.texture.json").exists(), "a partial sample is never saved");
 }
 
@@ -554,4 +554,14 @@ fn a_slow_server_cannot_stall_check_or_build() {
     assert_eq!(t["status"], "unavailable", "{t}");
     let why = t["reason"].as_str().unwrap();
     assert!(why.contains("JEV is slow") && why.contains("profile rebuild ann"), "{why}");
+
+    // A draft too long to judge inside the budget gets no partial verdict.
+    std::fs::write(&draft, prose(98, 7000, None)).unwrap();
+    let started = Instant::now();
+    let v = check(slowly(jev(data.path(), &slow)), &draft);
+    assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+    let t = &v["data"]["texture"];
+    assert_eq!(t["status"], "unavailable", "{t}");
+    let why = t["reason"].as_str().unwrap();
+    assert!(why.contains("too slow") && why.contains("of the draft's"), "{why}");
 }

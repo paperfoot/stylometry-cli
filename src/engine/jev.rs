@@ -49,6 +49,8 @@ pub struct Jev {
     deadline: Mutex<Option<(Instant, Duration)>>,
     /// Failures since the last answer.
     streak: AtomicUsize,
+    /// Requests on the wire now.
+    inflight: AtomicUsize,
 }
 
 /// What a run cost: requests sent, answers served from the cache, and
@@ -151,6 +153,7 @@ impl Jev {
             budget: Duration::from_millis(cfg.budget_ms.max(1000)),
             deadline: Mutex::new(None),
             streak: AtomicUsize::new(0),
+            inflight: AtomicUsize::new(0),
         })
     }
 
@@ -175,8 +178,9 @@ impl Jev {
                 return Some(format!("JEV is too slow: the {:.0} s budget ran out (jev.budget_ms)", budget.as_secs_f64()));
             }
         }
-        if self.streak.load(Ordering::Relaxed) >= BREAKER {
-            return Some(format!("JEV stopped answering ({BREAKER} failed requests in a row: network, timeout or bad responses)"));
+        let streak = self.streak.load(Ordering::SeqCst);
+        if streak >= BREAKER {
+            return Some(format!("JEV stopped answering: {streak} requests failed in a row (network, timeout or bad responses)"));
         }
         None
     }
@@ -215,9 +219,18 @@ impl Jev {
             return Some(a);
         }
         for attempt in 0..2 {
+            // After a failure, let the requests still on the wire land
+            // first: against a hanging server they fail too and trip the
+            // breaker before anything more is sent; one answer clears it.
+            while (1..BREAKER).contains(&self.streak.load(Ordering::SeqCst))
+                && self.inflight.load(Ordering::SeqCst) > 0
+                && !self.time_left().is_some_and(|t| t.is_zero())
+            {
+                std::thread::sleep(Duration::from_millis(20));
+            }
             // The breaker or the budget: nothing more goes out.
             let left = self.time_left();
-            if self.streak.load(Ordering::Relaxed) >= BREAKER || left.is_some_and(|t| t.is_zero()) {
+            if self.streak.load(Ordering::SeqCst) >= BREAKER || left.is_some_and(|t| t.is_zero()) {
                 if attempt > 0 {
                     break;
                 }
@@ -226,6 +239,7 @@ impl Jev {
             }
             let timeout = left.map_or(self.timeout, |t| t.min(self.timeout));
             self.usage.requests.fetch_add(1, Ordering::Relaxed);
+            self.inflight.fetch_add(1, Ordering::SeqCst);
             let res = self
                 .agent
                 .post(&self.endpoint)
@@ -236,28 +250,35 @@ impl Jev {
                 .header("Content-Type", "application/json")
                 .send(text.as_str())
                 .and_then(|mut r| r.body_mut().read_to_string());
-            match res {
-                Ok(s) => {
-                    let Some(a) = answers_of(&s, questions) else { break };
-                    if let Some(t) = serde_json::from_str::<Value>(&s).ok().and_then(|v| v["usage"]["input_tokens"].as_u64()) {
-                        self.usage.input_tokens.fetch_add(t, Ordering::Relaxed);
-                    }
-                    let _ = std::fs::create_dir_all(&self.cache);
-                    let tmp = path.with_extension("tmp");
-                    if std::fs::write(&tmp, &s).is_ok() {
-                        let _ = std::fs::rename(&tmp, &path);
-                    }
-                    self.streak.store(0, Ordering::Relaxed);
-                    return Some(a);
+            // The streak is settled before the request leaves `inflight`,
+            // so a waiting worker never sees neither.
+            let answer = res.as_ref().ok().and_then(|s| answers_of(s, questions));
+            if let (Some(a), Ok(s)) = (answer, &res) {
+                if let Some(t) = serde_json::from_str::<Value>(s).ok().and_then(|v| v["usage"]["input_tokens"].as_u64()) {
+                    self.usage.input_tokens.fetch_add(t, Ordering::Relaxed);
                 }
-                Err(ureq::Error::StatusCode(429 | 500 | 502 | 503 | 529)) if attempt == 0 => {
-                    std::thread::sleep(Duration::from_millis(800));
+                let _ = std::fs::create_dir_all(&self.cache);
+                let tmp = path.with_extension("tmp");
+                if std::fs::write(&tmp, s).is_ok() {
+                    let _ = std::fs::rename(&tmp, &path);
                 }
-                Err(_) => break,
+                self.streak.store(0, Ordering::SeqCst);
+                self.inflight.fetch_sub(1, Ordering::SeqCst);
+                return Some(a);
             }
+            if attempt == 0 && matches!(res, Err(ureq::Error::StatusCode(429 | 500 | 502 | 503 | 529))) {
+                self.inflight.fetch_sub(1, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(800));
+                continue;
+            }
+            self.streak.fetch_add(1, Ordering::SeqCst);
+            self.inflight.fetch_sub(1, Ordering::SeqCst);
+            self.usage.failed.fetch_add(1, Ordering::Relaxed);
+            return None;
         }
+        // The retry was not sent: the breaker or the budget stopped it.
+        self.streak.fetch_add(1, Ordering::SeqCst);
         self.usage.failed.fetch_add(1, Ordering::Relaxed);
-        self.streak.fetch_add(1, Ordering::Relaxed);
         None
     }
 
@@ -443,9 +464,9 @@ mod tests {
         let took = t.elapsed();
         assert!(a.iter().all(Option::is_none));
         let u = jev.usage();
-        assert!(u.requests <= jev.workers() + BREAKER, "{u:?}");
+        assert_eq!(u.requests, jev.workers(), "the first round only: nothing is sent after its timeouts: {u:?}");
         assert_eq!(u.requests + u.skipped, 60, "{u:?}");
-        assert!(took < Duration::from_millis(2500), "one round of 600 ms timeouts, not 60/8 rounds: {took:?}");
+        assert!(took < Duration::from_millis(1100), "one round of 600 ms timeouts, not 60/8 rounds: {took:?}");
         assert!(jev.halted().unwrap().contains("in a row"));
     }
 
