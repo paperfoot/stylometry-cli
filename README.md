@@ -101,6 +101,9 @@ stylometry check chapter-07.md --profile target --strict   # exit 5 if it fails:
 | **Word choice** | Per-concept preferences: *said* vs *remarked*, *look* vs *gaze*, *but* vs *however*, *want* vs *desire*; members the writer never uses |
 | **Rhythm** | Sentence length (mean, median, spread, share of fragments and long sentences), paragraph length, one-sentence paragraphs |
 | **Texture** | Punctuation per 1,000 words, dialogue share and tags, contractions, questions, similes, *which* clauses, *and*-chains, sentence openers, lexical diversity |
+| **Typography** | The writer's quote marks (curly or straight), apostrophes, ellipsis (`…`, `...`, `. . .`), dash (closed or spaced em dash, `--`, spaced hyphen) and scene-break line; a form the writer never uses is flagged with the exact conversion |
+| **Mechanics** | Doubled marks (`..`, `!!`, `?!`), spaces before punctuation, the rate of non-words, so a polished draft of a loose writer shows up (typos count in the score; `check` never advises adding them) |
+| **Polish** | Tidy moves the writer rarely makes: runs of short parallel sentences ("Same booth. Same dinner. Same kiss."), repeated openings, mirrored pairs; flagged only above the writer's own rate |
 | **Machine tells** | LLM-typical words and structures (*delve*, *a testament to*, "not X, but Y", trailing *-ing* clauses), flagged only when the writer doesn't use them |
 | **Posts** | Length and layout (one line, line-per-sentence, blocks), openers, endings, emoji and hashtags (which, where, how often), casing, links and mentions, what the writer never does (citing counts) |
 | **Structure** | Headings and lists (blogs), opening and closing paragraphs, narrative mode per chapter (fiction) |
@@ -124,10 +127,16 @@ The loop an agent runs:
 2. `check draft.md -p <voice>` → follow the `plan` (hard failures first)
 3. re-check until it passes; `--verify` on the final pass adds authorship
 
+`guide` writes the brief: the voice in brief, targets at the piece's length,
+word choices, typography and mechanics to copy exactly, and "what gives
+imitations away" (the tidy moves the writer rarely makes, words they avoid),
+followed by the writer's own passages closest to the topic.
+
 `check` reports `score` (how typical of the writer the draft is at its length:
 50 is as typical as the writer's median passage), a `plan` of the revisions
-worth most ("merge about 9 of your 31 fragments", "add 2-4 questions"), and
-grouped `findings` with line numbers. `--strict` exits 5 on failure, for gates.
+worth most ("merge about 9 of your 31 fragments", "add 2-4 questions", "use
+curly quotes: 52 straight quotes on lines 7, 9, …"), and grouped `findings`
+with line numbers. `--strict` exits 5 on failure, for gates.
 
 `export <voice> -o train.jsonl` writes the writer's passages as fine-tuning
 pairs. Fine-tuning on a writer's own text is the strongest documented way to
@@ -145,7 +154,8 @@ court-grade instrument.
 
 ## Validation
 
-Measured on real books (scripts in `eval/`; copyrighted corpora stay local).
+Measured on real books, essays and posts (scripts in `eval/`; copyrighted
+corpora stay local).
 
 **Voice checks.** A test the owner's own novel pipeline had already run by
 hand: a blended target voice (two published romantic-suspense authors,
@@ -159,16 +169,47 @@ draft and the target recovers the same picture unprompted: the draft
 leans on *the, and, it, rain, wet, like*; the authors on *to, but, as, if,
 would, why*.
 
-**Verification.** An Adams profile from five books, calibrated against 45
-other authors (42 public-domain background authors plus three
-near-neighbour British humorists):
+**`check` against imitations.** Claude Opus wrote the same 8 pieces (3
+novel scenes in Colleen Hoover's voice, 3 essay openings in Paul Graham's,
+2 sets of X posts in the owner's) from a bare prompt and with the
+guide → write → check loop. The held-out pieces each writer actually wrote
+on those topics all pass. Against Hoover, every bare-prompt scene fails
+(score 3–6) where her own scenes score 24–99, and the guided scenes pass
+(97–99). For Graham, whose typography matches an agent's defaults, `check`
+barely separates (bare 26–55, his own 16–46). For the X posts it does not:
+bare posts score 94–97 and the owner's own 35–57, because an agent's posts
+sit nearer the middle of the writer's range than the writer's own do.
+
+**Blind readers.** Two blind Claude Opus judges per set read two genuine
+reference passages, then shuffled, neutrally named pieces (author held-out,
+bare, guided), with headers, links, footnote markers and line wrapping
+stripped. Mean probability that a piece is genuine:
+
+| Voice | Author's own | Guided (loop) | Bare prompt |
+|---|---|---|---|
+| Novel scenes (Hoover) | 0.95 | 0.05 | 0.04 |
+| Essays (Graham) | 0.96 | 0.05 | 0.05 |
+| X posts (owner) | 0.84 | 0.13 | 0.08 |
+
+A careful reader with the real writer beside them still spots every
+imitation, guided or not. What gives it away is not what `check` measures
+(after the loop, typography, rhythm and word rates match) but content-level
+polish: aphorisms, neat closing lines, invented specifics, dense figures of
+speech, and none of the writer's rough edges. Treat a passing `check` as
+necessary, not sufficient. For a voice that has to survive close reading,
+add a human edit, or fine-tune a model on the writer's text (`export`).
+
+**Verification.** An Adams profile from five books, calibrated against 42
+public-domain background authors plus three near-neighbour British
+humorists:
 
 | Check | Result |
 |---|---|
-| Separation (AUC), 250 → 4,000-word passages | 0.953 → 0.994 |
-| Held-out book (*Mostly Harmless*), 800 / 1,500 / 3,000-word excerpts | 19/20, 18/20, 20/20 `same_author`; the rest `inconclusive`, never `different_author` |
-| Near-neighbour author (Jerome), any length | 0/20 false `same_author` |
-| Holdout accuracy on a held-out *work* in a different register (non-fiction) | 0.70–0.74: an honest, harder number than within-book tests |
+| Separation (AUC), 250 → 4,000-word passages | 0.947 → 0.986 |
+| Held-out book (*Mostly Harmless*), 3,000-word excerpts | 20/20 `same_author` |
+| Each book held out in turn (whole book) | 5/6 `same_author`; the posthumous collection *The Salmon of Doubt* is `inconclusive` |
+| Unseen authors at 800+ words: Austen / Saki | 0/48 / 6/48 false `same_author` (the rest mostly `different_author`) |
+| Profile from one book (Jerome), his *other* book at 800–6,000 words | 0–5/20 `same_author`: one book is not enough for a writer who changes register |
 
 Earlier versions calibrated against three authors only and accepted
 unseen writers as the target about half the time; the background pool is

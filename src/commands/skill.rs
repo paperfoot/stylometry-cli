@@ -47,6 +47,9 @@ brief.
 order and re-check; add `--verify` on the final pass for authorship, `--strict`
 in a gate (exit 5 on failure). Blend authors with `{name} profile blend`.
 Exemplars are the author's text: imitate the mechanisms, never copy lines.
+Set type exactly as the brief's Typography section says (quotes, apostrophes,
+dashes, ellipses, scene breaks), and skip the tidy moves it lists under "What
+gives imitations away": those, not the topic, are what readers catch.
 
 For authorship of books, run `{name} background fetch` once, then
 `{name} calibrate ada` and `{name} compare text.txt --profile ada`. Piped
