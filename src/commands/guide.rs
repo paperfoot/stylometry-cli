@@ -57,14 +57,23 @@ struct Guide {
     warnings: Vec<String>,
 }
 
-pub fn run(
-    ctx: Ctx,
-    profile: String,
-    exemplars: usize,
-    limit: usize,
-    window: usize,
-    out: Option<PathBuf>,
-) -> Result<(), AppError> {
+/// Arguments of `guide` (see cli.rs for their help text).
+pub struct GuideArgs {
+    pub profile: String,
+    pub exemplars: usize,
+    /// A draft/outline whose subject and form the exemplars should match.
+    pub for_file: Option<PathBuf>,
+    /// A few words on what is being written, for the same purpose.
+    pub about: Option<String>,
+    /// Template override (default: the profile's register).
+    pub register: Option<crate::engine::profile::Register>,
+    pub limit: usize,
+    pub window: usize,
+    pub out: Option<PathBuf>,
+}
+
+pub fn run(ctx: Ctx, a: GuideArgs) -> Result<(), AppError> {
+    let GuideArgs { profile, exemplars, limit, window, out, .. } = a;
     let p = store::load(&profile)?;
     let r = analyze::report(&p, limit, window);
     let picks = pick_exemplars(&p, exemplars + 1);

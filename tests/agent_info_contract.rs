@@ -53,6 +53,7 @@ const COMMANDS: &[&str] = &[
     "config show",
     "diff",
     "doctor",
+    "examples",
     "export",
     "guide",
     "profile blend",

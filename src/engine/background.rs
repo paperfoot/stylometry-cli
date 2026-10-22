@@ -150,6 +150,7 @@ pub fn build_profile(w: &Work, raw: &str) -> Result<Profile, AppError> {
     let doc = Doc {
         name: format!("{} ({}, {})", w.title, w.author, w.year),
         text: excerpt(strip_gutenberg(raw)),
+        items: Vec::new(),
     };
     Profile::build(&w.profile_name(), &[doc], ProfileKind::Background)
 }

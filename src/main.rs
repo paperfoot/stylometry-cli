@@ -67,9 +67,10 @@ fn main() {
             ProfileAction::Build {
                 name,
                 corpus,
+                register,
                 background,
                 force,
-            } => commands::profile::build(ctx, name, corpus, background, force),
+            } => commands::profile::build(ctx, name, corpus, register.map(Into::into), background, force),
             ProfileAction::Blend { name, from, force } => {
                 commands::profile::blend(ctx, name, from, force)
             }
@@ -88,10 +89,31 @@ fn main() {
         Commands::Guide {
             profile,
             exemplars,
+            for_file,
+            about,
+            register,
             limit,
             window,
             out,
-        } => commands::guide::run(ctx, profile, exemplars, limit, window, out),
+        } => commands::guide::run(
+            ctx,
+            commands::guide::GuideArgs {
+                profile,
+                exemplars,
+                for_file,
+                about,
+                register: register.map(Into::into),
+                limit,
+                window,
+                out,
+            },
+        ),
+        Commands::Examples {
+            profile,
+            like,
+            about,
+            limit,
+        } => commands::examples::run(ctx, profile, like, about, limit),
         Commands::Check {
             file,
             profile,

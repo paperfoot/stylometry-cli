@@ -4,8 +4,8 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
-use crate::engine::profile::{Profile, ProfileKind, BASE_CHUNK_WORDS};
-use crate::engine::{store, text};
+use crate::engine::profile::{self, Profile, ProfileKind, Register, BASE_CHUNK_WORDS, MIN_CHUNKS};
+use crate::engine::{import, store};
 use crate::error::AppError;
 use crate::output::{self, Ctx};
 
@@ -15,6 +15,8 @@ const BIN: &str = env!("CARGO_BIN_NAME");
 struct BuiltProfile {
     name: String,
     kind: ProfileKind,
+    register: Register,
+    register_reason: String,
     words: u64,
     works: usize,
     passages: usize,
@@ -25,6 +27,8 @@ fn built(p: &Profile, path: PathBuf) -> BuiltProfile {
     BuiltProfile {
         name: p.name.clone(),
         kind: p.kind,
+        register: p.register,
+        register_reason: p.register_reason.clone(),
         words: p.n_tokens,
         works: p.sources.len(),
         passages: p.chunks.len(),
@@ -45,12 +49,15 @@ fn print_built(ctx: Ctx, data: &BuiltProfile, verb: &str) -> Result<(), AppError
     output::print_success_with(ctx, data, &next, |d| {
         use owo_colors::OwoColorize;
         println!(
-            "{verb} profile {} ({} words, {} work(s), {} passages)",
+            "{verb} {} profile {} ({} words, {} work(s), {} {})",
+            d.register.as_str(),
             d.name.green().bold(),
             d.words,
             d.works,
-            d.passages
+            d.passages,
+            if d.register.is_short_form() { "items" } else { "passages" }
         );
+        println!("  register: {} ({}); override with --register", d.register.as_str(), d.register_reason);
         println!("  {}", d.path.dimmed());
     })
 }
@@ -59,6 +66,7 @@ pub fn build(
     ctx: Ctx,
     name: String,
     corpus: PathBuf,
+    register: Option<Register>,
     background: bool,
     force: bool,
 ) -> Result<(), AppError> {
@@ -68,13 +76,17 @@ pub fn build(
             format!("Pass --force to overwrite: {BIN} profile build {name} --corpus <path> --force"),
         ));
     }
-    let docs = text::read_docs(&corpus)?;
+    let corpus_in = import::read_corpus(&corpus)?;
     let kind = if background {
         ProfileKind::Background
     } else {
         ProfileKind::Author
     };
-    let profile = Profile::build(&name, &docs, kind)?;
+    let register = match register {
+        Some(r) => (r, "--register".to_string()),
+        None => profile::detect_register(&corpus_in.docs, corpus_in.format_register),
+    };
+    let profile = Profile::build_with(&name, &corpus_in.docs, kind, Some(register), MIN_CHUNKS)?;
     let path = store::save(&profile)?;
     print_built(ctx, &built(&profile, path), "Built")
 }
@@ -132,7 +144,8 @@ pub fn rebuild(ctx: Ctx, name: String) -> Result<(), AppError> {
         }
     }
     let (kind, docs) = store::load_text(&name)?;
-    let profile = Profile::build(&name, &docs, kind)?;
+    let register = store::load(&name).ok().map(|p| (p.register, p.register_reason));
+    let profile = Profile::build_with(&name, &docs, kind, register, MIN_CHUNKS)?;
     let path = store::save(&profile)?;
     print_built(ctx, &built(&profile, path), "Rebuilt")
 }
@@ -231,6 +244,8 @@ pub fn list(ctx: Ctx, all: bool) -> Result<(), AppError> {
 struct ShowProfile {
     name: String,
     kind: ProfileKind,
+    register: Register,
+    register_reason: String,
     words: u64,
     passages: usize,
     passage_words: usize,
@@ -259,6 +274,8 @@ pub fn show(ctx: Ctx, name: String) -> Result<(), AppError> {
     let data = ShowProfile {
         name: p.name.clone(),
         kind: p.kind,
+        register: p.register,
+        register_reason: p.register_reason.clone(),
         words: p.n_tokens,
         passages: p.chunks.len(),
         passage_words: BASE_CHUNK_WORDS,
@@ -283,8 +300,9 @@ pub fn show(ctx: Ctx, name: String) -> Result<(), AppError> {
     output::print_success_with(ctx, &data, &next, |d| {
         use owo_colors::OwoColorize;
         println!(
-            "{} — {} words in {} work(s), {} passages",
+            "{} ({}) — {} words in {} work(s), {} passages",
             d.name.green().bold(),
+            d.register.as_str(),
             d.words,
             d.works.len(),
             d.passages

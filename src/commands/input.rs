@@ -58,12 +58,14 @@ pub fn resolve_profile(source: &str) -> Result<Profile, AppError> {
         return store::load(source);
     }
     if path.exists() {
-        let docs = text::read_docs(path)?;
+        let corpus = crate::engine::import::read_corpus(path)?;
+        let docs = corpus.docs;
         let label = path
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| source.to_string());
-        return Profile::build_min(&label, &docs, ProfileKind::Author, 1);
+        let register = crate::engine::profile::detect_register(&docs, corpus.format_register);
+        return Profile::build_with(&label, &docs, ProfileKind::Author, Some(register), 1);
     }
     if is_name {
         return store::load(source); // the store's "no profile named" error

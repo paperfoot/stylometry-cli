@@ -206,6 +206,7 @@ mod tests {
         Doc {
             name: name.into(),
             text: vec![para; paras].join("\n\n"),
+            items: Vec::new(),
         }
     }
 

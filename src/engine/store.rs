@@ -75,8 +75,14 @@ pub fn load(name: &str) -> Result<Profile, AppError> {
             env!("CARGO_BIN_NAME")
         )));
     }
-    serde_json::from_value(value)
-        .map_err(|e| AppError::Config(format!("corrupt profile '{name}': {e}")))
+    let had_register = value.get("register").is_some();
+    let mut p: Profile = serde_json::from_value(value)
+        .map_err(|e| AppError::Config(format!("corrupt profile '{name}': {e}")))?;
+    if !had_register {
+        p.register = profile::detect_from_chunks(&p);
+        p.register_reason = "detected on load (profile predates registers)".into();
+    }
+    Ok(p)
 }
 
 /// The stored text of a profile of any schema >= 3, grouped back into its
@@ -107,7 +113,7 @@ pub fn load_text(name: &str) -> Result<(ProfileKind, Vec<Doc>), AppError> {
         .iter()
         .map(|s| Doc {
             name: s.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string(),
-            text: String::new(),
+            ..Doc::default()
         })
         .collect();
     let chunks = v.get("chunks").and_then(|c| c.as_array()).ok_or_else(outdated)?;

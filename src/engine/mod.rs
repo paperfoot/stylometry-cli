@@ -7,6 +7,7 @@ pub mod calibrate;
 pub mod checks;
 pub mod delta;
 pub mod features;
+pub mod import;
 pub mod lexicon;
 pub mod metrics;
 pub mod model;

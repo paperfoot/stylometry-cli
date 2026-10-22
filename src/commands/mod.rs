@@ -8,6 +8,7 @@ pub mod config;
 pub mod contract;
 pub mod diff;
 pub mod doctor;
+pub mod examples;
 pub mod export;
 pub mod guide;
 pub mod input;

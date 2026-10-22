@@ -68,9 +68,18 @@ pub enum Commands {
     Guide {
         /// Profile name
         profile: String,
-        /// Exemplar passages from the author's own text to include
+        /// Exemplar passages (or posts) from the author's own text to include
         #[arg(long, default_value_t = 3)]
         exemplars: usize,
+        /// The piece being written (a draft or outline file): exemplars are chosen to match it
+        #[arg(long = "for", value_name = "FILE", conflicts_with = "about")]
+        for_file: Option<PathBuf>,
+        /// What is being written, in a few words: exemplars are chosen to match it
+        #[arg(long, value_name = "TEXT")]
+        about: Option<String>,
+        /// Write the brief for this kind of writing (default: the profile's own register)
+        #[arg(long, value_enum)]
+        register: Option<RegisterArg>,
         /// Items per word list
         #[arg(short = 'n', long, default_value_t = 30)]
         limit: usize,
@@ -103,6 +112,20 @@ pub enum Commands {
         /// Gate mode: exit 5 with the report in error.details when the check fails
         #[arg(long)]
         strict: bool,
+    },
+    /// The author's own passages or posts most like what you're writing: few-shot examples for an agent
+    Examples {
+        /// Profile name
+        profile: String,
+        /// A draft or outline file to match
+        #[arg(long, value_name = "FILE", conflicts_with = "about")]
+        like: Option<PathBuf>,
+        /// What is being written, in a few words, to match
+        #[arg(long, value_name = "TEXT")]
+        about: Option<String>,
+        /// How many examples
+        #[arg(short = 'n', long, default_value_t = 5)]
+        limit: usize,
     },
     /// Contrast two voices: what each uses that the other doesn't
     Diff {
@@ -181,13 +204,16 @@ pub enum Commands {
 
 #[derive(Subcommand)]
 pub enum ProfileAction {
-    /// Build a profile from a corpus (a file, or a folder of .md/.txt; each file is one work)
+    /// Build a profile from a corpus: .md/.txt prose (each file one work), an X archive tweets.js, xmaster/JSON/JSONL/CSV exports, or .eml emails
     Build {
         /// Profile name (letters, digits, '-', '_')
         name: String,
         /// Corpus path: a file or a directory
         #[arg(long)]
         corpus: PathBuf,
+        /// Kind of writing (default: detected from the corpus format and content)
+        #[arg(long, value_enum)]
+        register: Option<RegisterArg>,
         /// Mark as a background (reference) author rather than a voice to write in
         #[arg(long)]
         background: bool,
@@ -394,5 +420,32 @@ mod tests {
             accepts(&Command::new("bare"), "bare"),
             "`stylometry bare` takes no flags."
         );
+    }
+}
+
+/// Kind of writing a profile holds or a brief targets.
+#[derive(Clone, Copy, ValueEnum)]
+pub enum RegisterArg {
+    Fiction,
+    Nonfiction,
+    Blog,
+    /// X/Threads/LinkedIn posts
+    Social,
+    Email,
+    /// Chat and text messages
+    Message,
+}
+
+impl From<RegisterArg> for crate::engine::profile::Register {
+    fn from(r: RegisterArg) -> Self {
+        use crate::engine::profile::Register as R;
+        match r {
+            RegisterArg::Fiction => R::Fiction,
+            RegisterArg::Nonfiction => R::Nonfiction,
+            RegisterArg::Blog => R::Blog,
+            RegisterArg::Social => R::Social,
+            RegisterArg::Email => R::Email,
+            RegisterArg::Message => R::Message,
+        }
     }
 }

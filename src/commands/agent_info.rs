@@ -164,7 +164,12 @@ fn annotations() -> Value {
         "guide": {
             "effect": "mixed",
             "effect_detail": "Returns the Markdown brief; also writes it to --out when given",
-            "examples": [["guide", "ada", "-o", "ada-brief.md"]]
+            "examples": [["guide", "ada", "-o", "ada-brief.md"], ["guide", "ada", "--about", "a launch post for our new app"]]
+        },
+        "examples": {
+            "effect": "read",
+            "effect_detail": "Returns the author's passages or posts nearest the piece being written",
+            "examples": [["examples", "ada", "--about", "a thread on hiring", "-n", "5"], ["examples", "ada", "--like", "draft.md"]]
         },
         "check": {
             "effect": "read",

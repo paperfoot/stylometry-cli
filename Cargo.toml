@@ -32,6 +32,7 @@ directories = "6"
 unicode-segmentation = "1"
 walkdir = "2"
 ureq = "3"
+csv = "1"
 
 [dev-dependencies]
 assert_cmd = "2"

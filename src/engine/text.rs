@@ -14,10 +14,20 @@ use walkdir::WalkDir;
 use crate::error::AppError;
 
 /// One source text: a file of the corpus, or an inline/stdin query.
-#[derive(Debug, Clone)]
+/// Structured sources (an X archive, JSON/CSV exports, emails) carry their
+/// writing as `items` instead of `text`.
+#[derive(Debug, Clone, Default)]
 pub struct Doc {
     pub name: String,
     pub text: String,
+    pub items: Vec<Item>,
+}
+
+/// One short-form piece (a post, message, email) with its metadata.
+#[derive(Debug, Clone)]
+pub struct Item {
+    pub text: String,
+    pub meta: crate::engine::profile::ItemMeta,
 }
 
 /// Read a corpus from a file or a directory (recursively collecting `.md`,
@@ -30,6 +40,7 @@ pub fn read_docs(path: &Path) -> Result<Vec<Doc>, AppError> {
         return Ok(vec![Doc {
             name: file_label(path),
             text: clean(&raw),
+            items: Vec::new(),
         }]);
     }
     if path.is_dir() {
@@ -57,6 +68,7 @@ pub fn read_docs(path: &Path) -> Result<Vec<Doc>, AppError> {
                     docs.push(Doc {
                         name,
                         text: clean(&raw),
+                        items: Vec::new(),
                     });
                 }
             }
@@ -115,10 +127,42 @@ fn fold_apostrophes(w: &str) -> String {
     w.replace(['\u{2019}', '\u{02BC}'], "'")
 }
 
+/// Replace web debris that would pollute word and trigram counts: links
+/// become the token `URL`, @handles become `@USER`. Posts are full of both,
+/// and "https", "t.co" or a friend's handle say nothing about voice. The
+/// rate of links and mentions is measured separately, from the raw text.
+pub fn normalize_web(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains("http") && !text.contains("www.") && !text.contains('@') {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    for tok in text.split_inclusive(char::is_whitespace) {
+        let core = tok.trim_end();
+        let tail = &tok[core.len()..];
+        let bare = core.trim_start_matches(['(', '[', '"', '\u{201C}']);
+        let lead = &core[..core.len() - bare.len()];
+        if bare.starts_with("http://") || bare.starts_with("https://") || bare.starts_with("www.") {
+            out.push_str(lead);
+            out.push_str("URL");
+        } else if let Some(h) = bare.strip_prefix('@').filter(|h| h.chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_')) {
+            let end = h.find(|c: char| !(c.is_alphanumeric() || c == '_')).unwrap_or(h.len());
+            out.push_str(lead);
+            out.push_str("@USER");
+            out.push_str(&h[end..]);
+        } else {
+            out.push_str(core);
+        }
+        out.push_str(tail);
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 /// Lowercased word tokens (Unicode word segmentation). Keeps intra-word
-/// apostrophes (e.g. "don't"), with curly apostrophes folded to '.
+/// apostrophes (e.g. "don't"), with curly apostrophes folded to '. Links and
+/// handles are normalised first (see `normalize_web`).
 pub fn word_tokens(text: &str) -> Vec<String> {
-    text.unicode_words()
+    normalize_web(text)
+        .unicode_words()
         .map(|w| fold_apostrophes(&w.to_lowercase()))
         .collect()
 }
@@ -139,6 +183,7 @@ pub fn count_words(text: &str) -> usize {
 /// Character trigrams over a normalized stream: lowercased, runs of whitespace
 /// collapsed to a single space. Punctuation is retained -- it carries style.
 pub fn char_trigrams(text: &str) -> Vec<String> {
+    let text = normalize_web(text);
     let normalized: String = {
         let mut s = String::with_capacity(text.len());
         let mut prev_ws = false;
@@ -365,6 +410,15 @@ mod tests {
     #[test]
     fn count_words_ignores_punctuation_tokens() {
         assert_eq!(count_words("hello — world ... !"), 2);
+    }
+
+    #[test]
+    fn links_and_handles_are_normalised() {
+        assert_eq!(
+            word_tokens("thanks @sam_k! see https://t.co/x1 (www.a.io)"),
+            vec!["thanks", "user", "see", "url", "url"]
+        );
+        assert_eq!(normalize_web("no web here"), "no web here");
     }
 
     #[test]

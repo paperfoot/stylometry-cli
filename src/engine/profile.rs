@@ -52,6 +52,58 @@ pub enum ProfileKind {
     Blend,
 }
 
+/// What kind of writing a profile holds. It decides the unit of analysis
+/// (passages for long-form, one item per post/email/message for short-form),
+/// which measures lead, and which brief template `guide` writes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Register {
+    #[default]
+    Fiction,
+    Nonfiction,
+    Blog,
+    /// X/Threads/LinkedIn posts and similar.
+    Social,
+    Email,
+    /// Chat and text messages.
+    Message,
+}
+
+impl Register {
+    pub fn is_short_form(self) -> bool {
+        matches!(self, Register::Social | Register::Email | Register::Message)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Register::Fiction => "fiction",
+            Register::Nonfiction => "nonfiction",
+            Register::Blog => "blog",
+            Register::Social => "social",
+            Register::Email => "email",
+            Register::Message => "message",
+        }
+    }
+}
+
+/// Metadata a short-form item may carry from its source export.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ItemMeta {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub likes: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reposts: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impressions: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub date: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reply: bool,
+}
+
+/// Minimum items for a short-form profile.
+pub const MIN_ITEMS: usize = 20;
+
 /// One source file of the corpus.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Source {
@@ -80,6 +132,9 @@ pub struct Chunk {
     /// component's passages sum to its share of the blend.
     #[serde(default = "unit_weight")]
     pub weight: f32,
+    /// Short-form only: the item's source metadata (engagement, date, reply).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<ItemMeta>,
 }
 
 fn unit_weight() -> f32 {
@@ -135,6 +190,12 @@ pub struct Profile {
     pub name: String,
     #[serde(default)]
     pub kind: ProfileKind,
+    /// Kind of writing; profiles from before registers get one detected on load.
+    #[serde(default)]
+    pub register: Register,
+    /// How the register was chosen ("--register", "X archive", "dialogue 23%"...).
+    #[serde(default)]
+    pub register_reason: String,
     pub created: u64,
     pub sources: Vec<Source>,
     pub n_tokens: u64,
@@ -166,7 +227,7 @@ impl Profile {
     /// Build a profile from a corpus of documents. Errors if the corpus is
     /// too small to yield `MIN_CHUNKS` base chunks.
     pub fn build(name: &str, docs: &[Doc], kind: ProfileKind) -> Result<Profile, AppError> {
-        Profile::build_min(name, docs, kind, MIN_CHUNKS)
+        Profile::build_with(name, docs, kind, None, MIN_CHUNKS)
     }
 
     /// `build` with a custom minimum passage count. Ad-hoc analysis of a
@@ -177,33 +238,91 @@ impl Profile {
         kind: ProfileKind,
         min_chunks: usize,
     ) -> Result<Profile, AppError> {
+        Profile::build_with(name, docs, kind, None, min_chunks)
+    }
+
+    /// Build with an explicit register (or `None` to detect one). Long-form
+    /// registers cut ~250-word paragraph-aligned passages; short-form ones
+    /// keep one chunk per item (post, email, message), verbatim.
+    pub fn build_with(
+        name: &str,
+        docs: &[Doc],
+        kind: ProfileKind,
+        register: Option<(Register, String)>,
+        min_chunks: usize,
+    ) -> Result<Profile, AppError> {
+        let (register, register_reason) = register.unwrap_or_else(|| detect_register(docs, None));
         let mut sources = Vec::new();
-        let mut raw_chunks: Vec<(u32, Vec<String>)> = Vec::new();
+        let mut raw_chunks: Vec<(u32, Vec<String>, Option<ItemMeta>)> = Vec::new();
         for d in docs {
-            let paras = text::paragraphs(&d.text);
-            let words: usize = paras.iter().map(|p| text::count_words(p)).sum();
-            if words == 0 {
+            if register.is_short_form() {
+                let items = if d.items.is_empty() {
+                    crate::engine::import::split_items(&d.text)
+                } else {
+                    d.items.clone()
+                };
+                let items: Vec<_> = items.into_iter().filter(|i| text::count_words(&i.text) >= 3).collect();
+                let words: usize = items.iter().map(|i| text::count_words(&i.text)).sum();
+                if words == 0 {
+                    continue;
+                }
+                let idx = sources.len() as u32;
+                sources.push(Source {
+                    name: d.name.clone(),
+                    words: words as u64,
+                });
+                for it in items {
+                    raw_chunks.push((idx, item_paragraphs(&it.text), Some(it.meta)));
+                }
                 continue;
             }
-            let idx = sources.len() as u32;
-            sources.push(Source {
-                name: d.name.clone(),
-                words: words as u64,
-            });
-            for ch in text::chunk_paragraphs(&paras, BASE_CHUNK_WORDS) {
-                raw_chunks.push((idx, ch));
+            // Long-form: a structured export of long items (blog posts in a
+            // JSON/CSV) makes each item its own work.
+            let works: Vec<(String, String)> = if d.items.is_empty() {
+                vec![(d.name.clone(), d.text.clone())]
+            } else {
+                d.items
+                    .iter()
+                    .enumerate()
+                    .map(|(i, it)| (format!("{}#{}", d.name, i + 1), it.text.clone()))
+                    .collect()
+            };
+            for (wname, wtext) in works {
+                let paras = text::paragraphs(&wtext);
+                let words: usize = paras.iter().map(|p| text::count_words(p)).sum();
+                if words == 0 {
+                    continue;
+                }
+                let idx = sources.len() as u32;
+                sources.push(Source {
+                    name: wname,
+                    words: words as u64,
+                });
+                for ch in text::chunk_paragraphs(&paras, BASE_CHUNK_WORDS) {
+                    raw_chunks.push((idx, ch, None));
+                }
             }
         }
-        if raw_chunks.len() < min_chunks.max(1) {
+        // Ad-hoc analysis (min 1) accepts one item; a saved short-form
+        // profile needs enough items for per-item ranges.
+        let min = match (register.is_short_form(), min_chunks <= 1) {
+            (_, true) => 1,
+            (true, false) => MIN_ITEMS,
+            (false, false) => min_chunks,
+        };
+        if raw_chunks.len() < min {
+            let (unit, hint) = if register.is_short_form() {
+                ("item(s)", "Add more posts/messages: an X archive (tweets.js), xmaster --json output, JSONL/CSV, or a text file with items separated by --- lines")
+            } else {
+                ("passage(s) of ~250 words", "Add more of the author's writing to the corpus (a folder of .md/.txt files works)")
+            };
             return Err(AppError::input(
                 format!(
-                    "corpus too small: {} passage(s) of ~{} words, need at least {} (about {} words of prose)",
-                    raw_chunks.len(),
-                    BASE_CHUNK_WORDS,
-                    min_chunks,
-                    min_chunks * BASE_CHUNK_WORDS
+                    "corpus too small for {} writing: {} {unit}, need at least {min}",
+                    register.as_str(),
+                    raw_chunks.len()
                 ),
-                "Add more of the author's writing to the corpus (a folder of .md/.txt files works)",
+                hint,
             ));
         }
 
@@ -225,7 +344,9 @@ impl Profile {
             style: StyleCounts,
         }
         let mut full: Vec<Full> = Vec::with_capacity(raw_chunks.len());
-        for (source, paragraphs) in raw_chunks {
+        let mut metas: Vec<Option<ItemMeta>> = Vec::with_capacity(raw_chunks.len());
+        for (source, paragraphs, meta) in raw_chunks {
+            metas.push(meta);
             let joined = paragraphs.join("\n\n");
             let wc = features::word_counts(&joined);
             let tc = features::trigram_counts(&joined);
@@ -300,7 +421,8 @@ impl Profile {
         let keep_tri: HashSet<String> = top_keys(&trigram_counts, CHUNK_TRIGRAMS_KEEP);
         let chunks: Vec<Chunk> = full
             .into_iter()
-            .map(|f| Chunk {
+            .zip(metas)
+            .map(|(f, meta)| Chunk {
                 source: f.source,
                 n_words: features::total(&f.wc) as u32,
                 n_trigrams: features::total(&f.tc) as u32,
@@ -319,6 +441,7 @@ impl Profile {
                 paragraphs: f.paragraphs,
                 style: f.style,
                 weight: 1.0,
+                meta,
             })
             .collect();
 
@@ -335,6 +458,8 @@ impl Profile {
             schema: SCHEMA,
             name: name.to_string(),
             kind,
+            register,
+            register_reason,
             created: now_unix(),
             sources,
             n_tokens,
@@ -381,6 +506,8 @@ impl Profile {
             schema: SCHEMA,
             name: name.to_string(),
             kind: ProfileKind::Blend,
+            register: parts[0].0.register,
+            register_reason: format!("blend of {}", parts.iter().map(|(p, _)| p.register.as_str()).collect::<Vec<_>>().join(" + ")),
             created: now_unix(),
             sources: Vec::new(),
             n_tokens: 0,
@@ -474,6 +601,39 @@ impl Profile {
         out
     }
 
+    /// Windows of at least `words` words: consecutive chunks grouped until
+    /// they reach the length. Long-form windows stay inside one work;
+    /// short-form windows pool consecutive items (a 1,000-word window of
+    /// posts is ~40 posts). A trailing group under half the length is
+    /// dropped. Use this, not `spans`, wherever a length is meant.
+    pub fn windows(&self, words: usize) -> Vec<Vec<usize>> {
+        let words = words.max(1) as u32;
+        let pool = self.register.is_short_form();
+        let mut out = Vec::new();
+        let mut cur: Vec<usize> = Vec::new();
+        let mut n = 0u32;
+        for (i, c) in self.chunks.iter().enumerate() {
+            if !pool && !cur.is_empty() && self.chunks[cur[0]].source != c.source {
+                if n * 2 >= words {
+                    out.push(std::mem::take(&mut cur));
+                } else {
+                    cur.clear();
+                }
+                n = 0;
+            }
+            cur.push(i);
+            n += c.n_words;
+            if n >= words {
+                out.push(std::mem::take(&mut cur));
+                n = 0;
+            }
+        }
+        if !cur.is_empty() && n * 2 >= words {
+            out.push(cur);
+        }
+        out
+    }
+
     /// Relative-frequency maps (words, trigrams) of a span of chunks.
     pub fn span_freqs(&self, span: &[usize]) -> (HashMap<String, f64>, HashMap<String, f64>) {
         let mut wc: HashMap<&str, u64> = HashMap::new();
@@ -501,6 +661,88 @@ impl Profile {
     }
 }
 
+/// A short-form item as paragraphs: split on blank lines, line breaks inside
+/// a paragraph kept (a post's line breaks are part of its voice).
+fn item_paragraphs(t: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur: Vec<&str> = Vec::new();
+    for line in t.lines() {
+        if line.trim().is_empty() {
+            if !cur.is_empty() {
+                out.push(cur.join("\n"));
+                cur.clear();
+            }
+        } else {
+            cur.push(line.trim_end());
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur.join("\n"));
+    }
+    out
+}
+
+/// Pick a register from the corpus when none is given: the source format
+/// decides for structured exports; prose is a blog when it is structured
+/// with markdown headings or lists, fiction when it has dialogue, else
+/// non-fiction. Returns the register and a short reason.
+pub fn detect_register(docs: &[Doc], format: Option<Register>) -> (Register, String) {
+    if let Some(r) = format {
+        return (r, "source format".into());
+    }
+    let has_items = docs.iter().any(|d| !d.items.is_empty());
+    if has_items {
+        let mut w: Vec<usize> = docs
+            .iter()
+            .flat_map(|d| &d.items)
+            .map(|i| text::count_words(&i.text))
+            .collect();
+        w.sort_unstable();
+        let med = w.get(w.len() / 2).copied().unwrap_or(0);
+        return if med <= 60 {
+            (Register::Social, format!("items, median {med} words"))
+        } else {
+            (Register::Blog, format!("items, median {med} words"))
+        };
+    }
+    let mut words = 0usize;
+    let mut structure = 0usize;
+    let mut dialogue = 0usize;
+    for d in docs {
+        for line in d.text.lines() {
+            let t = line.trim_start();
+            if t.starts_with('#') || t.starts_with("- ") || t.starts_with("* ") || t.starts_with("1. ") {
+                structure += 1;
+            }
+        }
+        for p in text::paragraphs(&d.text) {
+            words += text::count_words(&p);
+            dialogue += text::dialogue_words(&p);
+        }
+    }
+    let words_f = words.max(1) as f64;
+    let per400 = structure as f64 * 400.0 / words_f;
+    let dshare = dialogue as f64 / words_f;
+    if per400 >= 1.0 {
+        (Register::Blog, format!("{per400:.1} headings/list lines per 400 words"))
+    } else if dshare >= 0.08 {
+        (Register::Fiction, format!("dialogue {:.0}% of words", dshare * 100.0))
+    } else {
+        (Register::Nonfiction, format!("dialogue {:.0}% of words", dshare * 100.0))
+    }
+}
+
+/// Register for a profile saved before registers existed: fiction if it has
+/// dialogue, else non-fiction.
+pub fn detect_from_chunks(p: &Profile) -> Register {
+    let t = p.style_totals();
+    if t.dialogue_words as f64 >= 0.08 * t.words.max(1) as f64 {
+        Register::Fiction
+    } else {
+        Register::Nonfiction
+    }
+}
+
 fn top_keys<V: Copy + Ord>(m: &HashMap<String, V>, n: usize) -> HashSet<String> {
     let mut v: Vec<(&String, V)> = m.iter().map(|(k, v)| (k, *v)).collect();
     v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
@@ -522,6 +764,7 @@ mod tests {
         Doc {
             name: name.into(),
             text,
+            items: Vec::new(),
         }
     }
 
