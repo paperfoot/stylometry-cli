@@ -302,7 +302,7 @@ fn social_profile_calibrates_on_pooled_posts_and_compare_pools_a_batch() {
     assert_eq!(bands[0], 250);
     assert!(bands.iter().all(|w| [250, 500, 1000].contains(w)), "{bands:?}");
     let warnings = d["warnings"].to_string();
-    assert!(warnings.contains("short-form imposter") && warnings.contains("--background"), "{warnings}");
+    assert!(warnings.contains("other poster(s)") && warnings.contains("--background"), "{warnings}");
     let next = j["metadata"]["next"].to_string();
     assert!(next.contains("compare <posts-separated-by-dashes.md> --profile x"), "{next}");
 
@@ -469,6 +469,32 @@ fn a_posts_same_author_needs_the_target_nearest() {
         }
     }
     assert!(withheld > 0, "the gate was never exercised");
+}
+
+#[test]
+fn calibrate_tells_a_posts_voice_to_add_posters_not_books() {
+    let data = tempfile::tempdir().unwrap();
+    let corpus = tempfile::tempdir().unwrap();
+    social_and_imposters(data.path(), corpus.path());
+    let add = "profile build <name> --corpus <their-posts.json> --background";
+
+    // No posters yet: fit against books, the fix is posters.
+    let j = run_json(data.path(), &["calibrate", "x"], None);
+    let next: Vec<&str> = j["metadata"]["next"].as_array().unwrap().iter().map(|n| n.as_str().unwrap()).collect();
+    assert!(next[0].contains(add), "{next:?}");
+    assert!(next.iter().all(|n| !n.contains("background fetch")), "{next:?}");
+    let warnings = j["data"]["warnings"].to_string();
+    assert!(warnings.contains("0 other poster(s)") && !warnings.contains("background fetch"), "{warnings}");
+
+    // Three posters (under ten): still more posters, never `background fetch`.
+    three_posters(data.path(), corpus.path());
+    let j = run_json(data.path(), &["calibrate", "x"], None);
+    assert_eq!(j["data"]["imposters"], 3);
+    let next: Vec<&str> = j["metadata"]["next"].as_array().unwrap().iter().map(|n| n.as_str().unwrap()).collect();
+    assert!(next[0].contains(add) && next[1].contains("calibrate x"), "{next:?}");
+    assert!(next.iter().all(|n| !n.contains("background fetch")), "{next:?}");
+    let warnings = j["data"]["warnings"].to_string();
+    assert!(warnings.contains("3 other poster(s)") && !warnings.contains("background fetch"), "{warnings}");
 }
 
 #[test]

@@ -4,7 +4,7 @@
 
 use serde::Serialize;
 
-use crate::engine::calibrate::{self, BandReport, MIN_IMPOSTERS};
+use crate::engine::calibrate::{self, BandReport, MIN_IMPOSTERS, MIN_SHORT_FORM_IMPOSTERS};
 use crate::engine::store;
 use crate::error::AppError;
 use crate::output::{self, Ctx};
@@ -30,29 +30,37 @@ pub fn run(ctx: Ctx, name: String) -> Result<(), AppError> {
     let refs = calibrate::reference_set(&store::load_all());
     let (cal, bands) = calibrate::calibrate(&target, &refs)?;
 
+    let short_form = target.register.is_short_form();
+    // A posts voice is fit against other posters (books are not its rivals),
+    // so its fix is always more posters, never the background.
+    let add_posters = format!("{bin} profile build <name> --corpus <their-posts.json> --background");
+    let posters = calibrate::short_form_imposters(&target, &refs);
     let mut warnings = Vec::new();
-    if cal.imposters < MIN_IMPOSTERS {
+    let mut next_first: Option<String> = None;
+    if short_form && posters < MIN_SHORT_FORM_IMPOSTERS {
+        warnings.push(format!(
+            "only {posters} other poster(s): fit against books, P(same author) separates posts from books, not this person from other posters, so compare reports same_author as inconclusive; add 3+ other writers' posts with `{add_posters}`, then re-calibrate"
+        ));
+        next_first = Some(add_posters);
+    } else if short_form && cal.imposters < MIN_IMPOSTERS {
+        warnings.push(format!(
+            "fit against only {} other poster(s): P(same author) will accept posters it never saw too easily (10+ is firmer); add more with `{add_posters}`, then re-calibrate",
+            cal.imposters
+        ));
+        next_first = Some(add_posters);
+    } else if !short_form && cal.imposters < MIN_IMPOSTERS {
         warnings.push(format!(
             "only {} imposter profile(s): P(same author) is fit against too few other writers and will accept unseen authors too easily; install the reference authors with `{bin} background fetch`",
             cal.imposters
         ));
+        next_first = Some(format!("{bin} background fetch"));
     }
-    let short_form = target.register.is_short_form();
     if !cal.cross_work {
         warnings.push(if short_form {
             "positives come from the same block of posts as their centroid (undated posts, or too few per quarter): accuracy on new posts is likely lower than reported; build from dated posts spanning two or more quarters".into()
         } else {
             "positives come from the same work as their centroid (one work, or too little per work): accuracy on a new book by this author is likely lower than reported; build the profile from two or more works".into()
         });
-    }
-    let short_imposters = refs
-        .iter()
-        .filter(|p| p.name != target.name && p.register.is_short_form())
-        .count();
-    if short_form && short_imposters < 3 {
-        warnings.push(format!(
-            "only {short_imposters} short-form imposter(s): the background is books, so another person's posts can pass as same_author; add 3+ other writers' posts with `{bin} profile build <name> --corpus <their-posts.json> --background`, then re-calibrate"
-        ));
     }
     let mut updated = target;
     let report = Report {
@@ -70,8 +78,9 @@ pub fn run(ctx: Ctx, name: String) -> Result<(), AppError> {
     // Posts verify only pooled: the file holds 10+ posts separated by --- lines.
     let what = if short_form { "<posts-separated-by-dashes.md>" } else { "<file>" };
     let mut next = vec![format!("{bin} compare {what} --profile {}", report.profile)];
-    if report.imposters < MIN_IMPOSTERS {
-        next.insert(0, format!("{bin} background fetch"));
+    if let Some(fix) = next_first {
+        next.insert(0, format!("{bin} calibrate {}", report.profile));
+        next.insert(0, fix);
     }
     output::print_success_with(ctx, &report, &next, |r| {
         use owo_colors::OwoColorize;

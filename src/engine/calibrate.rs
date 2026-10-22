@@ -660,7 +660,14 @@ pub fn calibrate(target: &Profile, refs: &[Profile]) -> Result<(Calibration, Vec
     if imposters == 0 {
         return Err(AppError::setup(
             "calibration needs other writers as imposters, and there are none",
-            format!("Install the reference authors, then re-run: {bin} background fetch && {bin} calibrate {}", target.name),
+            if target.register.is_short_form() {
+                format!(
+                    "Add 3+ other writers' posts (a posts voice is verified against other posters), then re-run: {bin} profile build <name> --corpus <their-posts.json> --background && {bin} calibrate {}",
+                    target.name
+                )
+            } else {
+                format!("Install the reference authors, then re-run: {bin} background fetch && {bin} calibrate {}", target.name)
+            },
         ));
     }
     let mut bands = Vec::new();
