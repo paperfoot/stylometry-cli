@@ -584,7 +584,8 @@ pub fn r3(v: f64) -> f64 {
 /// listed once at its full length. Most widespread first.
 pub fn signature_formulas(p: &Profile, limit: usize) -> Vec<Phrase> {
     const MIN_N: usize = 4;
-    const MAX_N: usize = 12;
+    // Long enough for a whole repeated sentence (an email's stock line).
+    const MAX_N: usize = 40;
     const MIN_UNITS: u32 = 3;
     let short = p.register.is_short_form();
     let streams: Vec<Vec<Vec<String>>> = p

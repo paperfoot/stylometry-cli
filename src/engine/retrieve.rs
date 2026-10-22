@@ -563,8 +563,10 @@ fn length_typicality(cands: &[Cand]) -> Vec<f64> {
     cands
         .iter()
         .map(|c| {
+            // Mid-rank, so equal lengths all sit at the median.
             let below = lens.partition_point(|&l| l < c.words) as f64;
-            1.0 - ((below / n) - 0.5).abs() * 2.0
+            let equal = (lens.partition_point(|&l| l <= c.words) as f64) - below;
+            1.0 - (((below + equal / 2.0) / n) - 0.5).abs() * 2.0
         })
         .collect()
 }

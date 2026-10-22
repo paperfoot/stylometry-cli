@@ -313,7 +313,7 @@ fn header(c: &Ctxt, what: &str) -> Section {
             (Some(a), Some(b)) => format!(", {a} to {b}"),
             _ => String::new(),
         };
-        format!("Measured from {} {} by this author{span}.", c.items.len(), plural_kind(c.kind))
+        format!("Measured from {} {} by this author{span}.", c.items.len(), item_noun(c))
     } else {
         format!("Measured from {} words in {} work(s).", c.r.words, c.r.works)
     };
@@ -323,6 +323,15 @@ fn header(c: &Ctxt, what: &str) -> Section {
          Imitate the mechanisms below, never the lines: drafts are checked for copied {copy_run}-word runs."
     );
     sec(format!("Writing {what} as `{}`", p.name), body)
+}
+
+/// What the brief's items are called: emails and messages have no kinds.
+fn item_noun(c: &Ctxt) -> &'static str {
+    match c.register {
+        Register::Email => "emails",
+        Register::Message => "messages",
+        _ => plural_kind(c.kind),
+    }
 }
 
 fn plural_kind(k: ItemKind) -> &'static str {
@@ -1112,7 +1121,7 @@ fn short_words(c: &Ctxt) -> Vec<Section> {
     let mut lines = Vec::new();
     if !used.is_empty() {
         let u: Vec<String> = used.iter().take(10).map(|w| format!("{} {}", w.word, pct(w.share))).collect();
-        lines.push(format!("Informal words they use (share of {}): {}.", plural_kind(c.kind), u.join(", ")));
+        lines.push(format!("Informal words they use (share of {}): {}.", item_noun(c), u.join(", ")));
     }
     if !never.is_empty() {
         lines.push(format!("Informal words they never use: {}.", never.iter().take(12).copied().collect::<Vec<_>>().join(", ")));
@@ -1174,7 +1183,7 @@ fn loop_short(c: &Ctxt) -> Section {
          2. `{BIN} check post.md --profile {name}{kind}`: fix hard failures (never-list, copied runs, length) first.\n\
          3. Keep the version that passes with the best score. For a batch, separate {k} with `---` lines and check them together.\n\
          4. More examples near a topic: `{BIN} examples {name}{kind} --about \"...\"`.\n",
-        k = plural_kind(c.kind)
+        k = item_noun(c)
     );
     sec("Loop", body)
 }
