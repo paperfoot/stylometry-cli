@@ -345,7 +345,7 @@ fn mattr(tokens: &[String], win: usize) -> f64 {
         total += distinct as f64;
         n += 1;
     }
-    total / n as f64
+    total / n as f64 / win as f64
 }
 
 /// Measure of textual lexical diversity (McCarthy & Jarvis 2010), the mean
@@ -904,6 +904,8 @@ mod tests {
     fn mtld_and_mattr_are_sane() {
         let toks: Vec<String> = "a b c d e f g h a b c d".split(' ').map(String::from).collect();
         assert!(mattr(&toks, 500) > 0.6);
+        let m = mattr(&toks, 4);
+        assert!(m > 0.9 && m <= 1.0, "{m}");
         assert!(mtld(&toks) > 1.0);
         assert_eq!(syllables("cake"), 1);
         assert_eq!(syllables("table"), 2);

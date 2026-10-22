@@ -110,7 +110,9 @@ pub fn log_odds_z(count: f64, n: f64, english_p: f64) -> f64 {
     (la - lb) / (1.0 / (count + a) + 1.0 / (yb + a)).sqrt()
 }
 
-/// Two-corpus log-odds z (a vs b) with the pooled counts as the prior.
+/// Two-corpus log-odds z (a vs b) with the pooled counts as the prior
+/// (for `diff`, not wired yet).
+#[allow(dead_code)]
 pub fn log_odds_z2(ya: f64, na: f64, yb: f64, nb: f64, pooled_p: f64) -> f64 {
     let a = PRIOR_TOKENS * pooled_p;
     let la = ((ya + a) / (na + PRIOR_TOKENS - ya - a).max(1.0)).ln();
