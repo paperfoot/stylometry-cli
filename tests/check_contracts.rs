@@ -732,3 +732,23 @@ fn one_polish_run_is_within_any_authors_band() {
     let j = check_text(data.path(), "ann", &draft, &[]);
     assert_eq!(row(&j, "mirror_pairs_per_1k")["status"], "out_of_range");
 }
+
+#[test]
+fn habits_the_draft_keeps_add_nothing_to_the_score() {
+    // A straight-quote author: a draft set straight keeps the habit, so
+    // typography and mechanics are reported but left out of the score.
+    let data = tempfile::tempdir().unwrap();
+    let corpus = tempfile::tempdir().unwrap();
+    build_fiction(data.path(), corpus.path());
+    let j = check_text(data.path(), "ann", &author_prose(1301, 900), &[]);
+    let families = j["data"]["score_basis"]["families"].to_string();
+    assert!(!families.contains("typography") && !families.contains("mechanics"), "{families}");
+    assert_eq!(row(&j, "curly_quote_share")["status"], "in_range");
+
+    // A curly-set author: the straight draft departs, and typography counts.
+    let data = tempfile::tempdir().unwrap();
+    let corpus = tempfile::tempdir().unwrap();
+    build_curly_fiction(data.path(), corpus.path());
+    let j = check_text(data.path(), "cora", &author_prose(1302, 900), &[]);
+    assert!(j["data"]["score_basis"]["families"].to_string().contains("typography"), "{}", j["data"]["score_basis"]);
+}

@@ -307,6 +307,11 @@ pub fn is_function_word_key(key: &str) -> bool {
     key.starts_with("word_") && key.ends_with("_per_1k")
 }
 
+/// Families of the author's habits on the page: they count against a draft
+/// that departs from them, never for one that keeps to them (as the polish
+/// measures; see `checks::idle_keys`).
+pub const HABIT_FAMILIES: [&str; 2] = ["typography", "mechanics"];
+
 /// The family a metric belongs to. The voice distance averages within each
 /// family, then across families, so 40 function-word rates or 8 sentence
 /// length variants can't drown out paragraphing or punctuation.

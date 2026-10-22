@@ -923,6 +923,9 @@ struct Windowed {
     values: Vec<f64>,
     ranges: metrics::Ranges,
     rows: Vec<MetricRow>,
+    /// Measures the draft keeps to that count only against a departure
+    /// (`idle_keys`): left out of the score.
+    idle: Vec<String>,
     distance: f64,
     /// Percentile among the author's own windows (None under 3 of them).
     score: Option<f64>,
@@ -960,18 +963,18 @@ fn windowed(target: &Profile, paragraphs: &[String], words: usize, fw: &[String]
     let mut rows = rows_for(&values, &ranges.bands, words);
     // A long draft is a whole piece, so its opening counts; pooled posts
     // skip on both sides what the item measures already judge.
-    let distance = if pooled {
+    if pooled {
         for (r, b) in rows.iter_mut().zip(&ranges.bands) {
             if skip_in_pooled(b) {
                 r.status = Status::Unmeasured;
             }
         }
-        metrics::distance(&values, &ranges.bands, words, &skip_in_pooled)
-    } else {
-        metrics::distance(&values, &ranges.bands, words, &|_| false)
-    };
-    let (refs, holdout) =
-        reference_distances(target, &rows_used, fw, words, if pooled { &skip_in_pooled } else { &skip_in_window });
+    }
+    let idle = idle_keys(&rows);
+    let draft_skip: &dyn Fn(&Band) -> bool = if pooled { &skip_in_pooled } else { &|_| false };
+    let ref_skip: &dyn Fn(&Band) -> bool = if pooled { &skip_in_pooled } else { &skip_in_window };
+    let distance = metrics::distance(&values, &ranges.bands, words, &|b| draft_skip(b) || idle.contains(&b.key));
+    let (refs, holdout) = reference_distances(target, &rows_used, fw, words, &|b| ref_skip(b) || idle.contains(&b.key));
     let score = (refs.len() >= 3).then(|| (metrics::percentile_above(&refs, distance) * 10.0).round() / 10.0);
     let mixed = |v: f64| v > 0.3 && v < 0.6;
     let author_mixed = rows_used.iter().filter(|r| mixed(r.values[at("present_tense_share")])).count() as f64
@@ -979,6 +982,7 @@ fn windowed(target: &Profile, paragraphs: &[String], words: usize, fw: &[String]
     Windowed {
         values,
         rows,
+        idle,
         distance,
         score,
         compared: refs.len(),
@@ -990,9 +994,35 @@ fn windowed(target: &Profile, paragraphs: &[String], words: usize, fw: &[String]
     }
 }
 
+/// Measures that count only against a draft that departs from the author,
+/// left out of the distance for the draft and for every author window it is
+/// ranked among when it doesn't: the typography and mechanics families
+/// unless one of their measures is out of range, and each polish measure
+/// unless the draft is above the author's band. They exist to catch a
+/// habit the draft fails to copy (straight quotes against a book set curly,
+/// a clean hand against a typo-prone one) or a tidiness it adds. A draft
+/// that keeps to them is only doing what an agent does by default when the
+/// author writes ASCII and seldom stacks beats; counted, they would add
+/// zeros that dilute the families that do separate, and rank the draft above
+/// the author's own windows for their noise (footnote markers stripped from
+/// " ,", a pasted quote set curly, one rhetorical run in an essay).
+fn idle_keys(rows: &[MetricRow]) -> Vec<String> {
+    let out = |r: &MetricRow| r.status == Status::OutOfRange;
+    rows.iter()
+        .filter(|r| {
+            if metrics::HABIT_FAMILIES.contains(&r.family) {
+                !rows.iter().any(|x| x.family == r.family && out(x))
+            } else {
+                metrics::POLISH_KEYS.contains(&r.key.as_str()) && !out(r)
+            }
+        })
+        .map(|r| r.key.clone())
+        .collect()
+}
+
 /// Measured families of a window's bands, and how many measures.
 fn measured_families(w: &Windowed) -> (Vec<&'static str>, usize) {
-    let measured: Vec<&MetricRow> = w.rows.iter().filter(|r| r.status != Status::Unmeasured).collect();
+    let measured: Vec<&MetricRow> = w.rows.iter().filter(|r| r.status != Status::Unmeasured && !w.idle.contains(&r.key)).collect();
     let mut families: Vec<&'static str> = measured.iter().map(|r| r.family).collect();
     families.sort_unstable();
     families.dedup();
@@ -2285,6 +2315,36 @@ mod tests {
         assert_eq!(g[0].count, 5);
         assert_eq!(g[0].lines, vec![4, 19, 30, 41]);
         assert_eq!(g[0].excerpts.len(), 3);
+    }
+
+    #[test]
+    fn kept_habits_and_unforced_polish_are_idle() {
+        let r = |key: &str, status: Status| MetricRow {
+            key: key.into(),
+            label: String::new(),
+            family: metrics::family(key),
+            value: 0.0,
+            low: 0.0,
+            median: 0.0,
+            high: 0.0,
+            status,
+        };
+        let kept = [
+            r("curly_quote_share", Status::InRange),
+            r("curly_apostrophe_share", Status::Unmeasured),
+            r("double_punct_per_1k", Status::InRange),
+            r("nonword_per_1k", Status::Near),
+            r("short_triplets_per_1k", Status::Near),
+            r("anaphora_runs_per_1k", Status::OutOfRange),
+            r("commas_per_1k", Status::InRange),
+        ];
+        assert_eq!(
+            idle_keys(&kept),
+            ["curly_quote_share", "curly_apostrophe_share", "double_punct_per_1k", "nonword_per_1k", "short_triplets_per_1k"]
+        );
+        // One measure out of range puts its whole habit family in the score.
+        let departs = [r("curly_quote_share", Status::OutOfRange), r("curly_apostrophe_share", Status::InRange), r("nonword_per_1k", Status::InRange)];
+        assert_eq!(idle_keys(&departs), ["nonword_per_1k"]);
     }
 
     #[test]
