@@ -1052,6 +1052,12 @@ fn fmt_val(v: f64, unit: Unit) -> String {
     if unit == Unit::Share { pct(v) } else { num(v) }
 }
 
+fn sentence_lines(d: &Draft, f: impl Fn(&str) -> bool) -> Vec<usize> {
+    let mut v: Vec<usize> = d.sentences().into_iter().filter(|s| f(&s.2)).map(|s| s.0).collect();
+    v.dedup();
+    v
+}
+
 /// Lines holding the marks a rate counts, so "cut 3 em dashes" says where.
 fn punct_lines(d: &Draft, key: &str) -> Vec<usize> {
     match key {
@@ -1067,6 +1073,9 @@ fn punct_lines(d: &Draft, key: &str) -> Vec<usize> {
         "the_way_per_1k" => d.token_lines(metrics::is_the_way_at),
         "ly_adverbs_per_1k" => d.token_lines(|t, i| metrics::is_ly_adverb(&t[i])),
         "contractions_per_1k" => d.token_lines(|t, i| crate::engine::style::is_contraction(&t[i])),
+        "trailing_ing_per_1k" => sentence_lines(d, |s| metrics::trailing_ing_count(s) > 0),
+        "and_chains_per_1k_sentences" => sentence_lines(d, |s| metrics::is_and_chain(&text::word_tokens(s))),
+        "not_but_per_1k" => sentence_lines(d, |s| metrics::not_but_count(&[s.to_string()]) > 0),
         _ => Vec::new(),
     }
 }
