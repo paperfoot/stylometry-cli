@@ -132,6 +132,9 @@ impl ItemMeta {
     }
 }
 
+/// Below this many within-work windows, `windows` pools across works.
+pub const MIN_WINDOWS: usize = 20;
+
 /// Minimum items for a short-form profile.
 pub const MIN_ITEMS: usize = 20;
 
@@ -288,7 +291,7 @@ impl Profile {
     ) -> Result<Profile, AppError> {
         let (register, register_reason) = register.unwrap_or_else(|| detect_register(docs, None));
         let mut sources = Vec::new();
-        let mut raw_chunks: Vec<(u32, Vec<String>, Option<ItemMeta>)> = Vec::new();
+        let mut raw_chunks: Vec<(u32, Vec<String>, Origin)> = Vec::new();
         for d in docs {
             if register.is_short_form() {
                 let items = if d.items.is_empty() {
@@ -301,14 +304,26 @@ impl Profile {
                 if words == 0 {
                     continue;
                 }
-                let idx = sources.len() as u32;
-                sources.push(Source {
-                    name: d.name.clone(),
-                    words: words as u64,
-                });
-                for it in items {
-                    raw_chunks.push((idx, item_paragraphs(&it.text), Some(it.meta)));
+                // Sources are time blocks (calendar quarters, or runs of 200
+                // undated items) so calibration can hold out whole periods
+                // rather than one giant "work" per archive file.
+                for (block, group) in time_blocks(items) {
+                    let words: usize = group.iter().map(|i| text::count_words(&i.text)).sum();
+                    let idx = match sources.iter().position(|s: &Source| s.name == block) {
+                        Some(i) => {
+                            sources[i].words += words as u64;
+                            i as u32
+                        }
+                        None => {
+                            sources.push(Source { name: block, words: words as u64 });
+                            (sources.len() - 1) as u32
+                        }
+                    };
+                    for it in group {
+                        raw_chunks.push((idx, item_paragraphs(&it.text), Origin::Item(it.meta)));
+                    }
                 }
+                let _ = (&d.name, words);
                 continue;
             }
             // Long-form: a structured export of long items (blog posts in a
@@ -323,8 +338,12 @@ impl Profile {
                     .collect()
             };
             for (wname, wtext) in works {
-                let paras = text::paragraphs(&wtext);
-                let words: usize = paras.iter().map(|p| text::count_words(p)).sum();
+                let sections: Vec<Vec<String>> = split_sections(&wtext)
+                    .iter()
+                    .map(|sec| text::paragraphs(sec))
+                    .filter(|p| !p.is_empty())
+                    .collect();
+                let words: usize = sections.iter().flatten().map(|p| text::count_words(p)).sum();
                 if words == 0 {
                     continue;
                 }
@@ -333,8 +352,10 @@ impl Profile {
                     name: wname,
                     words: words as u64,
                 });
-                for ch in text::chunk_paragraphs(&paras, BASE_CHUNK_WORDS) {
-                    raw_chunks.push((idx, ch, None));
+                for (si, paras) in sections.iter().enumerate() {
+                    for ch in text::chunk_paragraphs(paras, BASE_CHUNK_WORDS) {
+                        raw_chunks.push((idx, ch, Origin::Section(si as u32)));
+                    }
                 }
             }
         }
@@ -379,9 +400,9 @@ impl Profile {
             style: StyleCounts,
         }
         let mut full: Vec<Full> = Vec::with_capacity(raw_chunks.len());
-        let mut metas: Vec<Option<ItemMeta>> = Vec::with_capacity(raw_chunks.len());
-        for (source, paragraphs, meta) in raw_chunks {
-            metas.push(meta);
+        let mut metas: Vec<Origin> = Vec::with_capacity(raw_chunks.len());
+        for (source, paragraphs, origin) in raw_chunks {
+            metas.push(origin);
             let joined = paragraphs.join("\n\n");
             let wc = features::word_counts(&joined);
             let tc = features::trigram_counts(&joined);
@@ -457,7 +478,7 @@ impl Profile {
         let chunks: Vec<Chunk> = full
             .into_iter()
             .zip(metas)
-            .map(|(f, meta)| Chunk {
+            .map(|(f, origin)| Chunk {
                 source: f.source,
                 n_words: features::total(&f.wc) as u32,
                 n_trigrams: features::total(&f.tc) as u32,
@@ -476,8 +497,14 @@ impl Profile {
                 paragraphs: f.paragraphs,
                 style: f.style,
                 weight: 1.0,
-                meta,
-                section: 0,
+                section: match &origin {
+                    Origin::Section(s) => *s,
+                    Origin::Item(_) => 0,
+                },
+                meta: match origin {
+                    Origin::Item(m) => Some(m),
+                    Origin::Section(_) => None,
+                },
             })
             .collect();
 
@@ -643,8 +670,24 @@ impl Profile {
     /// posts is ~40 posts). A trailing group under half the length is
     /// dropped. Use this, not `spans`, wherever a length is meant.
     pub fn windows(&self, words: usize) -> Vec<Vec<usize>> {
+        if self.register.is_short_form() {
+            return self.group_windows(words, true);
+        }
+        let within = self.group_windows(words, false);
+        // Works shorter than the window (blog posts under a 1,500-word
+        // draft) would leave almost nothing to compare against: pool
+        // consecutive works instead.
+        if within.len() < MIN_WINDOWS && self.sources.len() > 1 {
+            let pooled = self.group_windows(words, true);
+            if pooled.len() > within.len() {
+                return pooled;
+            }
+        }
+        within
+    }
+
+    fn group_windows(&self, words: usize, pool: bool) -> Vec<Vec<usize>> {
         let words = words.max(1) as u32;
-        let pool = self.register.is_short_form();
         let mut out = Vec::new();
         let mut cur: Vec<usize> = Vec::new();
         let mut n = 0u32;
@@ -697,6 +740,86 @@ impl Profile {
     }
 }
 
+/// Where a chunk came from: a short-form item, or a section of a long work.
+enum Origin {
+    Item(ItemMeta),
+    Section(u32),
+}
+
+/// True for a chapter-style heading line: "# Chapter 3", "CHAPTER IV",
+/// "Part Two", "Prologue", a bare "12." or "XII".
+pub fn is_chapter_heading(line: &str) -> bool {
+    let t = line.trim().trim_start_matches('#').trim();
+    if t.is_empty() || t.split_whitespace().count() > 6 {
+        return false;
+    }
+    let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
+    let first = first.trim_end_matches(['.', ':']);
+    let roman = !first.is_empty() && first.chars().all(|c| "ivxlc".contains(c));
+    let numeric = !first.is_empty() && first.chars().all(|c| c.is_ascii_digit());
+    matches!(first, "chapter" | "part" | "book" | "prologue" | "epilogue" | "interlude")
+        || ((roman || numeric) && t.split_whitespace().count() <= 2)
+}
+
+/// Split a work into sections at chapter headings (the heading line itself
+/// is kept with its section; `paragraphs` drops it later).
+fn split_sections(t: &str) -> Vec<String> {
+    let mut out: Vec<String> = vec![String::new()];
+    for line in t.lines() {
+        if is_chapter_heading(line) && !out.last().unwrap().trim().is_empty() {
+            out.push(String::new());
+        }
+        let cur = out.last_mut().unwrap();
+        cur.push_str(line);
+        cur.push('\n');
+    }
+    out.retain(|s| !s.trim().is_empty());
+    out
+}
+
+/// "YYYY-Qn" from an ISO date ("2026-10-19T…") or an X-archive date
+/// ("Wed Oct 10 20:19:24 +0000 2018").
+pub fn quarter_of(date: &str) -> Option<String> {
+    let d = date.trim();
+    let (year, month) = if d.len() >= 7 && d.as_bytes()[4] == b'-' {
+        (d[..4].parse::<u32>().ok()?, d[5..7].parse::<u32>().ok()?)
+    } else {
+        const MONTHS: [&str; 12] = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+        let parts: Vec<&str> = d.split_whitespace().collect();
+        let m = parts.iter().find_map(|p| MONTHS.iter().position(|m| p.to_lowercase().starts_with(m)))?;
+        let y = parts.iter().rev().find_map(|p| p.parse::<u32>().ok().filter(|y| *y > 1900))?;
+        (y, m as u32 + 1)
+    };
+    (1..=12).contains(&month).then(|| format!("{year}-Q{}", (month - 1) / 3 + 1))
+}
+
+/// Group items into time blocks: by quarter when most items are dated,
+/// else consecutive runs of 200. Block order follows first appearance.
+fn time_blocks(items: Vec<crate::engine::text::Item>) -> Vec<(String, Vec<crate::engine::text::Item>)> {
+    let dated = items
+        .iter()
+        .filter(|i| i.meta.date.as_deref().and_then(quarter_of).is_some())
+        .count();
+    let by_quarter = dated * 2 > items.len();
+    let mut out: Vec<(String, Vec<crate::engine::text::Item>)> = Vec::new();
+    for (n, it) in items.into_iter().enumerate() {
+        let key = if by_quarter {
+            it.meta
+                .date
+                .as_deref()
+                .and_then(quarter_of)
+                .unwrap_or_else(|| "undated".into())
+        } else {
+            format!("items {}-{}", n / 200 * 200 + 1, n / 200 * 200 + 200)
+        };
+        match out.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, g)) => g.push(it),
+            None => out.push((key, vec![it])),
+        }
+    }
+    out
+}
+
 /// A short-form item as paragraphs: split on blank lines, line breaks inside
 /// a paragraph kept (a post's line breaks are part of its voice).
 fn item_paragraphs(t: &str) -> Vec<String> {
@@ -741,30 +864,55 @@ pub fn detect_register(docs: &[Doc], format: Option<Register>) -> (Register, Str
             (Register::Blog, format!("items, median {med} words"))
         };
     }
+    // Long-form prose. Chapter headings and headings repeated across files
+    // (calibre's "# CHAPTER 3 {#index_split…}") are book furniture, not blog
+    // structure; a blog needs real sub-headings or lists in most posts.
     let mut words = 0usize;
-    let mut structure = 0usize;
-    let mut dialogue = 0usize;
+    let mut struct_sources = 0usize;
+    let mut quote_open = 0usize;
+    let mut paragraphs = 0usize;
+    let mut tags = 0usize;
+    let mut heading_seen: HashMap<String, usize> = HashMap::new();
     for d in docs {
+        let mut headings: HashSet<String> = HashSet::new();
+        let mut lists = 0usize;
         for line in d.text.lines() {
             let t = line.trim_start();
-            if t.starts_with('#') || t.starts_with("- ") || t.starts_with("* ") || t.starts_with("1. ") {
-                structure += 1;
+            if t.starts_with('#') && !is_chapter_heading(t) {
+                let h = t.trim_start_matches('#').trim().to_lowercase();
+                *heading_seen.entry(h.clone()).or_insert(0) += 1;
+                headings.insert(h);
+            } else if t.starts_with("- ") || t.starts_with("* ") || t.starts_with("1. ") {
+                lists += 1;
             }
+        }
+        if headings.len() >= 2 || (headings.len() == 1 && lists >= 2) {
+            struct_sources += 1;
         }
         for p in text::paragraphs(&d.text) {
             words += text::count_words(&p);
-            dialogue += text::dialogue_words(&p);
+            paragraphs += 1;
+            if p.starts_with(['"', '\u{201C}', '\u{2018}']) {
+                quote_open += 1;
+            }
+            for w in text::word_tokens(&p) {
+                if matches!(w.as_str(), "said" | "says" | "asked" | "asks" | "replied" | "whispered") {
+                    tags += 1;
+                }
+            }
         }
     }
+    let repeated = heading_seen.values().filter(|&&n| n > 3).count();
     let words_f = words.max(1) as f64;
-    let per400 = structure as f64 * 400.0 / words_f;
-    let dshare = dialogue as f64 / words_f;
-    if per400 >= 1.0 {
-        (Register::Blog, format!("{per400:.1} headings/list lines per 400 words"))
-    } else if dshare >= 0.08 {
-        (Register::Fiction, format!("dialogue {:.0}% of words", dshare * 100.0))
+    let quote_share = quote_open as f64 / paragraphs.max(1) as f64;
+    let tags_per_1k = tags as f64 * 1000.0 / words_f;
+    let structured = struct_sources * 2 >= docs.len().max(1) && repeated * 2 < heading_seen.len().max(1);
+    if quote_share >= 0.15 || tags_per_1k >= 3.0 {
+        (Register::Fiction, format!("{:.0}% of paragraphs open with dialogue, {tags_per_1k:.1} speech tags per 1k", quote_share * 100.0))
+    } else if structured {
+        (Register::Blog, format!("headings or lists in {struct_sources} of {} files", docs.len()))
     } else {
-        (Register::Nonfiction, format!("dialogue {:.0}% of words", dshare * 100.0))
+        (Register::Nonfiction, format!("prose without dialogue ({:.0}% dialogue-opening paragraphs); pass --register if this is fiction or a blog", quote_share * 100.0))
     }
 }
 

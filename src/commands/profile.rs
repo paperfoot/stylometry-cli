@@ -21,6 +21,10 @@ struct BuiltProfile {
     works: usize,
     passages: usize,
     path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hygiene: Option<crate::engine::text::Hygiene>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    warnings: Vec<String>,
 }
 
 fn built(p: &Profile, path: PathBuf) -> BuiltProfile {
@@ -33,6 +37,8 @@ fn built(p: &Profile, path: PathBuf) -> BuiltProfile {
         works: p.sources.len(),
         passages: p.chunks.len(),
         path: path.display().to_string(),
+        hygiene: None,
+        warnings: Vec::new(),
     }
 }
 
@@ -58,6 +64,9 @@ fn print_built(ctx: Ctx, data: &BuiltProfile, verb: &str) -> Result<(), AppError
             if d.register.is_short_form() { "items" } else { "passages" }
         );
         println!("  register: {} ({}); override with --register", d.register.as_str(), d.register_reason);
+        for w in &d.warnings {
+            println!("  {} {}", "warning:".yellow().bold(), w.yellow());
+        }
         println!("  {}", d.path.dimmed());
     })
 }
@@ -81,7 +90,9 @@ pub fn build(ctx: Ctx, a: BuildArgs) -> Result<(), AppError> {
             format!("Pass --force to overwrite: {BIN} profile build {name} --corpus <path> --force"),
         ));
     }
+    let _ = crate::engine::text::take_hygiene();
     let mut corpus_in = import::read_corpus(&corpus)?;
+    let hygiene = crate::engine::text::take_hygiene();
     if let Some(day) = &since {
         import::keep_since(&mut corpus_in, day)?;
     }
@@ -96,7 +107,15 @@ pub fn build(ctx: Ctx, a: BuildArgs) -> Result<(), AppError> {
     };
     let profile = Profile::build_with(&name, &corpus_in.docs, kind, Some(register), MIN_CHUNKS)?;
     let path = store::save(&profile)?;
-    print_built(ctx, &built(&profile, path), "Built")
+    let mut data = built(&profile, path);
+    data.hygiene = Some(hygiene);
+    if hygiene.total() as f64 > profile.n_tokens as f64 / 1000.0 {
+        data.warnings.push(format!(
+            "cleaned conversion debris: {} escapes, {} fence lines, {} attribute blocks, {} broken paragraphs rejoined; spot-check a passage with `{BIN} examples {name}`",
+            hygiene.escapes, hygiene.fences, hygiene.attributes, hygiene.broken_paragraphs
+        ));
+    }
+    print_built(ctx, &data, "Built")
 }
 
 pub fn blend(ctx: Ctx, name: String, from: Vec<String>, force: bool) -> Result<(), AppError> {

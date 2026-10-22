@@ -93,15 +93,65 @@ fn file_label(p: &Path) -> String {
         .unwrap_or_else(|| p.display().to_string())
 }
 
-/// Strip common epub->markdown conversion artifacts (cover images, raw SVG/HTML,
-/// calibre split anchors) while keeping prose. Conservative: only drops lines
-/// that are clearly non-prose.
+/// What `clean` removed: conversion debris that, left in, misreports a voice
+/// (escaped apostrophes hide contractions; fence lines inflate colons;
+/// mid-sentence paragraph breaks fake one-sentence paragraphs).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct Hygiene {
+    pub escapes: usize,
+    pub fences: usize,
+    pub attributes: usize,
+    pub broken_paragraphs: usize,
+}
+
+impl Hygiene {
+    pub fn total(&self) -> usize {
+        self.escapes + self.fences + self.attributes + self.broken_paragraphs
+    }
+}
+
+/// Strip epub/markdown conversion artifacts (pandoc/calibre output: cover
+/// images, raw SVG/HTML, `:::` fenced divs, `{#id .class}` attributes,
+/// `[text]{.italic}` spans, empty `[]{#anchor}` anchors, backslash escapes)
+/// while keeping prose, and rejoin paragraphs that a conversion split
+/// mid-sentence. Conservative: only clearly non-prose is dropped.
 pub fn clean(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
+    let (t, h) = clean_report(raw);
+    if let Ok(mut acc) = HYGIENE.lock() {
+        acc.escapes += h.escapes;
+        acc.fences += h.fences;
+        acc.attributes += h.attributes;
+        acc.broken_paragraphs += h.broken_paragraphs;
+    }
+    t
+}
+
+/// Debris removed by every `clean` call in this process, so `profile build`
+/// can report it without each importer threading counts through.
+static HYGIENE: std::sync::Mutex<Hygiene> = std::sync::Mutex::new(Hygiene {
+    escapes: 0,
+    fences: 0,
+    attributes: 0,
+    broken_paragraphs: 0,
+});
+
+/// Take (and reset) the debris counts accumulated by `clean`.
+pub fn take_hygiene() -> Hygiene {
+    HYGIENE.lock().map(|mut h| std::mem::take(&mut *h)).unwrap_or_default()
+}
+
+/// `clean`, plus counts of what was removed.
+pub fn clean_report(raw: &str) -> (String, Hygiene) {
+    let mut h = Hygiene::default();
+    let mut lines: Vec<String> = Vec::new();
     for line in raw.lines() {
         let t = line.trim();
         if t.is_empty() {
-            out.push('\n');
+            lines.push(String::new());
+            continue;
+        }
+        if t.starts_with(":::") {
+            h.fences += 1;
             continue;
         }
         let is_cruft = t.starts_with("![")            // markdown image
@@ -115,10 +165,110 @@ pub fn clean(raw: &str) -> String {
         if is_cruft {
             continue;
         }
-        out.push_str(line);
-        out.push('\n');
+        let fixed = strip_markup(line, &mut h);
+        if fixed.trim().is_empty() {
+            continue;
+        }
+        lines.push(fixed);
+    }
+    let joined = lines.join("\n");
+    let (merged, broken) = rejoin_broken_paragraphs(&joined);
+    h.broken_paragraphs = broken;
+    (merged, h)
+}
+
+/// Unwrap `[text]{.italic}` → `*text*` (`.bold` → `**text**`, other spans →
+/// text), drop remaining `{#id .class}` attribute blocks and empty `[]`
+/// anchors, and undo backslash escapes (`\'` → `'`).
+fn strip_markup(line: &str, h: &mut Hygiene) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        // [text]{attrs}
+        if c == '[' {
+            if let Some(close) = (i + 1..chars.len()).find(|&j| chars[j] == ']') {
+                if chars.get(close + 1) == Some(&'{') {
+                    if let Some(end) = (close + 2..chars.len()).find(|&j| chars[j] == '}') {
+                        let inner: String = chars[i + 1..close].iter().collect();
+                        let attrs: String = chars[close + 2..end].iter().collect();
+                        h.attributes += 1;
+                        let wrap = if attrs.contains("bold") || attrs.contains("strong") {
+                            "**"
+                        } else if attrs.contains("italic") || attrs.contains("emph") {
+                            "*"
+                        } else {
+                            ""
+                        };
+                        if !inner.is_empty() {
+                            out.push_str(wrap);
+                            out.push_str(&strip_markup(&inner, h));
+                            out.push_str(wrap);
+                        }
+                        i = end + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        // {#id .class} attribute blocks
+        if c == '{' && matches!(chars.get(i + 1), Some('#') | Some('.')) {
+            if let Some(end) = (i + 1..chars.len()).find(|&j| chars[j] == '}') {
+                h.attributes += 1;
+                i = end + 1;
+                continue;
+            }
+        }
+        // backslash escapes
+        if c == '\\' {
+            if let Some(&n) = chars.get(i + 1) {
+                if "'\"*_[]().!-#`".contains(n) {
+                    h.escapes += 1;
+                    out.push(n);
+                    i += 2;
+                    continue;
+                }
+            }
+        }
+        out.push(c);
+        i += 1;
     }
     out
+}
+
+/// Rejoin a paragraph to the previous one when the previous lacks terminal
+/// punctuation and this one starts in lowercase: a conversion's page or
+/// file break, not the author's paragraphing. Returns the text and the
+/// number of joins.
+fn rejoin_broken_paragraphs(text: &str) -> (String, usize) {
+    let mut blocks: Vec<String> = Vec::new();
+    let mut joins = 0;
+    for block in text.split("\n\n") {
+        let b = block.trim_matches('\n');
+        if b.trim().is_empty() {
+            continue;
+        }
+        let starts_lower = b
+            .trim_start()
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_lowercase());
+        let prev_open = blocks.last().is_some_and(|p| {
+            let t = p.trim_end().trim_end_matches(['*', '_']);
+            !t.ends_with(['.', '!', '?', '\u{2026}', ':', ';', '"', '\u{201D}', '\u{2019}', '\'', ')'])
+                && !t.trim_start().starts_with('#')
+        });
+        if starts_lower && prev_open {
+            let last = blocks.last_mut().unwrap();
+            last.push(' ');
+            last.push_str(b.trim());
+            joins += 1;
+        } else {
+            blocks.push(b.to_string());
+        }
+    }
+    (blocks.join("\n\n") + "\n", joins)
 }
 
 /// Fold typographic apostrophes so "don’t" and "don't" are one word.
@@ -458,6 +608,18 @@ mod tests {
     #[test]
     fn count_words_ignores_punctuation_tokens() {
         assert_eq!(count_words("hello — world ... !"), 2);
+    }
+
+    #[test]
+    fn clean_strips_pandoc_debris_and_rejoins_broken_paragraphs() {
+        let raw = "::: {#split_001 .calibre2}\n# CHAPTER 1 {#index_split .calibre3}\n\nIt wasn\\'t [the Guide]{.italic} at all, and\n\nthen it was. []{#anchor}Fine.\n:::\n";
+        let (t, h) = clean_report(raw);
+        assert!(t.contains("It wasn't *the Guide* at all, and then it was. Fine."), "{t}");
+        assert!(t.contains("# CHAPTER 1\n") || t.contains("# CHAPTER 1 \n") || t.contains("# CHAPTER 1"), "{t}");
+        assert!(!t.contains(":::") && !t.contains("calibre"));
+        assert_eq!(h.escapes, 1);
+        assert_eq!(h.fences, 2);
+        assert_eq!(h.broken_paragraphs, 1);
     }
 
     #[test]
