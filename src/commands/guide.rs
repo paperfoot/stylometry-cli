@@ -476,7 +476,7 @@ fn giveaways(c: &Ctxt, extra: &[String]) -> Option<Section> {
     if !polish.is_empty() {
         let _ = writeln!(
             body,
-            "Imitations read too tidy. These are rare in this author's own text (at most this many per 1,000 words in 85% of their passages); write them no more often:\n"
+            "Imitations read too tidy. These are rare in this author's own text (per 1,000 words, 85th percentile); write them no more often:\n"
         );
         body.push_str(&bullets(&polish));
         body.push('\n');
@@ -573,10 +573,10 @@ fn form_long(f: Family, form: &str) -> String {
 /// Another form, in short.
 fn form_short(f: Family, form: &str) -> String {
     let s = match (f, form) {
-        (Family::Quotes, "curly") => "\u{201C} \u{201D}",
-        (Family::Quotes, "straight") => "\"",
-        (Family::Apostrophes, "curly") => "\u{2019}",
-        (Family::Apostrophes, "straight") => "'",
+        (Family::Quotes, "curly") => "curly \u{201C} \u{201D}",
+        (Family::Quotes, "straight") => "straight \"",
+        (Family::Apostrophes, "curly") => "curly \u{2019}",
+        (Family::Apostrophes, "straight") => "straight '",
         (Family::Dashes, "\u{2014}") => "word\u{2014}word",
         (Family::Dashes, " \u{2014} ") => "word \u{2014} word",
         (Family::Dashes, " - ") => "word - word",
@@ -774,10 +774,9 @@ fn mechanics_lines(bands: &[Band], h: &Hand) -> Vec<String> {
             out.push("Doubled marks (!!, ?!, ..): never.".to_string());
         }
     } else {
-        let forms: Vec<String> = h.doubled.iter().map(|(f, r)| format!("\"{f}\" {}", fmt_num(*r))).collect();
         out.push(format!(
-            "Doubled marks per 1,000 words: {} (typically {} in all, up to {}). They are the author's: use them where the author would.",
-            forms.join(", "),
+            "Doubled marks: {} (typically {} per 1,000 words, up to {}). They are the author's: use them where the author would.",
+            quoted(&h.doubled).join(", "),
             fmt_num(doubled.median),
             fmt_num(doubled.high)
         ));
@@ -1795,7 +1794,7 @@ mod tests {
     fn exemplar_note_names_the_forms_the_author_holds() {
         assert_eq!(
             typography_note(&curly_book()),
-            "Their punctuation and quote marks are part of the voice (\u{201C} \u{201D}, \u{2019}, \u{2026}, word\u{2014}word): set yours the same way."
+            "Their punctuation and quote marks are part of the voice (curly \u{201C} \u{201D}, curly \u{2019}, \u{2026}, word\u{2014}word): set yours the same way."
         );
         assert_eq!(
             typography_note(&TypographyHabits::default()),
@@ -1829,7 +1828,7 @@ mod tests {
             loose: vec!["no final full stop (10% of posts)".into()],
         };
         let t = mechanics_lines(&bands, &hand).join("\n");
-        assert!(t.contains("Doubled marks per 1,000 words: \"..\" 3.6 (typically 3.0 in all, up to 6.0)."), "{t}");
+        assert!(t.contains("Doubled marks: \"..\" (typically 3.0 per 1,000 words, up to 6.0)."), "{t}");
         assert!(t.contains("A space before punctuation (\"word ,\", \"word ?\"): typically 1.0 per 1,000 words."), "{t}");
         assert!(
             t.contains("Polish: informal. Keeps \"..\", \"e.g.\", the space before a mark, no final full stop (10% of posts); don't tidy these away."),
