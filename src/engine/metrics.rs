@@ -1119,6 +1119,14 @@ pub fn is_nonword(cased: &str, names: &[String]) -> bool {
 /// Sentences of this many words or fewer are beats.
 pub const BEAT_WORDS: usize = 6;
 
+/// Two sentences of this many words or fewer opening with the same two
+/// words are a tidy parallel pair ("The point was never the offense. The
+/// point was the catch."); longer ones are an ordinary rhetorical pair.
+pub const PAIR_WORDS: usize = 8;
+
+/// The polish measures: only "too many" is off-voice.
+pub const POLISH_KEYS: [&str; 3] = ["short_triplets_per_1k", "anaphora_runs_per_1k", "mirror_pairs_per_1k"];
+
 /// Runs of tidy beats in a sequence of sentences (each as word tokens), as
 /// (first sentence, sentences in the run). An empty sentence is a boundary
 /// no run crosses: the measures put one between paragraphs, so a run never
@@ -1128,8 +1136,12 @@ pub const BEAT_WORDS: usize = 6;
 pub struct Polish {
     /// 3+ consecutive sentences of `BEAT_WORDS` words or fewer, once per run.
     pub triplets: Vec<(usize, usize)>,
-    /// 3+ consecutive sentences opening with the same word, or 2+ with the
-    /// same two words ("Same booth. Same dinner. Same kiss."), once per run.
+    /// 3+ consecutive sentences opening with the same word ("Same booth.
+    /// Same dinner. Same kiss."), or two short ones (`PAIR_WORDS`) opening
+    /// with the same two words ("Then the door opens. Then the light
+    /// goes."), once per run. Two full sentences sharing an opening ("What
+    /// if you're not sure what you want? What if you're attracted to ...")
+    /// are an ordinary rhetorical pair.
     pub anaphora: Vec<(usize, usize)>,
     /// Adjacent sentences sharing 60%+ of their words, exactly one negated
     /// ("I want him to. I don't want him to."): (first, 2).
@@ -1171,8 +1183,10 @@ pub fn polish(sents: &[Vec<String>]) -> Polish {
             continue;
         };
         let run = sents[i..].iter().take_while(|s| s.first() == Some(first)).count();
-        let two = |s: &Vec<String>| s.get(..2).map(<[String]>::to_vec);
-        if run >= 3 || (run == 2 && two(&sents[i]).is_some() && two(&sents[i]) == two(&sents[i + 1])) {
+        let beat_pair = run == 2
+            && sents[i..i + 2].iter().all(|s| s.len() >= 2 && s.len() <= PAIR_WORDS)
+            && sents[i][1] == sents[i + 1][1];
+        if run >= 3 || beat_pair {
             p.anaphora.push((i, run));
         }
         i += run;
@@ -1625,10 +1639,15 @@ fn markup_sources(p: &Profile) -> HashMap<&'static str, f64> {
         .collect()
 }
 
-/// p15 / p50 / p85 bands from measured windows. `opening_paragraph_words`
-/// comes from source openings only (a mid-chapter window's first paragraph
-/// is not an opening); with fewer than 5 openings it is unmeasured.
-pub fn bands_from(p: &Profile, defs: &[Def], rows: &[&WindowRow], presence: &HashMap<&'static str, f64>) -> Vec<Band> {
+/// p15 / p50 / p85 bands from measured windows of `window_words` words.
+/// `opening_paragraph_words` comes from source openings only (a
+/// mid-chapter window's first paragraph is not an opening); with fewer than
+/// 5 openings it is unmeasured. A polish band never tops out below one run
+/// per window: where the author's median is 0, a p85 under one event would
+/// fault the author's own essay for a single rhetorical run.
+pub fn bands_from(p: &Profile, defs: &[Def], rows: &[&WindowRow], presence: &HashMap<&'static str, f64>, window_words: usize) -> Vec<Band> {
+    // Rounded up, so one run in a window of exactly this length is in range.
+    let one_run = (100_000.0 / window_words.max(1) as f64).ceil() / 100.0;
     defs.iter()
         .enumerate()
         .map(|(j, d)| {
@@ -1643,13 +1662,17 @@ pub fn bands_from(p: &Profile, defs: &[Def], rows: &[&WindowRow], presence: &Has
             let unmeasured = presence.get(d.key.as_str()).is_some_and(|s| *s < MARKUP_MIN_SOURCES)
                 || (opening && pairs.len() < 5)
                 || pairs.is_empty();
+            let mut high = weighted_quantile(&pairs, 0.85);
+            if POLISH_KEYS.contains(&d.key.as_str()) {
+                high = high.max(one_run);
+            }
             Band {
                 key: d.key.clone(),
                 label: d.label.clone(),
                 unit: d.unit,
                 low: round_unit(weighted_quantile(&pairs, 0.15), d.unit),
                 median: round_unit(weighted_quantile(&pairs, 0.5), d.unit),
-                high: round_unit(weighted_quantile(&pairs, 0.85), d.unit),
+                high: round_unit(high, d.unit),
                 family: family(&d.key),
                 unmeasured,
             }
@@ -1669,7 +1692,7 @@ pub fn ranges(p: &Profile, window: usize, function_words: &[String]) -> Ranges {
 pub fn ranges_from(p: &Profile, window: usize, function_words: &[String], rows: &[&WindowRow]) -> Ranges {
     let defs = defs(function_words);
     let presence = markup_presence(p);
-    let bands = bands_from(p, &defs, rows, &presence);
+    let bands = bands_from(p, &defs, rows, &presence, window);
     let mean_chunks = if rows.is_empty() {
         1
     } else {
@@ -1855,6 +1878,14 @@ mod tests {
         let plain = polish(&toks(&["I wait.", "The rain comes down hard on the roof tonight.", "She doesn't call."]));
         assert_eq!(plain, Polish::default());
         assert!(!is_mirror(&text::word_tokens("It isn't him."), &text::word_tokens("It can't be him.")), "both negated");
+        // A rhetorical pair of full sentences is not a tidy pair; a short one is.
+        let essay = polish(&toks(&[
+            "What if you're not sure what you want?",
+            "What if you're attracted to the idea of making money and more attracted to some kinds of work?",
+        ]));
+        assert!(essay.anaphora.is_empty(), "{essay:?}");
+        let pair = polish(&toks(&["The point was never really the offense.", "The point was the catch."]));
+        assert_eq!(pair.anaphora, vec![(0, 2)]);
     }
 
     #[test]

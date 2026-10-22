@@ -709,3 +709,26 @@ fn the_ellipsis_glyph_is_typography_not_rhythm() {
         assert!(!findings_of(j, "structure").iter().any(|f| f["excerpts"].to_string().contains("Maybe it")), "{}", j["data"]["findings"]);
     }
 }
+
+#[test]
+fn one_polish_run_is_within_any_authors_band() {
+    let data = tempfile::tempdir().unwrap();
+    let corpus = tempfile::tempdir().unwrap();
+    build_fiction(data.path(), corpus.path());
+
+    // The author never mirrors a sentence; one mirrored pair in a scene is
+    // still theirs to write. Three are a habit they don't have.
+    let mut draft = author_prose(1201, 600);
+    draft.push_str("I want him to stay with me tonight. I don't want him to stay with me tonight.\n\n");
+    let j = check_text(data.path(), "ann", &draft, &[]);
+    let m = row(&j, "mirror_pairs_per_1k");
+    assert_eq!(m["median"], 0.0, "{m}");
+    assert_eq!(m["status"], "in_range", "{m}");
+    assert!(!j["data"]["findings"].to_string().contains("mirror_pairs"), "{}", j["data"]["findings"]);
+    for k in 0..2 {
+        draft.push_str(&author_prose(1210 + k, 20));
+        draft.push_str("I want him to stay with me tonight. I don't want him to stay with me tonight.\n\n");
+    }
+    let j = check_text(data.path(), "ann", &draft, &[]);
+    assert_eq!(row(&j, "mirror_pairs_per_1k")["status"], "out_of_range");
+}

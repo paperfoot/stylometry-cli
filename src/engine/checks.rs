@@ -1054,7 +1054,7 @@ fn reference_distances(p: &Profile, rows: &[&WindowRow], fw: &[String], words: u
         if train.len() < 3 {
             continue;
         }
-        let bands = metrics::bands_from(p, &defs, &train, &presence);
+        let bands = metrics::bands_from(p, &defs, &train, &presence, words);
         for (i, r) in rows.iter().enumerate() {
             if folds[i] == f {
                 out[i] = (metrics::distance(&r.values, &bands, words, skip), r.weight);
