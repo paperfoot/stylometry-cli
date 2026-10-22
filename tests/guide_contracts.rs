@@ -321,6 +321,8 @@ fn examples_match_the_task_or_say_none() {
         assert!(ex[0].get(key).is_some(), "missing {key}: {}", ex[0]);
     }
     assert!(ex[0]["text"].as_str().unwrap().contains("coffee"), "{}", ex[0]);
+    // Few-shot examples carry the author's marks: say so once.
+    assert!(d["typography_note"].as_str().unwrap().starts_with("Their punctuation and quote marks are part of the voice"), "{d}");
     assert!(v["metadata"]["next"][0].as_str().unwrap().contains("guide poster --about"));
 
     let v = run_json(&data, &["examples", "poster", "--about", "quantum chromodynamics lattice"]);

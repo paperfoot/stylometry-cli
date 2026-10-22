@@ -664,7 +664,7 @@ fn typography_section(c: &Ctxt) -> Option<Section> {
 
 /// The exemplars' one-line reminder that their marks are the voice too,
 /// naming the forms the author holds 80% of the time or more.
-fn typography_note(t: &TypographyHabits) -> String {
+pub fn typography_note(t: &TypographyHabits) -> String {
     let families = [
         (Family::Quotes, &t.double_quotes),
         (Family::Apostrophes, &t.apostrophes),
