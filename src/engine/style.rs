@@ -215,9 +215,14 @@ fn count_punctuation(p: &str, c: &mut StyleCounts) {
                 }
             }
             '-' if chars.get(i + 1) == Some(&'-') => {
-                c.em_dashes += 1;
+                // "--json" (no word before, one right after) is a flag.
+                let word = |j: Option<&char>| j.is_some_and(|x| x.is_alphanumeric());
+                let prev = i.checked_sub(1).and_then(|j| chars.get(j));
                 while chars.get(i + 1) == Some(&'-') {
                     i += 1;
+                }
+                if !(word(chars.get(i + 1)) && !word(prev)) {
+                    c.em_dashes += 1;
                 }
             }
             '-' if i > 0
@@ -258,5 +263,11 @@ mod tests {
     fn double_hyphen_counts_as_one_dash() {
         let c = StyleCounts::of_paragraphs(&["Wait--no. Stop - now.".to_string()]);
         assert_eq!(c.em_dashes, 2);
+    }
+
+    #[test]
+    fn command_line_flags_are_not_dashes() {
+        let c = StyleCounts::of_paragraphs(&["Run it with --json (or --limit=5) -- then wait.".to_string()]);
+        assert_eq!(c.em_dashes, 1);
     }
 }
