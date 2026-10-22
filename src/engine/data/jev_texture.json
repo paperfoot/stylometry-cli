@@ -3,7 +3,7 @@
   "type": "noul",
   "instructions": {
    "question": "Does `text` have the rough edges of an unedited human draft: awkward or clunky phrasing, needless repetition, run-on or loose sentences, over-explaining, or small slips?",
-   "focus": "Judge how the writing is made, not its topic, its opinions or its punctuation marks."
+   "focus": "Judge how the writing is made, not its topic, its opinions or its punctuation marks. A casual voice is not by itself a rough edge: look for wording a careful editor would fix."
   },
   "criteria": {
    "true": {
@@ -15,89 +15,110 @@
     ]
    },
    "false": {
-    "what": "Every sentence is smooth, balanced and deliberate"
+    "what": "Every sentence is smooth, balanced and deliberate",
+    "examples": [
+     "Most advice fails for a simple reason: it answers the question you asked, not the one you have.",
+     "The kettle clicked off. Neither of us moved to get it.",
+     "honestly the best part of the trip was the drive home"
+    ]
    }
   }
  },
  "polish": {
   "type": "score",
   "instructions": {
-   "question": "How crafted and polished is the writing in `text`?",
+   "question": "How smooth and finished is the prose in `text`, sentence by sentence?",
    "focus": "Judge how the writing is made, not its topic, its opinions or its punctuation marks."
   },
   "criteria": [
-   "Plain and functional: says things directly, sometimes clumsily or at length",
-   "Clear and competent, with little ornament",
-   "Polished: balanced sentences and a few crafted lines",
-   "Highly crafted: aphorisms, figures of speech and quotable lines throughout"
+   {
+    "what": "Unpolished: some sentences are clumsy, run on, double back or say the same thing twice",
+    "examples": [
+     "The point of it is that the reason it works is because people like it, which is the reason.",
+     "We went to the shop and it was closed so then we went home and it was late by then."
+    ]
+   },
+   {
+    "what": "Mostly clean, with a few loose or uneven spots: an aside that breaks into a sentence, an odd word order, a sentence that veers off in a direction the reader did not expect",
+    "examples": [
+     "The plan, which honestly I only half believed in at the time, and still don't, mostly worked."
+    ]
+   },
+   {
+    "what": "Smooth: sentences are clean and even with tidy transitions, nothing awkward or wasted; at most one spot feels uneven",
+    "examples": [
+     "The plan mostly worked. The few parts that failed taught us more than the parts that didn't."
+    ]
+   },
+   {
+    "what": "Seamless: every sentence is finished, balanced and economical, and flows straight into the next, with no loose spot anywhere",
+    "examples": [
+     "The plan worked, mostly. What failed was small, and what it taught us was not."
+    ]
+   }
   ]
  },
  "button": {
   "type": "noul",
   "instructions": {
-   "question": "Does `text` end on a crafted closing line: a short, quotable punchline or reveal placed last for effect?",
-   "focus": "Judge how the writing is made, not its topic, its opinions or its punctuation marks."
+   "question": "Is the last sentence of `text` a quiet closing line: a small telling detail or an implication placed last so the reader feels what is left unsaid?",
+   "focus": "Judge only the final sentence of `text`, read after the sentences before it. Ignore the topic, the opinions, names and the punctuation marks."
   },
   "criteria": {
    "true": {
-    "what": "The last sentence is a polished button, kicker, twist or callback",
+    "what": "The final sentence lands the passage by holding back: it shows a small telling detail or hints at the point instead of stating it",
     "examples": [
-     "She never called again.",
-     "That was the last time I saw it.",
-     "Some doors stay shut."
+     "I left the porch light on anyway.",
+     "Nobody ever asked about the dog again.",
+     "He paid for both tickets, which was new.",
+     "The second spreadsheet was never opened."
     ]
    },
    "false": {
-    "what": "It just stops, or ends on an ordinary sentence that carries on the narration, argument or post"
+    "what": "The final sentence says things outright or simply carries on: it states a feeling or a point plainly, reports the next action, or adds a detail",
+    "examples": [
+     "I was so angry I could barely speak.",
+     "That is why the plan failed.",
+     "She asked if I wanted tea, and I said yes.",
+     "By 2010 the price had doubled."
+    ],
+    "not_for": [
+     "A feeling or a point stated outright, even a strong or dramatic one",
+     "A plain statement of what happens next",
+     "A number, an example or a new step in the argument"
+    ]
    }
   }
  },
  "figurative": {
   "type": "noul",
   "instructions": {
-   "question": "Does `text` use a crafted figure of speech: a fresh metaphor, simile or personification chosen for effect?",
-   "focus": "Judge how the writing is made, not its topic, its opinions or its punctuation marks."
+   "question": "Does `text` show a feeling or a moment through a lyrical image: a sensory picture of something unlike it, of the kind a poem or a literary novel would use?",
+   "focus": "Look for one fresh image anywhere in `text`. Ignore the topic, the opinions, names and the punctuation marks."
   },
   "criteria": {
    "true": {
-    "what": "An inventive image a plain writer would not reach for",
+    "what": "A feeling, silence, look or moment drawn as a picture of something else that the writer invented for this passage",
     "examples": [
-     "the house held its breath",
-     "her laugh was a door slamming somewhere far away"
+     "Her silence filled the car the way water fills a lock.",
+     "Her answer hung in the hallway like wet laundry.",
+     "Morning came in thin and grey, rationed like everything else."
     ]
    },
    "false": {
-    "what": "Plain literal language, or only everyday idioms and dead metaphors (\"fell in love\", \"a lot on my mind\")"
-   }
-  }
- },
- "hedge": {
-  "type": "noul",
-  "instructions": {
-   "question": "Does `text` lean on filler hedges or softeners (I guess, kind of, sort of, pretty much, or whatever, I don't know) more than once?",
-   "focus": "Judge how the writing is made, not its topic, its opinions or its punctuation marks."
-  },
-  "criteria": {
-   "true": {
-    "what": "Two or more filler hedges or softeners"
-   },
-   "false": {
-    "what": "None or one, even if the tone is casual"
-   }
-  }
- },
- "repeat": {
-  "type": "noul",
-  "instructions": {
-   "question": "Does `text` repeat the same noun or phrase in close succession where a writer would normally use a pronoun or say it once?",
-   "focus": "Judge how the writing is made, not its topic, its opinions or its punctuation marks."
-  },
-  "criteria": {
-   "true": {
-    "what": "A noun or phrase repeated mechanically within a sentence or two"
-   },
-   "false": {
-    "what": "Repetition only for rhetorical effect, or none"
+    "what": "Feelings and moments are stated literally or with stock phrases anyone would use",
+    "examples": [
+     "Nobody spoke at dinner.",
+     "The whole plan went up in smoke.",
+     "I felt awful the whole drive."
+    ],
+    "not_for": [
+     "Everyday idioms and dead metaphors such as 'a lot on my mind', 'hit the ground running' or 'the tip of the iceberg' are not fresh figures",
+     "Clichés and stock comparisons such as 'busy as a bee', 'a heart of gold' or 'went up in smoke'",
+     "An analogy or coined term that explains an idea, such as 'think of a budget as a fuel tank'",
+     "Jokes, slang and plain exaggeration, such as 'I nearly died laughing' or 'a million emails'",
+     "Puns, nicknames and coined words for a product or idea"
+    ]
    }
   }
  },
@@ -105,14 +126,58 @@
   "type": "noul",
   "instructions": {
    "question": "Does `text` over-explain: spell out reasons, logistics or feelings the reader could already infer?",
-   "focus": "Judge how the writing is made, not its topic, its opinions or its punctuation marks."
+   "focus": "Judge how the writing is made, not its topic, its opinions, its names or its punctuation marks."
   },
   "criteria": {
    "true": {
-    "what": "At least one sentence that states the obvious or explains an inference"
+    "what": "At least one sentence states something the reader could already infer from what came before",
+    "examples": [
+     "She slams the door, clearly angry about what I said.",
+     "I grab an umbrella because it is raining and I don't want to get wet.",
+     "We drove to the airport, which meant we had to leave the house early to get there in time."
+    ]
    },
    "false": {
-    "what": "Everything stated is needed"
+    "what": "Everything stated is needed; reasons and feelings are left for the reader to infer",
+    "examples": [
+     "She slams the door.",
+     "I grab an umbrella.",
+     "We left for the airport at five."
+    ],
+    "not_for": [
+     "An explanation of a new idea or a step in an argument the reader could not supply alone",
+     "A reason the reader had no way to guess",
+     "A short line that hints at a feeling without naming it"
+    ]
+   }
+  }
+ },
+ "repeat": {
+  "type": "noul",
+  "instructions": {
+   "question": "Does `text` repeat the same noun or phrase in close succession where a writer would normally use a pronoun or say it once?",
+   "focus": "Judge how the writing is made, not its topic, its opinions, its names or its punctuation marks."
+  },
+  "criteria": {
+   "true": {
+    "what": "A noun or a phrase of several words said again within a sentence or two, where a pronoun or a shorter reference would do",
+    "examples": [
+     "I set my bag on the chair and then pick my bag up again.",
+     "I wanted a quiet place to work. A quiet place to work is hard to find in this city.",
+     "The new update is out, and the new update fixes the login bug."
+    ]
+   },
+   "false": {
+    "what": "Nouns and phrases give way to 'it', 'that', 'this' or a pronoun after the first mention",
+    "examples": [
+     "I set my bag on the chair and then pick it up again.",
+     "I wanted a quiet place to work. That is hard to find in this city."
+    ],
+    "not_for": [
+     "The same words opening two or three sentences in a row for rhythm or emphasis",
+     "A refrain or callback to an earlier line",
+     "A single short word or a name repeated"
+    ]
    }
   }
  },
@@ -128,21 +193,6 @@
    },
    "false": {
     "what": "Every sentence is punctuated conventionally"
-   }
-  }
- },
- "oneliner": {
-  "type": "noul",
-  "instructions": {
-   "question": "Does `text` set a short dramatic line or inner thought as its own paragraph for emphasis?",
-   "focus": "Judge how the writing is made, not its topic, its opinions or its punctuation marks."
-  },
-  "criteria": {
-   "true": {
-    "what": "A one-line paragraph used for a beat, reveal or thought"
-   },
-   "false": {
-    "what": "No such standalone line"
    }
   }
  }

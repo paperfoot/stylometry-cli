@@ -244,7 +244,9 @@ fn build_measures_bands_and_check_reports_the_texture_block() {
         }
         assert!(k["low"].as_f64().unwrap() <= k["high"].as_f64().unwrap());
     }
-    assert_eq!(keys.iter().filter(|k| k["gate"] == true).count(), 5);
+    // Gate: rough, polish, closing lines, hedges. Fresh figures are advice:
+    // no wording separated genuine from imitation across registers.
+    assert_eq!(keys.iter().filter(|k| k["gate"] == true).count(), 4);
     let passages = t["passages"].as_array().unwrap();
     assert!(passages.len() >= 3, "{t}");
     assert_eq!(passages[0]["index"], 1);
@@ -284,8 +286,17 @@ fn a_smooth_draft_gets_texture_findings_and_a_plan_step_but_never_a_different_pa
 
     let d = &on["data"];
     let tex: Vec<&Value> = d["findings"].as_array().unwrap().iter().filter(|f| f["kind"] == "texture").collect();
-    let gate_off: Vec<&str> = t["keys"].as_array().unwrap().iter().filter(|k| k["status"] == "off" && k["gate"] == true).map(|k| k["key"].as_str().unwrap()).collect();
-    assert_eq!(tex.len(), gate_off.len(), "one finding per gate key off: {off_keys:?}");
+    // One finding per key off that is acted on: the gate keys, and judged
+    // advisory keys with too much (fresh figures). One-sentence paragraphs
+    // already have their own metric finding.
+    let acting: Vec<&str> = t["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|k| k["status"] == "off" && (k["gate"] == true || k["key"] == "figurative"))
+        .map(|k| k["key"].as_str().unwrap())
+        .collect();
+    assert_eq!(tex.len(), acting.len(), "one finding per acted-on key off: {off_keys:?}");
     // Too little of an advisory kind is a diagnostic row, never advice to
     // add it: writers given those as targets were caught for the tics.
     for k in ["overexplain", "repeat", "splice"] {

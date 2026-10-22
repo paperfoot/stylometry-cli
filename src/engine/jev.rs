@@ -514,7 +514,7 @@ mod tests {
     #[test]
     fn question_sets_load_and_carry_a_version() {
         let t = questions("texture");
-        for k in ["rough", "polish", "button", "figurative", "hedge", "overexplain", "repeat", "splice", "oneliner"] {
+        for k in ["rough", "polish", "button", "figurative", "overexplain", "repeat", "splice"] {
             assert!(t.get(k).is_some(), "texture lacks {k}");
         }
         assert!(questions_version("texture").starts_with("texture-"));

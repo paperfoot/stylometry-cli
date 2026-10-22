@@ -69,9 +69,14 @@ pub const KEYS: [TextureKey; 9] = [
         note: "" },
     TextureKey { key: "polish", label: "polish (0 plain to 3 highly crafted)", side: Side::High, gate: true, jev: true,
         advice: "write plainer: say what happens and what is thought, directly", note: "" },
-    TextureKey { key: "button", label: "crafted closing lines", side: Side::High, gate: true, jev: true,
-        advice: "end passages on ordinary sentences, not kickers, reveals or callbacks", note: "" },
-    TextureKey { key: "figurative", label: "fresh figures of speech", side: Side::High, gate: true, jev: true,
+    // Imitations close on an understated detail placed for effect more than
+    // on punchlines: that wording measured AUC 0.83 vs 0.68 (2026-10-22).
+    TextureKey { key: "button", label: "closing lines that hold back for effect", side: Side::High, gate: true, jev: true,
+        advice: "end passages on a plain statement of what happens or what is meant, not an understated detail placed last for effect", note: "" },
+    // Advice, not gate: no wording separated genuine from imitation reliably
+    // across registers (AUC 0.74 fiction, 0.23 essays, 0.47 posts); the
+    // sentence-level `figure` question still points at the lines.
+    TextureKey { key: "figurative", label: "fresh figures of speech", side: Side::High, gate: false, jev: true,
         advice: "cut inventive metaphors and similes", note: "" },
     TextureKey { key: "hedge", label: "filler hedges per 1,000 words", side: Side::Both, gate: true, jev: false,
         advice: "cut filler hedges (I guess, kind of) back to the author's rate: piling them on reads as imitation",
@@ -971,10 +976,19 @@ pub struct KeyRow {
 
 impl KeyRow {
     /// Whether the draft should change for this row: a gate key off on its
-    /// fault side, except too few hedges. Too little of an advisory kind or
-    /// of hedges is only reported: added on purpose it reads as imitation.
+    /// fault side, except too few hedges, or a judged advisory key with too
+    /// much of something (fresh figures: cut them). Too little of an
+    /// advisory kind or of hedges is only reported: added on purpose it
+    /// reads as imitation. Counted advisory keys (one-sentence paragraphs)
+    /// already have their own metric finding.
     pub fn acts(&self) -> bool {
-        self.status == "off" && self.gate && !(self.side == Side::Both && self.off_side == Some(Side::Low))
+        if self.status != "off" {
+            return false;
+        }
+        if self.gate {
+            return !(self.side == Side::Both && self.off_side == Some(Side::Low));
+        }
+        key(self.key).is_some_and(|k| k.jev && !k.advice.is_empty() && self.off_side == Some(Side::High))
     }
 }
 

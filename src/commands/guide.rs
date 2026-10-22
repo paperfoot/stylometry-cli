@@ -564,7 +564,7 @@ fn texture_section(b: &texture::Bands, n: usize, short: bool, hedges: Option<[f6
             share("splice")
         ),
     ];
-    let (often, rarely): (Vec<_>, Vec<_>) = [("crafted closing lines", "button"), ("fresh figures of speech", "figurative")]
+    let (often, rarely): (Vec<_>, Vec<_>) = [("closing lines that hold back for effect", "button"), ("fresh figures of speech", "figurative")]
         .into_iter()
         .map(|(label, k)| (format!("{label} {}", share(k)), m(k)))
         .partition(|(_, v)| *v >= 0.5);
@@ -581,7 +581,7 @@ fn texture_section(b: &texture::Bands, n: usize, short: bool, hedges: Option<[f6
         ));
     }
     lines.push(
-        "AI drafts go the other way: bare model drafts score polish about 2.0-2.5 and rough edges only 30-50%, and end on kickers and fresh metaphors. `check` reports it as `texture`.".into(),
+        "AI drafts go the other way: bare model drafts score polish about 2.1-2.4 on this scale (posts about 1.7), have rough edges in only about 40% of prose passages, and close passages on an understated detail placed for effect. `check` reports it as `texture`.".into(),
     );
     lines.push(
         "Don't fake roughness: padding, filler hedges, added explanations and mechanical noun repetition read as imitation too. These shares describe the author; they are not targets. Write it plain the first time instead of roughening a polished draft; never misspell on purpose.".into(),
