@@ -107,9 +107,12 @@ const CORE: &[Core] = &[
     ("long_word_share", "words of 7+ letters", Unit::Share,
      "allow a few more long or abstract words",
      "swap long words for short plain ones"),
+    // The rate moves with how often a draft says "it is" or "do not" at
+    // all; whether those are contracted is contraction_share's step, so
+    // spelling out to cut the rate would break the share.
     ("contractions_per_1k", "contractions per 1k words", Unit::Per1k,
-     "contract more (don't, it's, I'm)",
-     "spell out more contractions"),
+     "write more of the forms that contract (I'm, it's, don't)",
+     "rephrase so fewer forms contract (fewer it's, don't, I'm); don't spell them out"),
     ("contraction_share", "contracted share of contractable forms", Unit::Share,
      "contract more of the forms that can be contracted",
      "spell out more of them (do not, it is)"),

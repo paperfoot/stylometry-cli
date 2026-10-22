@@ -752,3 +752,22 @@ fn habits_the_draft_keeps_add_nothing_to_the_score() {
     let j = check_text(data.path(), "cora", &author_prose(1302, 900), &[]);
     assert!(j["data"]["score_basis"]["families"].to_string().contains("typography"), "{}", j["data"]["score_basis"]);
 }
+
+/// The blog writer in round 2 was told to "spell out 17 contractions" for a
+/// draft whose contracted share was already the author's: spelling out
+/// fixed the rate and broke the share. The rate step now says to rephrase.
+#[test]
+fn too_many_contractions_is_rephrased_not_spelled_out() {
+    let data = tempfile::tempdir().unwrap();
+    let corpus = tempfile::tempdir().unwrap();
+    build_fiction(data.path(), corpus.path());
+
+    let lines = ["I don't know.", "It's late.", "I'm here and it's cold.", "We're not leaving, I don't think.", "It's the door.", "That's what I'm saying."];
+    let draft: Vec<String> = (0..40).map(|i| format!("{} {}", lines[i % 6], lines[(i + 1) % 6])).collect();
+    let j = check_text(data.path(), "ann", &draft.join("\n\n"), &[]);
+    assert_eq!(row(&j, "contractions_per_1k")["status"], "out_of_range", "{}", row(&j, "contractions_per_1k"));
+    assert_ne!(row(&j, "contraction_share")["status"], "out_of_range");
+    let plan = j["data"]["plan"].to_string();
+    assert!(plan.contains("rephrase so fewer forms contract"), "{plan}");
+    assert!(!plan.contains("spell out more"), "{plan}");
+}
