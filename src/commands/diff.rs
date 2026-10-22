@@ -12,11 +12,19 @@ use crate::engine::voice::{self, Corpus};
 use crate::error::AppError;
 use crate::output::{self, Ctx};
 
-/// Measures are compared at this length: a scene.
-const WINDOW: usize = 1000;
+/// Measures are compared at this length: a scene for long-form voices; for
+/// posts and messages a pooled run of about ten items, so even a few
+/// hundred posts give enough windows.
+fn window_for(a: &Profile, b: &Profile) -> usize {
+    if a.register.is_short_form() || b.register.is_short_form() { 250 } else { 1000 }
+}
+
 /// A word must appear in at least this share of the favouring side's
-/// passages to count as a habit rather than a topic.
-const MIN_SPREAD: f64 = 0.03;
+/// passages (or items, which are far shorter) to count as a habit rather
+/// than a topic.
+fn min_spread(p: &Profile) -> f64 {
+    if p.register.is_short_form() { 0.01 } else { 0.03 }
+}
 
 #[derive(Serialize)]
 struct Leaning {
@@ -49,6 +57,8 @@ struct MeasureGap {
 struct Diff {
     a: String,
     b: String,
+    /// Length (words) the measures were compared at.
+    window_words: usize,
     a_words: Vec<Leaning>,
     b_words: Vec<Leaning>,
     word_choices: Vec<ChoiceGap>,
@@ -62,6 +72,8 @@ fn leanings(a: &Profile, b: &Profile, limit: usize) -> (Vec<Leaning>, Vec<Leanin
     words.dedup();
     let mut scored: Vec<Leaning> = words
         .into_iter()
+        // "url" and "user" are the placeholders links and @handles become.
+        .filter(|w| !matches!(w.as_str(), "url" | "user"))
         .filter(|w| !voice::is_name_or_number(a, w) && !voice::is_name_or_number(b, w))
         .filter_map(|w| {
             let ya = a.word_counts.get(w).copied().unwrap_or(0) as f64;
@@ -72,7 +84,7 @@ fn leanings(a: &Profile, b: &Profile, limit: usize) -> (Vec<Leaning>, Vec<Leanin
             let pooled = (ya + yb) / (na + nb);
             let z = voice::log_odds_z2(ya, na, yb, nb, pooled);
             let favoured = if z > 0.0 { a } else { b };
-            if voice::spread(favoured, w) < MIN_SPREAD {
+            if voice::spread(favoured, w) < min_spread(favoured) {
                 return None;
             }
             Some(Leaning {
@@ -121,8 +133,9 @@ pub fn run(ctx: Ctx, a: String, b: String, limit: usize) -> Result<(), AppError>
     word_choices.truncate(limit);
 
     let fw = metrics::top_function_words(&pa, metrics::FUNCTION_WORDS_TRACKED);
-    let ra = metrics::ranges(&pa, WINDOW, &fw);
-    let rb = metrics::ranges(&pb, WINDOW, &fw);
+    let window = window_for(&pa, &pb);
+    let ra = metrics::ranges(&pa, window, &fw);
+    let rb = metrics::ranges(&pb, window, &fw);
     let mut measures: Vec<MeasureGap> = ra
         .bands
         .iter()
@@ -147,6 +160,7 @@ pub fn run(ctx: Ctx, a: String, b: String, limit: usize) -> Result<(), AppError>
     let data = Diff {
         a: pa.name.clone(),
         b: pb.name.clone(),
+        window_words: window,
         a_words,
         b_words,
         word_choices,

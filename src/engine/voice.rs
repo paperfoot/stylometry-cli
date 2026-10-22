@@ -68,9 +68,12 @@ pub fn spread(p: &Profile, w: &str) -> f64 {
     p.word_chunks.get(w).copied().unwrap_or(0) as f64 / n
 }
 
+/// Names, numbers, single letters, and the placeholders links and @handles
+/// become ("url", "user"): none of them is a word choice.
 pub fn is_name_or_number(p: &Profile, w: &str) -> bool {
     let stem = w.strip_suffix("'s").unwrap_or(w);
-    p.is_proper_noun(stem)
+    matches!(w, "url" | "user")
+        || p.is_proper_noun(stem)
         || w.chars().any(|c| c.is_ascii_digit())
         || (w.chars().count() == 1 && w != "i" && w != "a")
 }
