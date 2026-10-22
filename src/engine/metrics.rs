@@ -233,7 +233,50 @@ const CORE: &[Core] = &[
     ("llm_tells_per_1k", "stock LLM words and phrases per 1k words", Unit::Per1k,
      "",
      "cut the stock LLM phrasing; say it the author's way"),
+    // Typography: how the author sets type. Blind readers spot straight
+    // quotes against a book set in curly ones before they read a word.
+    ("curly_quote_share", "curly share of double quotes (\u{201C} \u{201D} vs \")", Unit::Share,
+     "set double quotes curly: \u{201C} to open, \u{201D} to close",
+     "set double quotes straight: \""),
+    ("curly_apostrophe_share", "curly share of apostrophes (\u{2019} vs ')", Unit::Share,
+     "set apostrophes curly: don\u{2019}t, it\u{2019}s",
+     "set apostrophes straight: don't, it's"),
+    // Mechanics: the slips and doubled marks of a real hand.
+    ("double_punct_per_1k", "doubled marks (!!, ??, ?!, ..) per 1k words", Unit::Per1k,
+     "double a mark where the author would (!!, ..)",
+     "cut doubled marks (!!, ??, ..)"),
+    ("space_before_punct_per_1k", "spaces before , . ! ? : ; per 1k words", Unit::Per1k,
+     "put a space before ! ? : as the author does",
+     "remove the space before the punctuation mark"),
+    ("nonword_per_1k", "words outside the English word list (typos, coinages) per 1k words", Unit::Per1k,
+     "",
+     ""),
+    // Polish: the tidy beats blind readers name first in imitations.
+    ("short_triplets_per_1k", "runs of 3+ short sentences (6 words or fewer) per 1k words", Unit::Per1k,
+     "",
+     "break up runs of short sentences: join two, or let one run on with a clause"),
+    ("anaphora_runs_per_1k", "runs of sentences opening the same way per 1k words", Unit::Per1k,
+     "",
+     "vary the openings: no run of sentences starting with the same word"),
+    ("mirror_pairs_per_1k", "mirrored sentence pairs (X. Not X.) per 1k words", Unit::Per1k,
+     "",
+     "say it once: cut the negated mirror of the sentence before"),
 ];
+
+/// Typography shares, and the instances the author's corpus needs before a
+/// share is judged (below that, a few stray quotes would set the band).
+/// A passage without a single quote has no quote style: its share is NaN,
+/// left out of bands and distances.
+pub const TYPOGRAPHY_KEYS: [&str; 2] = ["curly_quote_share", "curly_apostrophe_share"];
+pub const TYPOGRAPHY_MIN_INSTANCES: usize = 20;
+
+/// Measures where only "too many" is off-voice: fewer stock phrases or
+/// fewer tidy beats than the author is never a fault.
+pub const ONE_SIDED_KEYS: [&str; 4] = ["llm_tells_per_1k", "short_triplets_per_1k", "anaphora_runs_per_1k", "mirror_pairs_per_1k"];
+
+pub fn is_one_sided(key: &str) -> bool {
+    ONE_SIDED_KEYS.contains(&key)
+}
 
 /// Keys that count markdown markup. A corpus of plain .txt books has none,
 /// so these are `unmeasured` (left out of score, plan and brief) unless at
@@ -247,10 +290,13 @@ pub const MARKUP_MIN_SOURCES: f64 = 0.3;
 /// Measures computed from other measures, or too abstract to act on: they
 /// count toward the score but never become a plan step or a finding.
 /// (`llm_tells_per_1k` is acted on through the llm_tell findings, which
-/// carry the words and lines.)
-pub const DERIVED_KEYS: [&str; 7] = [
+/// carry the words and lines; the typography shares through typography
+/// findings, which carry the exact conversion. `nonword_per_1k` scores a
+/// draft that is cleaner than the author's hand, but the loop must never
+/// tell an agent to misspell.)
+pub const DERIVED_KEYS: [&str; 10] = [
     "mattr_500", "mtld", "fk_grade", "sentence_length_autocorr", "sentence_words_cv", "syllables_per_word",
-    "llm_tells_per_1k",
+    "llm_tells_per_1k", "curly_quote_share", "curly_apostrophe_share", "nonword_per_1k",
 ];
 
 pub fn is_derived(key: &str) -> bool {
@@ -273,6 +319,14 @@ pub fn family(key: &str) -> &'static str {
     if key == "llm_tells_per_1k" {
         return "tells";
     }
+    // Their own families for the same reason: two typography shares or three
+    // slips would vanish among the 40 lexis measures.
+    if TYPOGRAPHY_KEYS.contains(&key) {
+        return "typography";
+    }
+    if matches!(key, "double_punct_per_1k" | "space_before_punct_per_1k" | "nonword_per_1k") {
+        return "mechanics";
+    }
     if key.starts_with("item_")
         || key.ends_with("_per_item")
         || key.starts_with("has_")
@@ -289,7 +343,8 @@ pub fn family(key: &str) -> &'static str {
         | "commas_per_1k" => "punctuation",
         "similes_per_1k" | "which_clauses_per_1k" | "the_way_per_1k" | "and_chains_per_1k_sentences"
         | "trailing_ing_per_1k" | "not_but_per_1k" | "echo_phrases_per_1k" | "opener_i_share"
-        | "opener_the_share" | "opener_he_she_share" | "opener_and_but_share" => "constructions",
+        | "opener_the_share" | "opener_he_she_share" | "opener_and_but_share" | "short_triplets_per_1k"
+        | "anaphora_runs_per_1k" | "mirror_pairs_per_1k" => "constructions",
         k if MARKUP_KEYS.contains(&k) || k == "opening_paragraph_words" || k == "digits_per_1k" => "structure",
         _ => "lexis",
     }
@@ -819,6 +874,247 @@ pub fn strip_links(p: &str) -> String {
     lines.join("\n")
 }
 
+// ── Typography, mechanics and polish ─────────────────────────────────────────
+
+/// Double quotes in a text: (curly “ ”, straight ").
+pub fn double_quote_counts(t: &str) -> (usize, usize) {
+    let curly = t.chars().filter(|c| matches!(c, '\u{201C}' | '\u{201D}')).count();
+    (curly, t.matches('"').count())
+}
+
+/// Apostrophes inside words (don't, Ann's): (curly ’, straight '). Single
+/// quotation marks sit at word edges and are not counted.
+pub fn apostrophe_counts(t: &str) -> (usize, usize) {
+    let cs: Vec<char> = t.chars().collect();
+    let (mut curly, mut straight) = (0, 0);
+    for i in 1..cs.len().saturating_sub(1) {
+        if cs[i - 1].is_alphabetic() && cs[i + 1].is_alphabetic() {
+            match cs[i] {
+                '\'' => straight += 1,
+                '\u{2019}' => curly += 1,
+                _ => {}
+            }
+        }
+    }
+    (curly, straight)
+}
+
+/// Every in-word apostrophe's byte offset and whether it is curly.
+pub fn apostrophes_at(t: &str) -> Vec<(usize, bool)> {
+    let cs: Vec<(usize, char)> = t.char_indices().collect();
+    (1..cs.len().saturating_sub(1))
+        .filter(|&i| matches!(cs[i].1, '\'' | '\u{2019}') && cs[i - 1].1.is_alphabetic() && cs[i + 1].1.is_alphabetic())
+        .map(|i| (cs[i].0, cs[i].1 == '\u{2019}'))
+        .collect()
+}
+
+/// Ellipsis forms in a text, in order, with byte offsets: "…", "...",
+/// ". . ." or ".." (the two-dot joiner of casual posts).
+pub fn ellipsis_forms(t: &str) -> Vec<(&'static str, usize)> {
+    let cs: Vec<(usize, char)> = t.char_indices().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < cs.len() {
+        let (at, c) = cs[i];
+        if c == '\u{2026}' {
+            out.push(("\u{2026}", at));
+            i += 1;
+            continue;
+        }
+        if c != '.' {
+            i += 1;
+            continue;
+        }
+        let run = cs[i..].iter().take_while(|x| x.1 == '.').count();
+        let spaced = run == 1
+            && cs.get(i + 1..i + 5).is_some_and(|w| w[0].1 == ' ' && w[1].1 == '.' && w[2].1 == ' ' && w[3].1 == '.');
+        if spaced {
+            out.push((". . .", at));
+            i += 5;
+            continue;
+        }
+        match run {
+            2 => out.push(("..", at)),
+            r if r >= 3 => out.push(("...", at)),
+            _ => {}
+        }
+        i += run;
+    }
+    out
+}
+
+/// Dash forms in a text, in order, with byte offsets: "—" (closed em dash),
+/// " — " (spaced), "--", " - " (a spaced hyphen used as a dash) and "–" (an
+/// en dash outside a number range). A list marker ("- item") is no dash.
+/// The text's edges count as spaces: a hard-wrapped line that starts or
+/// ends on a dash is spaced.
+pub fn dash_forms(t: &str) -> Vec<(&'static str, usize)> {
+    let cs: Vec<(usize, char)> = t.char_indices().collect();
+    let space = |j: Option<&(usize, char)>| j.is_none_or(|x| x.1.is_whitespace());
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < cs.len() {
+        let (at, c) = cs[i];
+        let prev = i.checked_sub(1).and_then(|j| cs.get(j));
+        match c {
+            '\u{2014}' => {
+                let run = cs[i..].iter().take_while(|x| x.1 == '\u{2014}').count();
+                let spaced = space(prev) && space(cs.get(i + run));
+                out.push((if spaced { " \u{2014} " } else { "\u{2014}" }, at));
+                i += run;
+                continue;
+            }
+            '\u{2013}' => {
+                let digit = |x: Option<&(usize, char)>| x.is_some_and(|x| x.1.is_ascii_digit());
+                if !(digit(prev) && digit(cs.get(i + 1))) {
+                    out.push(("\u{2013}", at));
+                }
+            }
+            '-' => {
+                let run = cs[i..].iter().take_while(|x| x.1 == '-').count();
+                let next = cs.get(i + run);
+                let after_word = i >= 2 && !cs[i - 2].1.is_whitespace();
+                if run == 2 {
+                    out.push(("--", at));
+                } else if run == 1 && prev.is_some_and(|p| p.1 == ' ') && space(next) && after_word {
+                    out.push((" - ", at));
+                }
+                i += run;
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Doubled marks, by byte offset: any run of two or more ! and ? ("!!",
+/// "?!", "??") and the two-dot "..", which is not an ellipsis.
+pub fn double_punct(t: &str) -> Vec<usize> {
+    let cs: Vec<(usize, char)> = t.char_indices().collect();
+    let mark = |c: char| matches!(c, '.' | '!' | '?');
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < cs.len() {
+        if !mark(cs[i].1) {
+            i += 1;
+            continue;
+        }
+        let run = cs[i..].iter().take_while(|x| mark(x.1)).count();
+        let bangs = cs[i..i + run].iter().filter(|x| x.1 != '.').count();
+        if bangs >= 2 || run - bangs == 2 {
+            out.push(cs[i].0);
+        }
+        i += run;
+    }
+    out
+}
+
+/// A space between a word and , . ! ? : ; ("thanks !", "so , then"), by
+/// byte offset: a typing habit, often of writers whose first language
+/// spaces them. Ellipses (" ..."), emoticons (" :)"), decimals (" .5") and
+/// domains (" .com") don't count.
+pub fn space_before_punct(t: &str) -> Vec<usize> {
+    let cs: Vec<(usize, char)> = t.char_indices().collect();
+    let mut out = Vec::new();
+    for i in 2..cs.len() {
+        let c = cs[i].1;
+        if !matches!(c, ',' | '.' | '!' | '?' | ':' | ';') || cs[i - 1].1 != ' ' || !cs[i - 2].1.is_alphanumeric() {
+            continue;
+        }
+        let next = cs.get(i + 1).map(|x| x.1);
+        let emoticon = matches!(c, ':' | ';') && next.is_some_and(|n| ")(DPpO/|3*-".contains(n));
+        let not_a_stop = c == '.' && next.is_some_and(|n| n == '.' || n.is_alphanumeric());
+        if !emoticon && !not_a_stop {
+            out.push(cs[i].0);
+        }
+    }
+    out
+}
+
+/// An alphabetic word of 3+ letters outside the English frequency table: a
+/// typo ("explicitely"), a coinage, slang the table lacks. Capitalised words
+/// and `names` (the author's proper nouns, lowercase, sorted) are names,
+/// not slips. Common misspellings ("alot", "untill") are in the table.
+pub fn is_nonword(cased: &str, names: &[String]) -> bool {
+    if cased.chars().count() < 3
+        || !cased.chars().all(char::is_alphabetic)
+        || cased.chars().next().is_some_and(char::is_uppercase)
+        || text::is_placeholder(cased)
+    {
+        return false;
+    }
+    let lower = cased.to_lowercase();
+    lexicon::zipf(&lower).is_none() && names.binary_search(&lower).is_err()
+}
+
+/// Sentences of this many words or fewer are beats.
+pub const BEAT_WORDS: usize = 6;
+
+/// Runs of tidy beats in a sequence of sentences (each as word tokens), as
+/// (first sentence, sentences in the run).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Polish {
+    /// 3+ consecutive sentences of `BEAT_WORDS` words or fewer, once per run.
+    pub triplets: Vec<(usize, usize)>,
+    /// 3+ consecutive sentences opening with the same word, or 2+ with the
+    /// same two words ("Same booth. Same dinner. Same kiss."), once per run.
+    pub anaphora: Vec<(usize, usize)>,
+    /// Adjacent sentences sharing 60%+ of their words, exactly one negated
+    /// ("I want him to. I don't want him to."): (first, 2).
+    pub mirrors: Vec<(usize, usize)>,
+}
+
+fn is_negator(t: &str) -> bool {
+    is_negation(t) || matches!(t, "never" | "no" | "nothing" | "nobody" | "none" | "nowhere")
+}
+
+/// Two adjacent sentences that say the same thing, once with a negation.
+pub fn is_mirror(a: &[String], b: &[String]) -> bool {
+    let negated = |s: &[String]| s.iter().any(|t| is_negator(t));
+    if a.len() < 3 || b.len() < 3 || negated(a) == negated(b) {
+        return false;
+    }
+    let core = |s: &[String]| -> std::collections::HashSet<String> {
+        s.iter().filter(|t| !is_negator(t)).cloned().collect()
+    };
+    let (x, y) = (core(a), core(b));
+    let union = x.union(&y).count();
+    union > 0 && x.intersection(&y).count() as f64 / union as f64 >= 0.6
+}
+
+pub fn polish(sents: &[Vec<String>]) -> Polish {
+    let mut p = Polish::default();
+    let mut i = 0;
+    while i < sents.len() {
+        let run = sents[i..].iter().take_while(|s| !s.is_empty() && s.len() <= BEAT_WORDS).count();
+        if run >= 3 {
+            p.triplets.push((i, run));
+        }
+        i += run.max(1);
+    }
+    let mut i = 0;
+    while i < sents.len() {
+        let Some(first) = sents[i].first() else {
+            i += 1;
+            continue;
+        };
+        let run = sents[i..].iter().take_while(|s| s.first() == Some(first)).count();
+        let two = |s: &Vec<String>| s.get(..2).map(<[String]>::to_vec);
+        if run >= 3 || (run == 2 && two(&sents[i]).is_some() && two(&sents[i]) == two(&sents[i + 1])) {
+            p.anaphora.push((i, run));
+        }
+        i += run;
+    }
+    for i in 0..sents.len().saturating_sub(1) {
+        if is_mirror(&sents[i], &sents[i + 1]) {
+            p.mirrors.push((i, 2));
+        }
+    }
+    p
+}
+
 const YOU: [&str; 9] = ["you", "your", "yours", "yourself", "yourselves", "you're", "you've", "you'll", "you'd"];
 const WE: [&str; 9] = ["we", "us", "our", "ours", "ourselves", "we're", "we've", "we'll", "we'd"];
 const THIRD_PERSON: [&str; 21] = [
@@ -838,6 +1134,12 @@ pub fn measure(paragraphs: &[String], function_words: &[String]) -> Vec<f64> {
 /// prose measures; links are counted, then stripped (`strip_links`), so the
 /// draft and the author's windows are measured on the same prose.
 pub fn measure_for(all_paragraphs: &[String], function_words: &[String], short_form: bool) -> Vec<f64> {
+    measure_named(all_paragraphs, function_words, short_form, &[])
+}
+
+/// `measure_for` knowing the author's proper nouns (lowercase, sorted),
+/// which are names, not typos, wherever they are written in lowercase.
+pub fn measure_named(all_paragraphs: &[String], function_words: &[String], short_form: bool, names: &[String]) -> Vec<f64> {
     let (mut headings, mut fences, mut quotes, mut bullets, mut numbered, mut other_paras) =
         (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
     let (mut bold, mut italic, mut links) = (0usize, 0usize, 0usize);
@@ -887,16 +1189,26 @@ pub fn measure_for(all_paragraphs: &[String], function_words: &[String], short_f
     let (mut op_i, mut op_the, mut op_hs, mut op_ab) = (0usize, 0usize, 0usize, 0usize);
     let (mut present, mut past) = (0usize, 0usize);
     let mut which = 0usize;
+    let (mut curly_q, mut straight_q, mut curly_a, mut straight_a) = (0usize, 0usize, 0usize, 0usize);
+    let (mut doubled, mut spaced, mut nonwords) = (0usize, 0usize, 0usize);
+    let mut seq: Vec<Vec<String>> = Vec::new();
 
     for p in paragraphs {
         let sents = text::sentences_for(p, short_form);
         tags += crate::engine::voice::tag_verbs_in(p).len();
+        let (cq, sq) = double_quote_counts(p);
+        let (ca, sa) = apostrophe_counts(p);
+        (curly_q, straight_q, curly_a, straight_a) = (curly_q + cq, straight_q + sq, curly_a + ca, straight_a + sa);
+        doubled += double_punct(p).len();
+        spaced += space_before_punct(p).len();
+        nonwords += text::word_tokens_cased(&text::normalize_web(p)).iter().filter(|w| is_nonword(w, names)).count();
         let mut n_sent = 0;
         for s in &sents {
             let st = text::word_tokens(s);
             if st.is_empty() {
                 continue;
             }
+            seq.push(st.clone());
             n_sent += 1;
             sent_lens.push(st.len() as f64);
             if is_and_chain(&st) {
@@ -1065,7 +1377,18 @@ pub fn measure_for(all_paragraphs: &[String], function_words: &[String], short_f
         per_1k(fences.div_ceil(2), n),
         paragraphs.first().map(|p| text::count_words(p) as f64).unwrap_or(0.0),
         per_1k(crate::engine::voice::find_tells(&tokens).len(), n),
+        if curly_q + straight_q == 0 { f64::NAN } else { share(curly_q, curly_q + straight_q) },
+        if curly_a + straight_a == 0 { f64::NAN } else { share(curly_a, curly_a + straight_a) },
+        per_1k(doubled, n),
+        per_1k(spaced, n),
+        per_1k(nonwords, n),
     ];
+    let polished = polish(&seq);
+    v.extend([
+        per_1k(polished.triplets.len(), n),
+        per_1k(polished.anaphora.len(), n),
+        per_1k(polished.mirrors.len(), n),
+    ]);
     debug_assert_eq!(v.len(), CORE.len());
     for w in function_words {
         v.push(per_1k(count(w), n));
@@ -1152,7 +1475,7 @@ fn measure_chunks(p: &Profile, idx: &[usize], fw: &[String]) -> WindowRow {
     let paras: Vec<String> = idx.iter().flat_map(|&i| p.chunks[i].paragraphs.iter().cloned()).collect();
     WindowRow {
         chunks: idx.to_vec(),
-        values: measure_for(&paras, fw, p.register.is_short_form()),
+        values: measure_named(&paras, fw, p.register.is_short_form(), &p.proper_nouns),
         weight: idx.iter().map(|&i| p.chunks[i].weight as f64).sum(),
     }
 }
@@ -1180,8 +1503,25 @@ pub fn window_rows(p: &Profile, words: usize, fw: &[String], overlap: bool) -> V
     sets.iter().map(|s| measure_chunks(p, s, fw)).collect()
 }
 
-/// Share of the author's sources whose text contains each markup key.
+/// Share of the author's sources whose text contains each markup key, and
+/// for each typography share 1 or 0: whether the corpus has the
+/// `TYPOGRAPHY_MIN_INSTANCES` quotes or apostrophes to judge it by.
 pub fn markup_presence(p: &Profile) -> HashMap<&'static str, f64> {
+    let mut out = markup_sources(p);
+    let (mut quotes, mut apostrophes) = (0usize, 0usize);
+    for para in p.chunks.iter().flat_map(|c| c.paragraphs.iter()) {
+        let (c, s) = double_quote_counts(para);
+        let (ca, sa) = apostrophe_counts(para);
+        quotes += c + s;
+        apostrophes += ca + sa;
+    }
+    let enough = |n: usize| if n >= TYPOGRAPHY_MIN_INSTANCES { 1.0 } else { 0.0 };
+    out.insert("curly_quote_share", enough(quotes));
+    out.insert("curly_apostrophe_share", enough(apostrophes));
+    out
+}
+
+fn markup_sources(p: &Profile) -> HashMap<&'static str, f64> {
     let n_src = p.sources.len().max(1);
     let mut has: HashMap<&'static str, std::collections::HashSet<u32>> = HashMap::new();
     for c in &p.chunks {
@@ -1219,14 +1559,16 @@ pub fn bands_from(p: &Profile, defs: &[Def], rows: &[&WindowRow], presence: &Has
         .enumerate()
         .map(|(j, d)| {
             let opening = d.key == "opening_paragraph_words";
+            // NaN: the window has nothing to measure (no quote to set).
             let mut pairs: Vec<(f64, f64)> = rows
                 .iter()
-                .filter(|r| !opening || r.is_opening(p))
+                .filter(|r| (!opening || r.is_opening(p)) && !r.values[j].is_nan())
                 .map(|r| (r.values[j], r.weight))
                 .collect();
             pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
             let unmeasured = presence.get(d.key.as_str()).is_some_and(|s| *s < MARKUP_MIN_SOURCES)
-                || (opening && pairs.len() < 5);
+                || (opening && pairs.len() < 5)
+                || pairs.is_empty();
             Band {
                 key: d.key.clone(),
                 label: d.label.clone(),
@@ -1306,10 +1648,10 @@ pub fn tolerance(band: &Band, window_words: usize) -> f64 {
 /// the window for rates, so the author's own text passes and real drift
 /// does not.
 pub fn status(value: f64, band: &Band, window_words: usize) -> Status {
-    if band.unmeasured {
+    if band.unmeasured || value.is_nan() {
         return Status::Unmeasured;
     }
-    if value >= band.low && value <= band.high {
+    if (value >= band.low || is_one_sided(&band.key)) && value <= band.high {
         return Status::InRange;
     }
     let tol = tolerance(band, window_words);
@@ -1400,6 +1742,65 @@ mod tests {
         assert_eq!(syllables("table"), 2);
     }
 
+    fn toks(sents: &[&str]) -> Vec<Vec<String>> {
+        sents.iter().map(|s| text::word_tokens(s)).collect()
+    }
+
+    #[test]
+    fn typography_forms_are_told_apart() {
+        assert_eq!(double_quote_counts("\u{201C}Hi,\u{201D} she said. \"Bye.\""), (2, 2));
+        // In-word apostrophes only: 'quoted' edges are quotation marks.
+        assert_eq!(apostrophe_counts("don\u{2019}t, it's, 'quoted', dogs' bowls"), (1, 1));
+        let e: Vec<&str> = ellipsis_forms("wait\u{2026} so... then. . . ok.. done.").into_iter().map(|f| f.0).collect();
+        assert_eq!(e, vec!["\u{2026}", "...", ". . .", ".."]);
+        let d: Vec<&str> = dash_forms("a\u{2014}b, a \u{2014} b, a--b, a - b, 5\u{2013}10, a \u{2013} b, ----").into_iter().map(|f| f.0).collect();
+        assert_eq!(d, vec!["\u{2014}", " \u{2014} ", "--", " - ", "\u{2013}"]);
+        assert!(dash_forms("- a list item").is_empty(), "a list marker is no dash");
+        assert_eq!(dash_forms("\u{2014} a hard-wrapped line starting on a dash")[0].0, " \u{2014} ");
+    }
+
+    #[test]
+    fn mechanics_count_doubled_marks_spacing_and_nonwords() {
+        assert_eq!(double_punct("Wow!! Really?! Hm.. ok... fine. Why??").len(), 4);
+        assert_eq!(space_before_punct("Thanks ! See you , then. Nice :) and .5 and ... ok").len(), 2);
+        assert!(is_nonword("explicitely", &[]));
+        assert!(!is_nonword("Lowen", &[]), "capitalised: a name");
+        assert!(!is_nonword("petus", &["petus".to_string()]), "the author's own name for it");
+        assert!(!is_nonword("definitely", &[]) && !is_nonword("ok", &[]) && !is_nonword("it's", &[]));
+    }
+
+    #[test]
+    fn polish_finds_beats_anaphora_and_mirrors_once_per_run() {
+        let p = polish(&toks(&[
+            "Same booth.", "Same dinner.", "Same kiss.", "Then a long sentence that runs on for a while and does not stop.",
+            "I want him to do it.", "I don't want him to do it.", "Then the door opens slowly.", "Then the light goes out.",
+        ]));
+        assert_eq!(p.triplets, vec![(0, 3)], "one run, counted once");
+        assert_eq!(p.anaphora, vec![(0, 3), (6, 2)], "3+ on one word, or 2 on the same two words");
+        assert_eq!(p.mirrors, vec![(4, 2)]);
+        let plain = polish(&toks(&["I wait.", "The rain comes down hard on the roof tonight.", "She doesn't call."]));
+        assert_eq!(plain, Polish::default());
+        assert!(!is_mirror(&text::word_tokens("It isn't him."), &text::word_tokens("It can't be him.")), "both negated");
+    }
+
+    #[test]
+    fn quoteless_passages_have_no_quote_style() {
+        let v = measure(&paras("No quotes here at all, none, just words."), &[]);
+        assert!(get(&v, "curly_quote_share").is_nan());
+        let b = Band { key: "curly_quote_share".into(), label: "x".into(), unit: Unit::Share, low: 1.0, median: 1.0, high: 1.0, family: "typography", unmeasured: false };
+        assert_eq!(status(f64::NAN, &b, 500), Status::Unmeasured);
+        assert_eq!(distance(&[f64::NAN], std::slice::from_ref(&b), 500, &|_| false), 0.0);
+        assert_eq!(distance(&[0.0], std::slice::from_ref(&b), 500, &|_| false), 9.0);
+    }
+
+    #[test]
+    fn polish_keys_are_one_sided() {
+        let b = Band { key: "short_triplets_per_1k".into(), label: "x".into(), unit: Unit::Per1k, low: 2.0, median: 3.0, high: 4.0, family: "constructions", unmeasured: false };
+        assert_eq!(status(0.0, &b, 1000), Status::InRange, "fewer tidy beats than the author is never off-voice");
+        assert_eq!(status(9.0, &b, 1000), Status::OutOfRange);
+        assert_eq!(distance(&[0.0], std::slice::from_ref(&b), 1000, &|_| false), 0.0);
+    }
+
     #[test]
     fn status_tolerates_near_misses() {
         let b = Band { key: "x".into(), label: "x".into(), unit: Unit::Share, low: 0.2, median: 0.25, high: 0.3, family: "rhythm", unmeasured: false };
@@ -1420,11 +1821,11 @@ mod tests {
 pub fn distance(values: &[f64], bands: &[Band], window_words: usize, skip: &dyn Fn(&Band) -> bool) -> f64 {
     let mut fam: Vec<(&'static str, f64, usize)> = Vec::new();
     for (v, b) in values.iter().zip(bands) {
-        if b.unmeasured || skip(b) {
+        if b.unmeasured || v.is_nan() || skip(b) {
             continue;
         }
-        // Fewer stock LLM phrases than the author is never off-voice.
-        let gap = if b.key == "llm_tells_per_1k" { (v - b.median).max(0.0) } else { (v - b.median).abs() };
+        // Fewer stock LLM phrases or tidy beats than the author is never off-voice.
+        let gap = if is_one_sided(&b.key) { (v - b.median).max(0.0) } else { (v - b.median).abs() };
         let r = (gap / tolerance(b, window_words)).min(3.0);
         match fam.iter_mut().find(|f| f.0 == b.family) {
             Some(f) => {
@@ -2344,8 +2745,66 @@ pub struct TypographyHabits {
     pub scene_breaks: Vec<(String, f64)>,
 }
 
-/// The author's typography habits. FOUNDATION STUB: the MECH lane implements it.
-pub fn typography_habits(p: &crate::engine::profile::Profile) -> TypographyHabits {
-    let _ = p;
-    TypographyHabits::default()
+/// Instances a form family needs before its shares are a habit: quotes and
+/// apostrophes as for the typography shares; dashes and ellipses are rarer
+/// (a page may hold one), scene breaks rarer still (a book holds dozens).
+const HABIT_MIN_MARKS: usize = 10;
+const HABIT_MIN_BREAKS: usize = 3;
+
+fn form_shares(counts: &[(String, usize)], min: usize) -> Vec<(String, f64)> {
+    let total: usize = counts.iter().map(|c| c.1).sum();
+    if total < min.max(1) {
+        return Vec::new();
+    }
+    let mut v: Vec<(String, f64)> = counts
+        .iter()
+        .filter(|c| c.1 > 0)
+        .map(|(k, n)| (k.clone(), (*n as f64 / total as f64 * 1000.0).round() / 1000.0))
+        .collect();
+    v.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    v
 }
+
+fn tally(forms: &mut Vec<(String, usize)>, form: &str) {
+    match forms.iter_mut().find(|f| f.0 == form) {
+        Some(f) => f.1 += 1,
+        None => forms.push((form.to_string(), 1)),
+    }
+}
+
+/// The author's typography habits, from their stored prose (list blocks
+/// skipped: their joined "- a - b" markers are not dashes) and the scene
+/// breaks counted at build. Forms are shares of their family, most used
+/// first; a family with too few marks to call a habit is empty.
+pub fn typography_habits(p: &crate::engine::profile::Profile) -> TypographyHabits {
+    let (mut cq, mut sq, mut ca, mut sa) = (0usize, 0usize, 0usize, 0usize);
+    let (mut ellipses, mut dashes): (Vec<(String, usize)>, Vec<(String, usize)>) = (Vec::new(), Vec::new());
+    for para in p.chunks.iter().flat_map(|c| c.paragraphs.iter()) {
+        if matches!(block_kind(para), Block::Bullets(_) | Block::Numbered(_) | Block::Fence | Block::Heading) {
+            continue;
+        }
+        let prose = strip_links(para);
+        let (c, s) = double_quote_counts(&prose);
+        let (c2, s2) = apostrophe_counts(&prose);
+        (cq, sq, ca, sa) = (cq + c, sq + s, ca + c2, sa + s2);
+        for (f, _) in ellipsis_forms(&prose) {
+            tally(&mut ellipses, f);
+        }
+        for (f, _) in dash_forms(&prose) {
+            tally(&mut dashes, f);
+        }
+    }
+    let pair = |c: usize, s: usize| vec![("curly".to_string(), c), ("straight".to_string(), s)];
+    let breaks: Vec<(String, usize)> = p.scene_breaks.iter().map(|(k, v)| (k.clone(), *v as usize)).collect();
+    TypographyHabits {
+        double_quotes: form_shares(&pair(cq, sq), TYPOGRAPHY_MIN_INSTANCES),
+        apostrophes: form_shares(&pair(ca, sa), TYPOGRAPHY_MIN_INSTANCES),
+        ellipses: form_shares(&ellipses, HABIT_MIN_MARKS),
+        dashes: form_shares(&dashes, HABIT_MIN_MARKS),
+        scene_breaks: form_shares(&breaks, HABIT_MIN_BREAKS),
+    }
+}
+
+/// The form the author holds at least this share of the time is a habit a
+/// draft is held to (typography findings).
+pub const TYPOGRAPHY_HABIT_SHARE: f64 = 0.8;
