@@ -25,11 +25,12 @@
 //! that ranking by how good a model each is for the piece (`fit`, 0-3: the
 //! same kind of argument or post, not shared words), judged on a short
 //! excerpt of each, with the word ranking as a quarter of the score;
-//! `topic_match` then comes from the best fit. On 8 essay and post tasks
-//! labelled by hand before JEV saw them, the top five went from NDCG@5 0.54
-//! to 0.73 and precision@3 0.38 to 0.67. Fiction keeps the word and shape
-//! ranking: on 4 scene tasks short excerpts did no better (0.50 both).
-//! Any failure keeps the word ranking.
+//! `topic_match` then comes from the best fit (a strong word match drops
+//! at most to weak). On 8 essay and post tasks labelled by hand before JEV
+//! saw them, the top five went from NDCG@5 0.54 to 0.73 and precision@3
+//! 0.38 to 0.67. Fiction keeps the word and shape ranking: on 4 scene tasks
+//! short excerpts did no better (0.50 both). Any failure keeps the word
+//! ranking.
 
 use std::collections::{HashMap, HashSet};
 
@@ -71,11 +72,16 @@ const JEV_TASK_WORDS: usize = 300;
 /// Share of the word ranking in a JEV-ranked score (eval: 0.25 beat 0.1
 /// and fit alone on NDCG@5 under all three question wordings tried).
 const JEV_LEXICAL: f64 = 0.25;
-/// Best-fit lines for `TopicMatch` (0-3 scale): in the eval 91% of passages
-/// at 2.0+ were labelled good models (similar or close), and unrelated
-/// ones sat below 0.85 three times in four.
-const FIT_STRONG: f64 = 2.0;
-const FIT_WEAK: f64 = 1.0;
+/// Best-fit lines for `TopicMatch` (0-3 scale), set on the 180-word
+/// excerpts JEV reads (they score lower than whole windows). Over 20 essay
+/// and post tasks, labelled by the best passage in their pool: where one
+/// was a similar or close piece (8), the best fit was 1.9 or more in 7;
+/// where the nearest only shared the broad subject (5), 0.94 to 1.18; where
+/// nothing was related (7), 0.71 or less. These lines get 19 of 20 right
+/// (2.0 and 1.0 got 15: "strong" missed 3 of the 8); the miss is a task
+/// whose two best passages were labelled similar but fit 0.98 and 0.71.
+const FIT_STRONG: f64 = 1.5;
+const FIT_WEAK: f64 = 0.8;
 
 /// What ordered the picks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -617,17 +623,11 @@ pub fn retrieve(p: &Profile, req: &Request) -> Retrieval {
         Ok((pool, fits)) => {
             score = fit_scores(&score, &pool, &fits);
             let best = fits.iter().flatten().copied().fold(0.0, f64::max);
-            topic_match = if best >= FIT_STRONG {
-                TopicMatch::Strong
-            } else if best >= FIT_WEAK {
-                TopicMatch::Weak
-            } else {
-                TopicMatch::None
-            };
+            topic_match = fit_match(best, topic_match);
             lexical_note = match topic_match {
                 TopicMatch::Strong => None,
                 TopicMatch::Weak => Some(
-                    "no passage is the same kind of piece as the task: these are the nearest, so take their voice, not their subject",
+                    "no passage is a close model for the task (the nearest share its broad subject, not its situation or kind of piece): take their voice, not their subject",
                 ),
                 TopicMatch::None => Some(
                     "nothing in the corpus is like the task: these passages are the least far off, so take their voice, not their subject",
@@ -724,6 +724,20 @@ fn judge_fit(n_cands: usize, pool: &[usize], excerpts: &[String], task: &str) ->
         fits[i] = f.map(|f| f.min(3.0));
     }
     Ok(fits)
+}
+
+/// `TopicMatch` from the best fit in the pool. A strong word match (two of
+/// the task's terms in one piece, beyond what random tasks reach) means the
+/// corpus does take up the subject, so JEV can lower it to weak but never
+/// to none: "nothing in the corpus is like the task" would be false.
+fn fit_match(best: f64, lexical: TopicMatch) -> TopicMatch {
+    if best >= FIT_STRONG {
+        TopicMatch::Strong
+    } else if best >= FIT_WEAK || lexical == TopicMatch::Strong {
+        TopicMatch::Weak
+    } else {
+        TopicMatch::None
+    }
 }
 
 /// Scores once JEV has judged the pool: fit (0-3) for three quarters and
@@ -1093,6 +1107,18 @@ mod tests {
         assert_eq!(quarter("Wed Oct"), None);
         assert_eq!(bare_words("lol https://t.co/x"), 1);
         assert_eq!(bare_words("@alice thanks a lot for this"), 5);
+    }
+
+    #[test]
+    fn fit_lines_and_the_word_match_floor() {
+        // Excerpt fits from the eval: a close essay task, the same-subject
+        // and unrelated tasks either side of the weak line.
+        assert_eq!(fit_match(1.92, TopicMatch::Strong), TopicMatch::Strong);
+        assert_eq!(fit_match(1.99, TopicMatch::Weak), TopicMatch::Strong);
+        assert_eq!(fit_match(0.94, TopicMatch::None), TopicMatch::Weak);
+        assert_eq!(fit_match(0.71, TopicMatch::Weak), TopicMatch::None);
+        // Shared words beyond chance: JEV lowers strong to weak, not none.
+        assert_eq!(fit_match(0.4, TopicMatch::Strong), TopicMatch::Weak);
     }
 
     #[test]

@@ -22,6 +22,8 @@ enum Mode {
     Fit,
     /// Every passage fits poorly.
     Low,
+    /// The sailing essay fits at 1.9 (similar), the rest poorly.
+    Near,
     /// 200 with a body that is not JSON.
     BadJson,
     /// Answers after the client's timeout.
@@ -95,6 +97,10 @@ fn answer(mut s: TcpStream, mode: Mode, count: &AtomicUsize, longest: &AtomicUsi
     let body = match mode {
         Mode::Fit => format!(r#"{{"answers":{{"fit":{{"type":"score","score":{}}}}},"usage":{{"input_tokens":50}}}}"#, fit_of(passage)),
         Mode::Low => r#"{"answers":{"fit":{"type":"score","score":0.4}},"usage":{"input_tokens":50}}"#.to_string(),
+        Mode::Near => {
+            let fit = if passage.contains("harbor") { 1.9 } else { 0.4 };
+            format!(r#"{{"answers":{{"fit":{{"type":"score","score":{fit}}}}}}}"#)
+        }
         Mode::BadJson => "not json".to_string(),
         Mode::Slow => {
             std::thread::sleep(Duration::from_millis(2500));
@@ -233,12 +239,46 @@ fn low_best_fit_says_nothing_fits() {
     let tmp = tempfile::tempdir().unwrap();
     blog_profile(tmp.path());
     let m = mock(Mode::Low);
-    let v = json_of(bin_jev(&m.url), tmp.path(), &["examples", "ess", "--about", TASK, "-n", "3"]);
+    // No word of the task in the corpus, and nothing fits: none.
+    let off = "A recipe for a lemon tart: oven temperatures, and how to tell when the custard has set.";
+    let v = json_of(bin_jev(&m.url), tmp.path(), &["examples", "ess", "--about", off, "-n", "3"]);
     assert_eq!(v["data"]["rank_basis"], "jev");
     assert_eq!(v["data"]["topic_match"], "none", "{v}");
     assert!(notes(&v).contains("nothing in the corpus is like the task"), "{}", notes(&v));
+}
+
+#[test]
+fn low_fit_lowers_a_word_match_to_weak_not_none() {
+    let tmp = tempfile::tempdir().unwrap();
+    blog_profile(tmp.path());
+    let lexical = json_of(bin_offline(), tmp.path(), &["examples", "ess", "--about", TASK, "-n", "3"]);
+    assert_eq!(lexical["data"]["topic_match"], "strong", "the gardening essay shares the task's words: {lexical}");
+    let m = mock(Mode::Low);
+    let v = json_of(bin_jev(&m.url), tmp.path(), &["examples", "ess", "--about", TASK, "-n", "3"]);
+    assert_eq!(v["data"]["rank_basis"], "jev");
+    // The corpus does take up the subject, so never "nothing is like it".
+    assert_eq!(v["data"]["topic_match"], "weak", "{v}");
+    assert!(notes(&v).contains("no passage is a close model"), "{}", notes(&v));
+    assert!(!notes(&v).contains("nothing in the corpus"), "{}", notes(&v));
     // With equal fits the word ranking breaks the tie.
     assert_eq!(sources(&v)[0], "gardening.md");
+}
+
+#[test]
+fn a_similar_piece_below_the_old_line_is_strong() {
+    // Excerpts score lower than whole windows: a best fit of 1.9 (an essay
+    // labelled close in the eval read 1.92) is a strong match.
+    let tmp = tempfile::tempdir().unwrap();
+    blog_profile(tmp.path());
+    let m = mock(Mode::Near);
+    let v = json_of(bin_jev(&m.url), tmp.path(), &["examples", "ess", "--about", TASK, "-n", "3"]);
+    assert_eq!(v["data"]["rank_basis"], "jev");
+    assert_eq!(v["data"]["topic_match"], "strong", "{v}");
+    assert!(!notes(&v).contains("voice, not their subject"), "{}", notes(&v));
+    // The brief passes retrieval's notes on as warnings: none here either.
+    let g = json_of(bin_jev(&m.url), tmp.path(), &["guide", "ess", "--about", TASK]);
+    assert_eq!(g["data"]["topic_match"], "strong", "{g}");
+    assert!(!g["data"]["warnings"].to_string().contains("voice, not their subject"), "{}", g["data"]["warnings"]);
 }
 
 #[test]
