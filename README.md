@@ -4,6 +4,8 @@
 
 **Capture a writer's voice. Brief an AI agent to write in it. Check every draft against it.**
 
+*Novels, non-fiction, blogs, X posts, emails, messages.*
+
 <br />
 
 [![Star this repo](https://img.shields.io/github/stars/paperfoot/stylometry-cli?style=for-the-badge&logo=github&label=%E2%AD%90%20Star%20this%20repo&color=yellow)](https://github.com/paperfoot/stylometry-cli/stargazers)
@@ -20,11 +22,12 @@
 
 ---
 
-Feed it a writer's books. It learns the habits that make the voice: the words
-they reach for and the ones they never use, which synonym they pick, how long
-their sentences run, how they punctuate, how much is dialogue. It turns those
-into a brief an agent can write from, then checks the agent's draft line by
-line and says what to change.
+Feed it a writer's books, blog posts or X archive. It learns the habits that
+make the voice: the words they reach for and the ones they never use, which
+synonym they pick, how long their sentences (or posts) run, how they
+punctuate, open and close, how much is dialogue. It turns those into a brief an
+agent can write from, with the writer's own most similar pieces as examples,
+then scores the agent's draft, says what to change and how much.
 
 [Install](#install) | [Quick start](#quick-start) | [What it measures](#what-it-measures) | [For agents](#for-agents) | [Verification](#authorship-verification) | [Validation](#validation)
 
@@ -56,18 +59,30 @@ cargo install --git https://github.com/paperfoot/stylometry-cli   # from source
 ## Quick start
 
 ```bash
-# 1. Profile a voice from a folder of .md/.txt (each file is one work)
+# 1. Profile a voice (each file is one work; the kind of writing is detected)
 stylometry profile build me --corpus ./my-novels/
+stylometry profile build me-x --corpus ./twitter-archive/data/tweets.js
 
 # 2. See what makes it distinctive
 stylometry analyze me
 
-# 3. Brief a writing agent (Markdown: ranges, word choices, exemplar passages)
-stylometry guide me -o voice-brief.md
+# 3. Brief a writing agent for the piece at hand (targets, word choices, ban
+#    list, and the writer's own passages most like it)
+stylometry guide me --about "chapter 7: the fight in the kitchen" -o brief.md
+stylometry guide me-x --about "launching our new CLI" --as post
 
-# 4. Check a draft: every off-voice word, with the alternative the writer uses
+# 4. Check the draft: a 0-100 score, a revision plan with quantities, and
+#    line-numbered findings with the writer's own alternatives
 stylometry check chapter-07.md --profile me
+stylometry check posts.md --profile me-x --as post   # posts separated by ---
 ```
+
+| Writing | Corpus | Unit of comparison |
+|---|---|---|
+| Fiction, non-fiction | `.md`/`.txt` books (epub conversions are cleaned) | passages at the draft's length; chapters as sections (POV/tense modes) |
+| Blog, essays | a folder of posts, JSON/CSV exports | windows across posts; headings, lists, openings and closings |
+| X / social | X archive (`tweets.js`), xmaster JSON, JSONL, CSV | each post, by kind (post, reply, thread part); layout, emoji, hashtags, endings |
+| Email, messages | `.eml`, DMs from an X archive, text separated by `---` | each message; greetings, sign-offs, length |
 
 Create a voice by mixing writers:
 
@@ -87,7 +102,9 @@ stylometry check chapter-07.md --profile target --strict   # exit 5 if it fails:
 | **Rhythm** | Sentence length (mean, median, spread, share of fragments and long sentences), paragraph length, one-sentence paragraphs |
 | **Texture** | Punctuation per 1,000 words, dialogue share and tags, contractions, questions, similes, *which* clauses, *and*-chains, sentence openers, lexical diversity |
 | **Machine tells** | LLM-typical words and structures (*delve*, *a testament to*, "not X, but Y", trailing *-ing* clauses), flagged only when the writer doesn't use them |
-| **Copying** | Any 8-word run shared with the writer's own text: imitate the voice, never the lines |
+| **Posts** | Length and layout (one line, line-per-sentence, blocks), openers, endings, emoji and hashtags (which, where, how often), casing, links and mentions, what the writer never does (citing counts) |
+| **Structure** | Headings and lists (blogs), opening and closing paragraphs, narrative mode per chapter (fiction) |
+| **Copying** | Any long run shared with the writer's own text is a hard failure; the writer's recurring formulas are exempt and listed as signature phrasing |
 
 Targets are measured at the length you're checking. A 1,200-word scene is
 compared to 1,200-word passages of the writer, not to whole-book averages,
@@ -103,9 +120,14 @@ the skill to Claude Code and other agent platforms.
 
 The loop an agent runs:
 
-1. `guide <voice>` → write the draft from the brief
-2. `check draft.md -p <voice>` → revise the flagged lines (hard failures first)
-3. repeat until `check` passes
+1. `guide <voice> --about "<the piece>"` (and `examples` for more) → draft
+2. `check draft.md -p <voice>` → follow the `plan` (hard failures first)
+3. re-check until it passes; `--verify` on the final pass adds authorship
+
+`check` reports `score` (how typical of the writer the draft is at its length:
+50 is as typical as the writer's median passage), a `plan` of the revisions
+worth most ("merge about 9 of your 31 fragments", "add 2-4 questions"), and
+grouped `findings` with line numbers. `--strict` exits 5 on failure, for gates.
 
 `export <voice> -o train.jsonl` writes the writer's passages as fine-tuning
 pairs. Fine-tuning on a writer's own text is the strongest documented way to
