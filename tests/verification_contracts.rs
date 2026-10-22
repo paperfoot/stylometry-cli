@@ -268,13 +268,12 @@ fn posts(vocab: &[&str], n: usize, seed: usize) -> String {
         .join("\n---\n")
 }
 
-/// A social profile `x` of 400 vocab-A posts in two files, plus three
-/// long-form imposters.
+/// A social profile `x` of 450 undated vocab-A posts (its sources are
+/// 200-item blocks), plus three long-form imposters.
 fn social_and_imposters(data: &Path, corpus: &Path) {
     let dir = corpus.join("x");
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("2025.txt"), posts(&VOCAB_A, 200, 0)).unwrap();
-    std::fs::write(dir.join("2026.txt"), posts(&VOCAB_A, 200, 1)).unwrap();
+    std::fs::write(dir.join("posts.txt"), posts(&VOCAB_A, 450, 0)).unwrap();
     bin()
         .env("STYLOMETRY_DATA_DIR", data)
         .args(["profile", "build", "x", "--register", "social", "--corpus"])
@@ -298,7 +297,7 @@ fn social_profile_calibrates_on_pooled_posts_and_compare_pools_a_batch() {
     let d = &j["data"];
     assert_eq!(d["register"], "social");
     assert_eq!(d["unit"], "pooled posts");
-    assert_eq!(d["cross_work"], true, "two sources: held out across them");
+    assert_eq!(d["cross_work"], true, "three 200-item blocks: held out across them");
     let bands: Vec<u64> = d["bands"].as_array().unwrap().iter().map(|b| b["words"].as_u64().unwrap()).collect();
     assert_eq!(bands[0], 250);
     assert!(bands.iter().all(|w| [250, 500, 1000].contains(w)), "{bands:?}");
