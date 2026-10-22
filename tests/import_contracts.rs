@@ -401,3 +401,27 @@ fn blank_line_lowercase_posts_stay_separate_items() {
     let p = build(&tmp.path().join("store"), &f, "blank", &["--register", "social"]);
     assert_eq!(items(&p).len(), 24);
 }
+
+#[test]
+fn lone_tweets_js_reads_the_archives_other_parts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data = tmp.path().join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let part = |base: u64, n: usize, year: u32| -> String {
+        let rows: Vec<Value> = (0..n)
+            .map(|i| {
+                let mut t = tweet(base + i as u64, &post(i), json!({}));
+                t["tweet"]["created_at"] = json!(format!("Wed Oct {:02} 20:19:24 +0000 {year}", 1 + i % 28));
+                t
+            })
+            .collect();
+        ytd("tweets", &Value::Array(rows))
+    };
+    std::fs::write(data.join("tweets.js"), part(1000, 21, 2024)).unwrap();
+    std::fs::write(data.join("tweets-part1.js"), part(2000, 30, 2019)).unwrap();
+    std::fs::write(data.join("tweets-part2.js"), part(3000, 30, 2016)).unwrap();
+    let p = build(&tmp.path().join("store"), &data.join("tweets.js"), "t", &[]);
+    assert_eq!(items(&p).len(), 81, "tweets.js alone must not drop tweets-part1/2.js");
+    let sources: Vec<&str> = p["sources"].as_array().unwrap().iter().map(|s| s["name"].as_str().unwrap()).collect();
+    assert_eq!(sources, ["2016-Q4", "2019-Q4", "2024-Q4"]);
+}

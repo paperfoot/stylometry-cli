@@ -71,6 +71,10 @@ pub struct ImportReport {
     /// text from `note-tweet.js`.
     #[serde(skip_serializing_if = "is_zero")]
     pub note_tweets_merged: usize,
+    /// Archive parts read alongside a `tweets.js` passed on its own
+    /// (`tweets-part1.js`, ...: the rest of the same history).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub also_read: Vec<String>,
 }
 
 /// Items dropped, by reason.
@@ -108,20 +112,35 @@ pub fn read_corpus(path: &Path) -> Result<Corpus, AppError> {
 /// keeps the blank-line boundaries of .md/.txt files (see `clean_plain`).
 pub fn read_corpus_as(path: &Path, register: Option<Register>) -> Result<Corpus, AppError> {
     let single = path.is_file();
-    let files = list_files(path)?;
-    let root = if single { path.parent().unwrap_or(Path::new(".")) } else { path };
+    let mut files = list_files(path)?;
+    let root = if single {
+        path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."))
+    } else {
+        path
+    };
 
     // Archive context: the owner's account and the full text of long posts
     // live in sibling files of tweets.js.
     // A file passed alone looks only at its direct siblings (not a walk of
     // the whole folder it happens to sit in).
     let context_files: Vec<PathBuf> = if single {
-        std::fs::read_dir(root)
+        let mut v: Vec<PathBuf> = std::fs::read_dir(root)
             .map(|rd| rd.filter_map(Result::ok).map(|e| e.path()).filter(|p| p.is_file()).collect())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        v.sort();
+        v
     } else {
         files.clone()
     };
+    let mut report = ImportReport::default();
+    // A big account's history is split over tweets.js, tweets-part1.js, ...:
+    // passing tweets.js alone must not silently drop the older parts.
+    if single && is_tweets_file(&base_name(path)) {
+        for f in context_files.iter().filter(|f| is_tweets_file(&base_name(f)) && base_name(f) != base_name(path)) {
+            report.also_read.push(base_name(f));
+            files.push(f.clone());
+        }
+    }
     let account = context_files
         .iter()
         .find(|f| base_name(f) == "account.js")
@@ -138,10 +157,7 @@ pub fn read_corpus_as(path: &Path, register: Option<Register>) -> Result<Corpus,
     let want_dms = has_dm_files && (register == Some(Register::Message) || (single && is_dm_file(&base_name(path))));
     let short_form = register.is_some_and(Register::is_short_form);
 
-    let mut report = ImportReport {
-        account: account.as_ref().and_then(|a| a.username.as_ref().map(|u| format!("@{u}"))),
-        ..ImportReport::default()
-    };
+    report.account = account.as_ref().and_then(|a| a.username.as_ref().map(|u| format!("@{u}")));
     let mut docs: Vec<Doc> = Vec::new();
     // Structured files are read first and filtered across files at the end
     // (dominant author, duplicate ids, self-replies need the whole corpus).
@@ -259,7 +275,7 @@ pub fn read_corpus_as(path: &Path, register: Option<Register>) -> Result<Corpus,
         }
         return Err(AppError::input(
             why,
-            "Supported: .md/.txt prose, an unzipped X archive (data/tweets.js), xmaster/JSON/JSONL/CSV exports with a text column, .eml",
+            "Supported: .md/.txt prose, an unzipped X archive (pass its data/ folder), xmaster/JSON/JSONL/CSV exports with a text column, .eml",
         ));
     }
     let long_form = out.docs.iter().any(|d| d.items.is_empty());
@@ -1506,5 +1522,28 @@ mod tests {
         // Without a register a .txt is prose, and broken paragraphs are repaired.
         let c = read_corpus(&f).unwrap();
         assert_eq!(text::paragraphs(&c.docs[0].text).len(), 1);
+    }
+
+    fn ytd(name: &str, v: &Value) -> String {
+        format!("window.YTD.{name}.part0 = {v}")
+    }
+
+    #[test]
+    fn lone_tweets_file_reads_its_sibling_parts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let part = |base: usize, year: u32| -> String {
+            let rows: Vec<Value> = (0..3)
+                .map(|i| serde_json::json!({"tweet": {"id_str": (base + i).to_string(), "full_text": format!("post {} from {year} about the fence", base + i), "created_at": format!("Wed Oct 10 20:19:24 +0000 {year}")}}))
+                .collect();
+            ytd("tweets", &Value::Array(rows))
+        };
+        let f = write(tmp.path(), "data/tweets.js", &part(100, 2024));
+        write(tmp.path(), "data/tweets-part1.js", &part(200, 2019));
+        write(tmp.path(), "data/tweets-part2.js", &part(300, 2016));
+        let c = read_corpus(&f).unwrap();
+        assert_eq!(c.report.items, 9);
+        assert_eq!(c.report.also_read, ["tweets-part1.js", "tweets-part2.js"]);
+        assert_eq!(c.docs.len(), 1, "the parts are one source");
+        assert!(c.docs[0].items[0].meta.date.as_deref().unwrap().starts_with("2016"), "time order across parts");
     }
 }
