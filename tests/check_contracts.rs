@@ -190,6 +190,55 @@ fn markup_the_corpus_never_uses_is_unmeasured() {
 }
 
 #[test]
+fn the_copy_guard_fails_lifted_lines_not_idioms_or_thank_you_names() {
+    let data = tempfile::tempdir().unwrap();
+    let corpus = tempfile::tempdir().unwrap();
+    // Each of these occurs once in the corpus; the names recur so the
+    // profile knows them as names.
+    let once = "And I'd be lying if I said I wasn't scared of the dark.\n\n\
+                The gargoyles leered down at the rain-slick cobblestones below us.\n\n\
+                We sat in the car for a long time and nobody said a word about it.\n\n\
+                Thanks to Trevor Blackwell, Jessica Livingston and Robert Morris for reading drafts of this.\n\n"
+        .to_string()
+        + &"I had lunch with Jessica Livingston and we talked about the work for a while.\n\n\
+            Later that week Robert Morris said the plan was fine and the rest could wait.\n\n"
+            .repeat(5);
+    for (i, seed) in [11u64, 22, 33].iter().enumerate() {
+        let mut t = author_prose(*seed, 9000);
+        if i == 0 {
+            t.push_str(&once);
+        }
+        std::fs::write(corpus.path().join(format!("book{i}.txt")), t).unwrap();
+    }
+    let out = bin(data.path())
+        .args(["profile", "build", "ann", "--register", "fiction", "--corpus"])
+        .arg(corpus.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    let draft = "And I'd be lying if I said I wasn't sure.\n\n\
+                 The gargoyles leered down at the rain-slick cobblestones again.\n\n\
+                 We sat in the car for a long time and nobody said a word about it.\n\n\
+                 Thanks to Sam Altman, Jessica Livingston and Robert Morris for reading drafts of this.\n";
+    let j = check_text(data.path(), "ann", draft, &[]);
+    let copies: Vec<&Value> = j["data"]["findings"].as_array().unwrap().iter().filter(|f| f["kind"] == "copy_overlap").collect();
+    let find = |key: &str| copies.iter().find(|f| f["key"].as_str().unwrap().starts_with(key)).copied();
+    // A common idiom met once in the corpus is a soft note, not a failure.
+    let idiom = find("and i'd be lying").expect("the shared idiom is still noted");
+    assert_eq!(idiom["hard"], false, "an idiom is not a lifted line: {idiom}");
+    assert!(idiom["message"].as_str().unwrap().contains("common words"));
+    assert_eq!(find("the gargoyles leered").expect("rare-word run flagged")["hard"], true);
+    assert_eq!(find("we sat in the").expect("12+ word run flagged")["hard"], true);
+    assert!(
+        !copies.iter().any(|f| f.to_string().contains("Livingston")),
+        "a thank-you line of names is not copying: {copies:?}"
+    );
+    let plan = j["data"]["plan"][0]["action"].as_str().unwrap();
+    assert!(plan.starts_with("Rewrite 2 passage(s)"), "only the lifted lines are rewrite steps: {plan}");
+}
+
+#[test]
 fn adding_links_does_not_move_punctuation_rates_or_point_at_url_lines() {
     let data = tempfile::tempdir().unwrap();
     let corpus = tempfile::tempdir().unwrap();

@@ -506,11 +506,40 @@ fn guard_index(guards: &[&Profile], n: usize) -> HashMap<u64, (usize, u8, u32)> 
     idx
 }
 
+/// A run of words the draft shares with a guarded profile's text.
+struct Run {
+    /// Tokens in the run.
+    len: usize,
+    /// Tokens that aren't names: "Jessica Livingston and Robert Morris for
+    /// reading drafts" is a thank-you line, not lifted phrasing.
+    phrasing: usize,
+    /// Non-name words rarer than general English's top ~20k
+    /// (`RARE_ZIPF`): what makes a run someone's line, not an idiom.
+    rare: usize,
+    /// 1-based line of its first word.
+    line: usize,
+}
+
+/// Zipf below which a word is rare in general English (~3 per million:
+/// "drafts" 3.6 and "stare" 3.9 are common; "tapestry" 3.2 is not).
+const RARE_ZIPF: f32 = 3.5;
+/// A shared run this long is a lifted line whatever its words.
+pub const COPY_HARD_WORDS: usize = 12;
+
+/// Long-form: 12+ words of phrasing, or 8+ with two rare words, is a lifted
+/// line; 8–11 common words ("and I'd be lying if I said I") are an idiom
+/// the author's own unseen chapter shares with their books, so only a soft
+/// note; runs that are mostly names are no finding at all.
+fn long_copy_verdict(r: &Run) -> Option<bool> {
+    (r.phrasing >= COPY_NGRAM).then_some(r.phrasing >= COPY_HARD_WORDS || r.rare >= 2)
+}
+
 /// Runs of `n`+ words shared with the guarded text. The author's own
 /// formulas (runs in 3+ of their passages or posts: "new episode of the pod
-/// is out") are signature phrasing, not copying, and are exempt. `hard`
-/// decides from the run's length and first line whether it fails.
-fn copy_hits(d: &Draft, guards: &[&Profile], n: usize, hard: &dyn Fn(usize, usize) -> bool) -> Vec<Hit> {
+/// is out") are signature phrasing, not copying, and are exempt. `verdict`
+/// decides from the run whether it fails (true), is a soft note (false),
+/// or is no finding (None).
+fn copy_hits(d: &Draft, guards: &[&Profile], n: usize, verdict: &dyn Fn(&Run) -> Option<bool>) -> Vec<Hit> {
     if d.tokens.len() < n {
         return Vec::new();
     }
@@ -519,6 +548,7 @@ fn copy_hits(d: &Draft, guards: &[&Profile], n: usize, hard: &dyn Fn(usize, usiz
         let &(owner, seen, _) = idx.get(&ngram_hash(&d.tokens[i..i + n]))?;
         (owner != 0 || seen < 3).then_some(owner)
     };
+    let draft_names = d.names();
     let mut out = Vec::new();
     let mut i = 0;
     while i + n <= d.tokens.len() {
@@ -530,19 +560,44 @@ fn copy_hits(d: &Draft, guards: &[&Profile], n: usize, hard: &dyn Fn(usize, usiz
         while end < d.tokens.len() && copied(end + 1 - n).is_some() {
             end += 1;
         }
-        let len = end - i;
-        let line = d.token_line[i] + 1;
-        let is_hard = hard(len, line);
+        let is_name = |w: &String| {
+            guards[owner].is_proper_noun(w) || (draft_names.contains(w) && lexicon::zipf(w).is_none_or(|z| z < 4.0))
+        };
+        let words = &d.tokens[i..end];
+        let run = Run {
+            len: end - i,
+            phrasing: words.iter().filter(|w| !is_name(w)).count(),
+            rare: words
+                .iter()
+                .filter(|w| !is_name(w) && w.chars().all(|c| c.is_alphabetic() || c == '-'))
+                .filter(|w| lexicon::zipf(w).is_none_or(|z| z < RARE_ZIPF))
+                .count(),
+            line: d.token_line[i] + 1,
+        };
+        let Some(is_hard) = verdict(&run) else {
+            i = end;
+            continue;
+        };
+        let len = run.len;
+        let stock = !is_hard && run.rare < 2;
         let mut h = Hit::new(
             "copy_overlap",
             d.tokens[i..i + n.min(4)].join(" "),
-            Some(line),
-            format!("{len} consecutive words match {}'s own text", guards[owner].name),
-            "Rewrite this passage in new words: imitate the author's mechanisms, never their lines".into(),
+            Some(run.line),
+            if stock {
+                format!("{len} consecutive words match {}'s own text, all of them common words: a stock phrase, not a lifted line", guards[owner].name)
+            } else {
+                format!("{len} consecutive words match {}'s own text", guards[owner].name)
+            },
+            if stock {
+                "Keep it if it is your own phrasing; reword it only if it came from the author's text".into()
+            } else {
+                "Rewrite this passage in new words: imitate the author's mechanisms, never their lines".into()
+            },
         );
         h.excerpt = d.cased[i..end.min(i + 25)].join(" ");
         h.hard = is_hard;
-        h.severity = if is_hard { 1000.0 + len as f64 } else { 70.0 };
+        h.severity = if is_hard { 1000.0 + len as f64 } else if stock { 20.0 } else { 70.0 };
         out.push(h);
         i = end;
     }
@@ -1279,7 +1334,7 @@ fn check_long(target: &Profile, guards: &[&Profile], avoid: &[String], draft_tex
         let mut g = vec![target];
         g.extend(guards.iter().copied());
         g
-    }, COPY_NGRAM, &|_, _| true);
+    }, COPY_NGRAM, &long_copy_verdict);
     hits.extend(avoid_hits(&d, avoid, &lx.concepts));
     hits.extend(metric_hits(&rows, &ranges.defs, words));
     hits.extend(tell_hits(&d, &lx.rates, &lx.concepts));
@@ -1543,7 +1598,7 @@ fn check_short(target: &Profile, guards: &[&Profile], avoid: &[String], draft_te
     let item_words_at = |line: usize| {
         items.iter().zip(&measured).find(|((_, l), _)| line >= l[0] && line <= l[1]).map(|(_, m)| m.get("item_words")).unwrap_or(words as f64)
     };
-    hits.extend(copy_hits(&d, &guarded, COPY_NGRAM_SHORT, &|len, line| len >= 10 || len as f64 >= 0.5 * item_words_at(line)));
+    hits.extend(copy_hits(&d, &guarded, COPY_NGRAM_SHORT, &|r| Some(r.len >= 10 || r.len as f64 >= 0.5 * item_words_at(r.line))));
     hits.extend(avoid_hits(&d, avoid, &lx.concepts));
     hits.extend(tell_hits(&d, &lx.rates, &lx.concepts));
     hits.extend(with_evidence(word_hits(&d, target, &lx.concepts, &lx.avoided)));
