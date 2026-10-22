@@ -892,9 +892,21 @@ fn structure_hits(d: &Draft, rows: &[MetricRow]) -> Vec<Hit> {
 
 /// A structure finding with lines makes the bare metric finding for the
 /// same measure redundant.
+/// Likewise a word flagged as off-voice (with the author's replacement)
+/// needs no second finding as an LLM tell: the word finding says both.
 fn drop_shadowed(findings: &mut Vec<Finding>) {
     let shown: HashSet<String> = findings.iter().filter(|f| f.kind == "structure").map(|f| f.key.clone()).collect();
     findings.retain(|f| !(f.kind == "metric_out_of_range" && shown.contains(&f.key)));
+    let tells: HashSet<String> = findings.iter().filter(|f| f.kind == "llm_tell").map(|f| f.key.clone()).collect();
+    let mut merged: HashSet<String> = HashSet::new();
+    for f in findings.iter_mut() {
+        if matches!(f.kind, "off_voice_word" | "synonym_variation") && tells.contains(&f.key) {
+            f.message.push_str("; it is also a stock LLM word");
+            f.severity += 15.0;
+            merged.insert(f.key.clone());
+        }
+    }
+    findings.retain(|f| !(f.kind == "llm_tell" && merged.contains(&f.key)));
 }
 
 /// The two-sentence "It's not X. It's Y." frame starting at pair[0].
@@ -1078,9 +1090,30 @@ fn metric_plan(rows: &[MetricRow], defs: &[metrics::Def], d: &Draft, c: &Counts,
 /// Plan steps for hard failures and word choices, from the findings.
 fn finding_steps(findings: &[Finding]) -> Vec<PlanStep> {
     let mut steps = Vec::new();
-    for f in findings.iter().filter(|f| f.hard) {
+    // All copied runs are one step: rewrite these lines.
+    let copies: Vec<&Finding> = findings.iter().filter(|f| f.hard && f.kind == "copy_overlap").collect();
+    if !copies.is_empty() {
+        let lines: Vec<usize> = copies.iter().flat_map(|f| f.lines.iter().copied()).collect();
+        let longest = copies.iter().map(|f| f.message.split(' ').next().unwrap_or("").parse::<usize>().unwrap_or(0)).max().unwrap_or(0);
+        steps.push(PlanStep {
+            action: format!(
+                "Rewrite {} passage(s) in new words (lines {}): imitate the author's mechanisms, never their lines",
+                lines.len(),
+                join_lines(&{
+                    let mut l = lines.clone();
+                    l.sort_unstable();
+                    l
+                })
+            ),
+            why: format!("runs of up to {longest} words match the author's own text"),
+            quantity: lines.len().to_string(),
+            lines,
+            hard: true,
+            order: 2000.0,
+        });
+    }
+    for f in findings.iter().filter(|f| f.hard && f.kind != "copy_overlap") {
         let action = match f.kind {
-            "copy_overlap" => format!("Rewrite in your own words: {}", f.message),
             "avoid_list" => format!("Remove '{}' ({})", f.key, f.suggestion),
             _ => f.suggestion.clone(),
         };
@@ -1563,6 +1596,7 @@ fn check_short(target: &Profile, guards: &[&Profile], avoid: &[String], draft_te
         batch = Some(b);
     }
     let mut findings = group(hits);
+    drop_shadowed(&mut findings);
     sort_findings(&mut findings);
 
     let habits: Vec<HabitRow> = measured
