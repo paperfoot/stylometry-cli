@@ -11,7 +11,8 @@
 //! rather than subjects. Then the author's own pieces nearest the task (see
 //! `engine::retrieve`), a passage to continue (continuation beats
 //! description for holding a voice; `--for previous_chapter.md` continues
-//! the agent's own last chapter), and the write -> check -> revise loop.
+//! the agent's own last chapter, while `--for outline.md` only picks the
+//! exemplars), and the write -> check -> revise loop.
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -538,11 +539,36 @@ fn tail_words(t: &str, words: usize) -> String {
     out.into_iter().cloned().collect::<Vec<_>>().join("\n\n")
 }
 
+/// Words of running prose in a text, and all its words, line by line
+/// (paragraphs join an outline's bullets into one): list items and
+/// headings are notes, not prose.
+fn prose_words(t: &str) -> (usize, usize) {
+    let (mut prose, mut all) = (0, 0);
+    for line in t.lines() {
+        let n = count(line);
+        all += n;
+        if !is_heading(line) && !is_list(line) {
+            prose += n;
+        }
+    }
+    (prose, all)
+}
+
+/// The `--for` file when it is text to continue (a previous chapter or a
+/// draft: 150+ words of prose, 70% or more of its words) rather than an
+/// outline or notes, which have no voice to carry on from.
+fn continued_text<'a>(c: &'a Ctxt) -> Option<&'a str> {
+    let t = c.for_text.as_deref()?;
+    let (prose, all) = prose_words(t);
+    (prose >= 150 && prose * 10 >= all * 7).then_some(t)
+}
+
 /// Continuation warm-up: the end of the agent's own previous chapter when
 /// `--for` gives one (continuity matters more than the source's text, and it
-/// carries no copy risk), else one of the author's typical passages.
+/// carries no copy risk), else one of the author's typical passages (also
+/// when `--for` is an outline).
 fn warmup(c: &Ctxt, spare: Option<&Example>, what: &str) -> Option<Section> {
-    if let Some(t) = &c.for_text {
+    if let Some(t) = continued_text(c) {
         let tail = tail_words(t, WARMUP_WORDS);
         if count(&tail) >= 50 {
             return Some(Section {
@@ -618,9 +644,10 @@ fn fiction(c: &Ctxt) -> (Vec<Section>, Vec<Example>, TopicMatch) {
     (out, picks, tm)
 }
 
-/// One more typical passage, none of the exemplars, for the warm-up.
+/// One more typical passage, none of the exemplars, for the warm-up
+/// (none needed when `--for` is text to continue).
 fn spare_passage(c: &Ctxt, shown: &[Example]) -> Option<Example> {
-    if c.for_text.is_some() {
+    if continued_text(c).is_some() {
         return None;
     }
     let mut req = Request::new(c.query.as_deref(), 1, c.kind);
@@ -1331,6 +1358,15 @@ mod tests {
         assert!(!t.contains("throughout"), "{t}");
         let t = modes_text(&modes(&[("third", "past", 0.92)]));
         assert!(t.starts_with("Narration: third person, past tense throughout (92% of the text)."), "{t}");
+    }
+
+    #[test]
+    fn outlines_are_notes_not_prose() {
+        let outline = "# Chapter 12 outline\n\n- Open in the kitchen at night; Claire is waiting up.\n- She has found the second phone.\n1. He laughs it off.";
+        assert_eq!(prose_words(outline).0, 0);
+        let mixed = "She waited up for him.\n\n- the phone\n- the glass";
+        let (prose, all) = prose_words(mixed);
+        assert_eq!((prose, all), (5, 9));
     }
 
     #[test]

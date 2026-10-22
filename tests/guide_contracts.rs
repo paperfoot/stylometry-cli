@@ -182,6 +182,34 @@ fn guide_for_previous_chapter_warms_up_from_its_end() {
     assert!(markdown(&v).contains("> The last line of my chapter is this one, about the ferry at dawn."));
 }
 
+/// An outline is the task, not text to continue: the warm-up is the
+/// author's own passage, never the outline's bullets quoted back.
+#[test]
+fn guide_for_an_outline_warms_up_from_the_author() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (data, corpus) = (tmp.path().join("data"), tmp.path().join("fic"));
+    fiction_corpus(&corpus);
+    build(&data, "fic", &corpus, "fiction");
+    let outline = tmp.path().join("outline.md");
+    std::fs::write(
+        &outline,
+        "# Chapter 12 outline\n\n\
+         - Open in the kitchen at night; she is waiting up when he comes home late from the office.\n\
+         - She has found the second phone in his coat pocket and put it on the table between them.\n\
+         - He tries to laugh it off, then gets angry, then goes quiet; she keeps her voice low.\n\
+         - Midpoint: he admits the phone is his but refuses to say who he calls on it.\n\
+         - She threatens to call the number herself; he grabs the phone and the glass falls and breaks.\n\
+         - End on her sweeping up the glass alone while he sits in the car with the engine running.\n",
+    )
+    .unwrap();
+    let v = run_json(&data, &["guide", "fic", "--for", outline.to_str().unwrap()]);
+    assert_eq!(v["data"]["task"], "for");
+    let secs = sections(&v);
+    assert!(!secs.iter().any(|s| s.contains("re-read the end of your previous text")), "{secs:?}");
+    assert!(secs.iter().any(|s| s.starts_with("Warm-up: continue this passage")), "{secs:?}");
+    assert!(!markdown(&v).contains("> - Open in the kitchen"), "outline quoted as a warm-up");
+}
+
 #[test]
 fn blog_brief_quotes_real_openings_and_closings() {
     let tmp = tempfile::tempdir().unwrap();
