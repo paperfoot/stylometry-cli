@@ -1,7 +1,7 @@
 //! Compact JSON for pipes; human output for terminals. Serialize before writing.
 //!
 //! - Terminal (TTY): colored human output
-//! - Piped/redirected: one compact JSON envelope
+//! - Piped/redirected: one compact JSON envelope (help/version stay plain text)
 //! - `--json` flag: force JSON even in terminal
 //! - `--quiet` flag: suppress human informational output, never JSON or errors
 use serde::Serialize;
@@ -136,22 +136,13 @@ pub fn print_help_json(err: clap::Error) -> Result<(), AppError> {
     }))
 }
 
-/// Wrap a clap parse error appropriately. In JSON mode, emit a structured
-/// error envelope to stderr. In human mode, print the error WITHOUT calling
-/// err.exit() — we own the exit code, not clap.
+/// Report a clap parse error through the framework (never `err.exit()`: we
+/// own the exit code). The suggestion lists the failing command's flags, or a
+/// group's subcommands, and its usage line, so the retry needs no lookup.
 pub fn print_clap_error(format: Format, err: &clap::Error) {
-    match format {
-        Format::Json => print_error(
-            format,
-            &AppError::input(
-                err.to_string().trim_end().to_string(),
-                format!("Check arguments with: {} --help", env!("CARGO_BIN_NAME")),
-            ),
-        ),
-        Format::Human => {
-            eprint!("{err}");
-        }
-    }
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let (message, suggestion) = crate::cli::explain_parse_error(err, &args);
+    print_error(format, &AppError::input(message, suggestion));
 }
 
 #[cfg(test)]
@@ -174,5 +165,20 @@ mod tests {
         assert_eq!(error.error_code(), "serialization_error");
         let error = print_success_or(Ctx::new(true, false), &CannotSerialize, |_| {}).unwrap_err();
         assert_eq!(error.error_code(), "serialization_error");
+    }
+
+    #[test]
+    fn closed_output_is_an_error_without_a_panic() {
+        struct Closed;
+        impl Write for Closed {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let error = write_json(Closed, &serde_json::json!({})).unwrap_err();
+        assert_eq!(error.exit_code(), 1);
     }
 }

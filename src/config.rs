@@ -1,7 +1,7 @@
 //! Configuration loading with 3-tier precedence:
 //!   1. Compiled defaults
 //!   2. TOML config file (platform config dir / config.toml)
-//!   3. Environment variables (STYLOMETRY_*)
+//!   3. Environment variables (STYLOMETRY_*, `__` between nesting levels)
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -9,7 +9,7 @@ use crate::error::AppError;
 
 // ── Config structs ─────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppConfig {
     /// Update / distribution settings.
     pub update: UpdateConfig,
@@ -17,7 +17,7 @@ pub struct AppConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateConfig {
-    /// Enable or disable update checks/apply.
+    /// Enable or disable update checks.
     pub enabled: bool,
 
     /// Install source: auto, standalone, homebrew, cargo, cargo_binstall,
@@ -39,14 +39,6 @@ pub struct UpdateConfig {
 
     /// Optional Homebrew tap, for example owner/tap
     pub tap: String,
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            update: UpdateConfig::default(),
-        }
-    }
 }
 
 impl Default for UpdateConfig {
@@ -84,7 +76,9 @@ pub fn load() -> Result<AppConfig, AppError> {
 
     Figment::from(Serialized::defaults(AppConfig::default()))
         .merge(Toml::file(config_path()))
-        .merge(Env::prefixed(&prefix).split("_"))
+        // Double underscores separate nesting; single underscores belong to
+        // field names, e.g. STYLOMETRY_UPDATE__INSTALL_SOURCE.
+        .merge(Env::prefixed(&prefix).split("__"))
         .extract()
         .map_err(|e| AppError::Config(e.to_string()))
 }

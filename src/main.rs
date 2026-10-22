@@ -38,6 +38,9 @@ fn main() {
                 e.kind(),
                 clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
             ) {
+                // Help is read, not parsed: plain text even when piped, so an
+                // agent sees aligned columns instead of one escaped string.
+                // An explicit --json still gets the envelope.
                 if json_flag {
                     let code = match output::print_help_json(e) {
                         Ok(()) => 0,
@@ -50,6 +53,7 @@ fn main() {
                 }
                 e.exit();
             }
+            // Actual parse errors always exit 3; clap never owns the exit code.
             let format = Format::detect(json_flag);
             output::print_clap_error(format, &e);
             std::process::exit(3);
@@ -124,11 +128,7 @@ fn main() {
             BackgroundAction::Fetch { force } => commands::background::fetch(ctx, force),
             BackgroundAction::Status => commands::background::status(ctx),
         },
-        Commands::AgentInfo { command } => {
-            let _ = command;
-            commands::agent_info::run();
-            Ok(())
-        }
+        Commands::AgentInfo { command } => commands::agent_info::run(command.as_deref()),
         Commands::Skill { action } => match action {
             SkillAction::Install => commands::skill::install(ctx),
             SkillAction::Status => commands::skill::status(ctx),

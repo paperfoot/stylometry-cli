@@ -2,11 +2,36 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
+/// Root `--help` footer. Agents read --help first: the loop, real
+/// copy-pasteable examples, and where per-command detail lives.
+const HELP_FOOTER: &str = "\
+Tips:
+  • The loop: profile build -> analyze -> guide (brief the writer) -> write -> check -> revise
+  • `stylometry agent-info --command check` shows one command's flags, defaults and values
+  • Piped output is one JSON envelope; suggested follow-up commands are in metadata.next
+  • `check --strict` exits 5 when a draft fails (report in error.details): revise, don't rerun unchanged
+  • Run `stylometry background fetch` once before calibrate/compare (authorship verification)
+  • `stylometry doctor` diagnoses the data dir, outdated profiles and calibration
+
+Examples:
+  stylometry profile build ada --corpus ./ada-books/
+    Build a voice profile from a file or folder of .md/.txt (each file is one work)
+
+  stylometry guide ada -o ada-brief.md
+    Write the style brief an agent follows to draft in Ada's voice
+
+  stylometry check chapter-3.md --profile ada --strict
+    Off-voice words with Ada's preferred alternative, LLM tells, rhythm; exit 5 on failure
+
+  stylometry compare unknown.txt --profile ada
+    Was this written by Ada? P(same author) once `stylometry calibrate ada` has run";
+
 #[derive(Parser)]
 #[command(
     name = "stylometry",
     version,
-    about = "Analyse a writer's voice, brief an agent to write in it, and check drafts against it"
+    about = "Analyse a writer's voice, brief an agent to write in it, and check drafts against it",
+    after_long_help = HELP_FOOTER
 )]
 pub struct Cli {
     /// Force JSON output even in a terminal
@@ -140,16 +165,16 @@ pub enum Commands {
     },
     /// Diagnose setup: data dir, profiles, background, calibration state
     Doctor,
-    /// Distribution-aware update check/apply
+    /// Check for a newer release and show how to upgrade this install (never replaces the binary)
     Update {
-        /// Check only, don't install
+        /// Check only (both forms are read-only)
         #[arg(long)]
         check: bool,
     },
     /// Hidden: deterministic exit-code trigger for contract tests
     #[command(hide = true)]
     Contract {
-        /// Exit code to trigger (0-4)
+        /// Exit code to trigger (0-5)
         code: i32,
     },
 }
@@ -242,4 +267,132 @@ pub enum ExportFormat {
     Chat,
     /// {"prompt": preceding text, "completion": continuation}
     Completion,
+}
+
+/// A command's own arguments: no globals, hidden args, or help/version.
+pub fn own_args(command: &clap::Command) -> impl Iterator<Item = &clap::Arg> {
+    use clap::ArgAction;
+    command.get_arguments().filter(|a| {
+        !a.is_hide_set()
+            && !a.is_global_set()
+            && !matches!(
+                a.get_action(),
+                ArgAction::Help | ArgAction::HelpShort | ArgAction::HelpLong | ArgAction::Version
+            )
+    })
+}
+
+/// Longest flag or subcommand list a parse-error hint spells out; past it,
+/// the hint names the scoped `agent-info` lookup instead.
+const INLINE_LIMIT: usize = 12;
+
+/// What the command at `path` accepts, in one sentence: its flags, or the
+/// subcommands of a group, so a retry needs no lookup.
+pub fn accepts(command: &clap::Command, path: &str) -> String {
+    let bin = env!("CARGO_BIN_NAME");
+    let shown = format!("{bin} {path}").trim_end().to_string();
+    let (kind, names): (&str, Vec<String>) = if command.has_subcommands() {
+        let names = command
+            .get_subcommands()
+            .filter(|c| !c.is_hide_set() && c.get_name() != "help")
+            .map(|c| c.get_name().to_string());
+        ("Commands", names.collect())
+    } else {
+        let names = own_args(command).filter_map(|a| {
+            let long = a.get_long()?;
+            Some(match a.get_short() {
+                Some(short) => format!("-{short}/--{long}"),
+                None => format!("--{long}"),
+            })
+        });
+        ("Flags", names.collect())
+    };
+    match names.len() {
+        0 if kind == "Flags" => format!("`{shown}` takes no flags."),
+        n if n <= INLINE_LIMIT => format!("{kind} for `{shown}`: {}.", names.join(", ")),
+        _ if path.is_empty() => format!("List commands with: {bin} agent-info"),
+        _ => format!(
+            "See all {}: {bin} agent-info --command \"{path}\"",
+            kind.to_lowercase()
+        ),
+    }
+}
+
+/// A parse error as `(message, suggestion)` for the error envelope. The
+/// message is clap's text without its `error:` prefix, usage block and
+/// `--help` footer; the suggestion names what the deepest command in `args`
+/// accepts, plus its usage line. Aliases resolve to canonical names.
+pub fn explain_parse_error(err: &clap::Error, args: &[String]) -> (String, String) {
+    use clap::CommandFactory;
+    let mut root = Cli::command();
+    root.build();
+    let mut command = &root;
+    let mut path = Vec::new();
+    for arg in args {
+        if arg == "--" || !command.has_subcommands() {
+            break;
+        }
+        if let Some(sub) = command.find_subcommand(arg) {
+            path.push(sub.get_name());
+            command = sub;
+        }
+    }
+    let path = path.join(" ");
+
+    let text = err.to_string();
+    let message = if err.kind() == clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+    {
+        // clap's text here is the whole help page; say what is missing.
+        let shown = format!("{} {path}", env!("CARGO_BIN_NAME"));
+        format!("`{}` needs a subcommand", shown.trim_end())
+    } else {
+        let mut message = String::new();
+        for line in text
+            .lines()
+            .map(str::trim)
+            .take_while(|l| !l.starts_with("Usage:"))
+            .filter(|l| !l.is_empty() && !l.starts_with("For more information"))
+        {
+            if !message.is_empty() {
+                message.push_str(if message.ends_with(':') { " " } else { "; " });
+            }
+            message.push_str(line.strip_prefix("error: ").unwrap_or(line));
+        }
+        message
+    };
+
+    let mut suggestion = accepts(command, &path);
+    let usage = text.lines().find_map(|l| l.trim().strip_prefix("Usage: "));
+    if let Some(usage) = usage.filter(|_| !command.has_subcommands()) {
+        suggestion.push_str(&format!(" Usage: {usage}"));
+    }
+    (message, suggestion)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::{Arg, ArgAction, Command};
+
+    #[test]
+    fn long_flag_lists_point_at_scoped_discovery() {
+        let mut wide = Command::new("wide");
+        for i in 0..=INLINE_LIMIT {
+            let name: &'static str = format!("f{i}").leak();
+            wide = wide.arg(Arg::new(name).long(name).action(ArgAction::SetTrue));
+        }
+        assert_eq!(
+            accepts(&wide, "wide"),
+            "See all flags: stylometry agent-info --command \"wide\""
+        );
+        let narrow = Command::new("narrow").arg(Arg::new("n").long("limit").short('n'));
+        assert_eq!(
+            accepts(&narrow, "narrow"),
+            "Flags for `stylometry narrow`: -n/--limit."
+        );
+        assert_eq!(
+            accepts(&Command::new("bare"), "bare"),
+            "`stylometry bare` takes no flags."
+        );
+    }
 }

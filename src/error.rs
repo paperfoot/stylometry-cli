@@ -2,13 +2,14 @@ use std::borrow::Cow;
 
 /// Error types with semantic exit codes.
 ///
-/// Every error maps to an exit code (1-4), a machine-readable code, and a
-/// recovery suggestion that agents can follow literally. Domain errors use
+/// Every error maps to an exit code (1-4, plus the documented domain code 5
+/// for a failed `check --strict`), a machine-readable code, and a recovery
+/// suggestion that agents can follow literally. Domain errors use
 /// `AppError::input` / `AppError::setup` so the suggestion is the exact next
 /// command, not a pointer to --help.
 
 #[derive(thiserror::Error, Debug)]
-#[allow(dead_code)] // Some variants demonstrate the full exit code contract (0-4)
+#[allow(dead_code)] // Some variants demonstrate the full exit code contract (0-5)
 pub enum AppError {
     #[error("Could not serialize command output")]
     Serialization,

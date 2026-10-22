@@ -1,85 +1,111 @@
-//! Verify the semantic exit-code contract (0-4).
-//!
-//! Uses the hidden `contract` command for deterministic triggers and real
-//! commands for natural exit-code coverage.
+//! The semantic exit-code contract: 0-4 plus domain code 5 (`check --strict`
+//! failed). The hidden `contract` command triggers each deterministically;
+//! real commands cover the natural paths.
 
 use assert_cmd::Command;
+use serde_json::Value;
 
-fn bin() -> Command {
-    Command::cargo_bin("stylometry").unwrap()
+fn bin(home: &std::path::Path) -> Command {
+    let mut cmd = Command::cargo_bin("stylometry").unwrap();
+    cmd.env("HOME", home)
+        .env("STYLOMETRY_DATA_DIR", home.join("data"));
+    cmd
 }
 
-// ── Contract command: deterministic 0-4 ────────────────────────────────────
-
-#[test]
-fn contract_exit_0() {
-    bin().args(["contract", "0"]).assert().code(0);
+fn code(args: &[&str]) -> Option<i32> {
+    let tmp = tempfile::tempdir().unwrap();
+    bin(tmp.path()).args(args).output().unwrap().status.code()
 }
 
-#[test]
-fn contract_exit_1_transient() {
-    bin().args(["contract", "1"]).assert().code(1);
-}
+// ── Contract command: every documented code ────────────────────────────────
 
 #[test]
-fn contract_exit_2_config() {
-    bin().args(["contract", "2"]).assert().code(2);
-}
-
-#[test]
-fn contract_exit_3_bad_input() {
-    bin().args(["contract", "3"]).assert().code(3);
+fn contract_triggers_every_documented_code() {
+    for c in 0..=5 {
+        assert_eq!(code(&["contract", &c.to_string()]), Some(c), "contract {c}");
+    }
 }
 
 #[test]
-fn contract_exit_4_rate_limited() {
-    bin().args(["contract", "4"]).assert().code(4);
+fn exit_5_carries_the_report_and_says_not_to_retry_unchanged() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = bin(tmp.path()).args(["contract", "5"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(5));
+    assert!(out.stdout.is_empty(), "no success envelope on failure");
+    let err: Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(err["error"]["code"], "check_failed");
+    assert_eq!(err["error"]["retryable"], false);
+    assert!(err["error"]["details"].is_object());
+    assert!(
+        err["error"]["suggestion"]
+            .as_str()
+            .unwrap()
+            .contains("Revise")
+    );
+}
+
+#[test]
+fn unknown_contract_code_is_bad_input() {
+    assert_eq!(code(&["contract", "9"]), Some(3));
 }
 
 // ── Real commands: natural exit codes ──────────────────────────────────────
 
 #[test]
-fn profile_list_success_exits_0() {
+fn read_only_framework_commands_exit_0() {
+    for args in [
+        &["--help"][..],
+        &["--version"],
+        &["agent-info"],
+        &["config", "path"],
+        &["config", "show"],
+        &["profile", "list"],
+        &["doctor"],
+    ] {
+        assert_eq!(code(args), Some(0), "{args:?}");
+    }
+}
+
+#[test]
+fn parse_errors_exit_3() {
+    assert_eq!(code(&[]), Some(3), "missing subcommand");
+    assert_eq!(
+        code(&["compare", "some.txt"]),
+        Some(3),
+        "compare needs --profile"
+    );
+    assert_eq!(
+        code(&["check", "draft.md"]),
+        Some(3),
+        "check needs --profile"
+    );
+    assert_eq!(
+        code(&["export", "x", "-o", "x.jsonl", "--format", "csv"]),
+        Some(3)
+    );
+    assert_eq!(code(&["definitely-not-a-command"]), Some(3));
+}
+
+#[test]
+fn failing_doctor_exits_2_with_the_report_in_details() {
     let tmp = tempfile::tempdir().unwrap();
-    bin()
-        .env("STYLOMETRY_DATA_DIR", tmp.path())
-        .args(["profile", "list"])
-        .assert()
-        .code(0);
-}
+    let profiles = tmp.path().join("data/profiles");
+    std::fs::create_dir_all(&profiles).unwrap();
+    std::fs::write(profiles.join("old.json"), r#"{"schema":0,"name":"old"}"#).unwrap();
 
-#[test]
-fn help_exits_0() {
-    bin().arg("--help").assert().code(0);
-}
-
-#[test]
-fn version_exits_0() {
-    bin().arg("--version").assert().code(0);
-}
-
-#[test]
-fn agent_info_exits_0() {
-    bin().arg("agent-info").assert().code(0);
-}
-
-#[test]
-fn config_path_exits_0() {
-    bin().args(["config", "path"]).assert().code(0);
-}
-
-#[test]
-fn config_show_exits_0() {
-    bin().args(["config", "show"]).assert().code(0);
-}
-
-#[test]
-fn missing_subcommand_exits_3() {
-    bin().assert().code(3);
-}
-
-#[test]
-fn compare_missing_profile_exits_3() {
-    // `compare` requires --profile.
-    bin().args(["compare", "some.txt"]).assert().code(3);
+    let out = bin(tmp.path()).arg("doctor").output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    let err: Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(err["error"]["code"], "config_error");
+    let checks = err["error"]["details"]["checks"].as_array().unwrap();
+    let old = checks.iter().find(|c| c["name"] == "profile old").unwrap();
+    assert_eq!(old["status"], "fail");
+    assert!(
+        old["suggestion"]
+            .as_str()
+            .unwrap()
+            .contains("stylometry profile build old --corpus <path> --force")
+    );
+    assert_eq!(err["error"]["details"]["summary"]["fail"], 1);
 }
