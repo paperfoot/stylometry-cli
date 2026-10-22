@@ -18,14 +18,17 @@ BIN="${BIN:-$ROOT/target/release/stylometry}"
 DATA="${DATA:-$ROOT/eval/data}"
 export STYLOMETRY_DATA_DIR="$DATA-lowo"
 [ -d "$DATA/background-src" ] && export STYLOMETRY_BACKGROUND_SOURCE="${STYLOMETRY_BACKGROUND_SOURCE:-$DATA/background-src}"
-C="$ROOT/eval/corpora"
+# CORPORA / HOLDOUT override where the (uncommitted) texts live, e.g. when
+# running from a worktree.
+C="${CORPORA:-$ROOT/eval/corpora}"
+H="${HOLDOUT:-$ROOT/eval/holdout/adams_mostly_harmless.md}"
 W="python3 -I $ROOT/eval/windows.py"
 TMP="$STYLOMETRY_DATA_DIR/held-in"
 
 "$BIN" background fetch --json | jq -c '.data | {installed}'
 for a in jerome wodehouse chesterton; do "$BIN" profile build "$a" --corpus "$C/$a" --force --json >/dev/null; done
 
-ADAMS=( "$C"/adams/*.md "$ROOT"/eval/holdout/adams_mostly_harmless.md )
+ADAMS=( "$C"/adams/*.md "$H" )
 pass=0; total=0
 for held in "${ADAMS[@]}"; do
   rm -rf "$TMP"; mkdir -p "$TMP"

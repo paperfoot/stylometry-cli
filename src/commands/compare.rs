@@ -5,6 +5,7 @@
 use serde::Serialize;
 
 use crate::commands::input;
+use crate::engine::calibrate::{self, MIN_SHORT_FORM_IMPOSTERS};
 use crate::engine::profile::ProfileKind;
 use crate::engine::score::{self, VoiceMatch};
 use crate::engine::store;
@@ -34,6 +35,13 @@ pub fn run(
     if !all.iter().any(|p| p.kind == ProfileKind::Background) {
         next.push(format!("{bin} background fetch"));
     }
+    // A posts voice is verified against other posters, not books.
+    if target.kind != ProfileKind::Blend
+        && target.register.is_short_form()
+        && calibrate::short_form_imposters(&target, &all) < MIN_SHORT_FORM_IMPOSTERS
+    {
+        next.push(format!("{bin} profile build <name> --corpus <their-posts.json> --background"));
+    }
     if target.kind != ProfileKind::Blend && (target.calibration.is_none() || m.calibration_stale) {
         next.push(format!("{bin} calibrate {profile}"));
     }
@@ -48,7 +56,8 @@ pub fn run(
             .p_same_author
             .map(|p| format!("P(same author) {p:.2}, "))
             .unwrap_or_default();
-        println!("{} words vs {}: {}", m.words, r.profile, m.verdict.bold());
+        let pooled = m.items.map(|n| format!(" ({n} items pooled)")).unwrap_or_default();
+        println!("{} words{pooled} vs {}: {}", m.words, r.profile, m.verdict.bold());
         println!(
             "  {p}δ {:.3} at {} words, typicality {:.2}, nearest {}",
             m.cosine_delta, m.band_words, m.typicality, m.nearest_profile

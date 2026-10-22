@@ -8,11 +8,23 @@
 //! A text longer than twice the band is scored passage by passage and
 //! summarized by the median: that per-passage list is the drift map of a
 //! manuscript.
+//!
+//! Short texts are pooled: a batch of posts separated by `---` lines is
+//! scored as one text (one 40-word post says nothing about authorship; ten
+//! of them, ~400 words, start to), the same way calibration pools a
+//! short-form profile's posts into windows.
+//!
+//! A posts voice is told apart from other posters, not from books, and
+//! that is weak at batch length (AUC ~0.8 at 250 words). So same_author
+//! needs a calibration fit against 3+ other posters (the frozen model
+//! records them), still current, with the claimed poster nearest, and
+//! P > 0.9 in a weak band; otherwise the verdict is inconclusive.
 
 use serde::Serialize;
 
 use crate::engine::calibrate::{
-    self, BAND_KS, MIN_IMPOSTERS, P_ABSTAIN_HIGH, P_ABSTAIN_LOW, own_deltas, weighted_centroid,
+    self, MIN_IMPOSTERS, MIN_SHORT_FORM_IMPOSTERS, P_ABSTAIN_HIGH, P_ABSTAIN_LOW, P_SAME_WEAK_SHORT_FORM, WEAK_AUC,
+    bands_for, own_deltas, weighted_centroid,
 };
 use crate::engine::delta::cosine_delta;
 use crate::engine::model::{ReferenceModel, reference_signature};
@@ -20,7 +32,7 @@ use crate::engine::profile::{BASE_CHUNK_WORDS, Profile, ProfileKind};
 use crate::engine::{DEFAULT_MFW, DEFAULT_TRIGRAMS, text};
 use crate::error::AppError;
 
-/// Shortest text scored at all: below this Delta is noise.
+/// Shortest text scored at all (after pooling a batch): below this Delta is noise.
 pub const MIN_WORDS: usize = 150;
 /// Uncalibrated "close": the text is at least as typical as the author's
 /// least typical tenth of passages.
@@ -47,8 +59,11 @@ pub struct PassageScore {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct VoiceMatch {
-    /// Unicode word count of the scored text.
+    /// Unicode word count of the scored text (a batch: all items pooled).
     pub words: usize,
+    /// Items pooled into the score when the text was a `---`-separated batch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub items: Option<usize>,
     /// Analysis length (words) the score was computed at.
     pub band_words: usize,
     /// Cosine Delta from the text to the target's centroid at that length
@@ -109,11 +124,31 @@ fn verdict_from_p(p: f64) -> &'static str {
 /// included) as the reference set and imposter pool.
 pub fn voice_match(target: &Profile, all: &[Profile], text: &str) -> Result<VoiceMatch, AppError> {
     let bin = env!("CARGO_BIN_NAME");
+    let short_form = target.register.is_short_form();
+    let items = draft_items(text, short_form);
+    // Posts are pooled item by item; long-form text keeps its lines (so
+    // passage start lines stay true) with separator lines blanked.
+    let pooled: String = if short_form {
+        items.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join("\n\n")
+    } else {
+        text.lines().map(|l| if is_separator(l) { "" } else { l }).collect::<Vec<_>>().join("\n")
+    };
+    let text = pooled.as_str();
     let words = text::count_words(text);
     if words < MIN_WORDS {
+        let fix = if short_form || items.len() > 1 {
+            format!(
+                "Pool more posts: pass a batch of 5-10+ separated by lines of ---, together ≥ {MIN_WORDS} words (400+ is firmer)"
+            )
+        } else {
+            "Pass a longer passage (a full scene or more); 1,000+ words gives a much firmer verdict".to_string()
+        };
         return Err(AppError::input(
-            format!("text has {words} words; need ≥ {MIN_WORDS} words for a voice match"),
-            "Pass a longer passage (a full scene or more); 1,000+ words gives a much firmer verdict",
+            format!(
+                "text has {words} words{}; need ≥ {MIN_WORDS} words for a voice match",
+                if items.len() > 1 { format!(" across {} items", items.len()) } else { String::new() }
+            ),
+            fix,
         ));
     }
     let refs = calibrate::reference_set(all);
@@ -130,18 +165,21 @@ pub fn voice_match(target: &Profile, all: &[Profile], text: &str) -> Result<Voic
             (&b.reference, Some((b.slope, b.intercept)), Some(b.auc))
         }
         None => {
-            let ks: Vec<usize> = BAND_KS
+            let lens: Vec<usize> = bands_for(target.register)
                 .iter()
                 .copied()
-                .filter(|&k| target.spans(k).len() >= 3)
-                .map(|k| k * BASE_CHUNK_WORDS)
+                .filter(|&w| target.windows(w).len() >= 3)
                 .collect();
-            let bw = pick_band(&ks, words);
-            live = ReferenceModel::build(&refs, DEFAULT_MFW, DEFAULT_TRIGRAMS, bw / BASE_CHUNK_WORDS);
+            let bw = pick_band(&lens, words);
+            live = calibrate::reference_model(target, &refs, bw);
             (&live, None, None)
         }
     };
-    let band_words = model.k * BASE_CHUNK_WORDS;
+    // Fit on posts alone (3+ other posters): the verifier separates this
+    // person from other posters. Otherwise, for a posts voice, merely posts
+    // from books.
+    let posts_only = !model.posters.is_empty();
+    let band_words = model.band_words();
     if words < band_words {
         warnings.push(format!(
             "text ({words} words) is shorter than the shortest {} length ({band_words} words): directional only",
@@ -149,14 +187,15 @@ pub fn voice_match(target: &Profile, all: &[Profile], text: &str) -> Result<Voic
         ));
     }
 
-    // Candidates for "nearest": every non-blend profile, plus a blend target.
+    // Candidates for "nearest": the target (a blend too) and the profiles
+    // the model ranks in (posters only, in a posts-only model).
     let mut names: Vec<String> = Vec::new();
     let mut centroids: Vec<Vec<f64>> = Vec::new();
     let target_centroid = weighted_centroid(model, target);
     names.push(target.name.clone());
     centroids.push(target_centroid);
-    for p in refs.iter().filter(|p| p.name != target.name) {
-        if p.spans(model.k).is_empty() {
+    for p in calibrate::ranks_in(model, target, &refs) {
+        if model.windows(p).is_empty() {
             continue;
         }
         names.push(p.name.clone());
@@ -177,12 +216,18 @@ pub fn voice_match(target: &Profile, all: &[Profile], text: &str) -> Result<Voic
     // Whole text, or passage by passage for a long text.
     let mut passages = Vec::new();
     let summary: Vec<f64> = if words > 2 * band_words {
-        let paras = text::paragraphs(text);
-        let chunks = text::chunk_paragraphs(&paras, band_words);
-        let lines = start_lines(text, &chunks);
+        // A batch is windowed by whole items (like the profile's pooled
+        // windows), anything else by paragraph-aligned passages.
+        let windows: Vec<(usize, String)> = if short_form && items.len() > 1 {
+            item_windows(&items, band_words)
+        } else {
+            let paras = text::paragraphs(text);
+            let chunks = text::chunk_paragraphs(&paras, band_words);
+            let lines = start_lines(text, &chunks);
+            lines.into_iter().zip(chunks.iter().map(|c| c.join("\n\n"))).collect()
+        };
         let mut per: Vec<Vec<f64>> = Vec::new();
-        for (chunk, line) in chunks.iter().zip(lines) {
-            let joined = chunk.join("\n\n");
+        for (line, joined) in windows {
             let n = text::count_words(&joined);
             let ds = deltas_to_all(&joined);
             passages.push(PassageScore {
@@ -239,18 +284,79 @@ pub fn voice_match(target: &Profile, all: &[Profile], text: &str) -> Result<Voic
                 target.name
             ));
         }
-        if c.imposters < MIN_IMPOSTERS {
+        // A posts voice earns same_author only when the verifier was fit
+        // against other posters and still matches the profile set, the
+        // claimed poster is the nearest one, and a weak band clears a higher
+        // bar; any reason left here turns same_author into inconclusive.
+        let mut withheld: Vec<String> = Vec::new();
+        let weak_auc = band_auc.filter(|a| *a < WEAK_AUC);
+        let books_only = short_form && !posts_only;
+        if books_only {
+            let posters = calibrate::short_form_imposters(target, &refs);
+            warnings.push(if posters >= MIN_SHORT_FORM_IMPOSTERS {
+                format!(
+                    "{} was calibrated against books only, before {posters} other posters were added: P(same author) here separates posts from books, not this person from other posters, so same_author is reported as inconclusive; re-run `{bin} calibrate {}`",
+                    target.name, target.name
+                )
+            } else {
+                format!(
+                    "{} is a short-form voice verified against {posters} other poster(s): P(same author) here separates posts from books, not this person from other posters, so same_author is reported as inconclusive; add 3+ other writers' posts with `{bin} profile build <name> --corpus <their-posts.json> --background`, then `{bin} calibrate {}`",
+                    target.name, target.name
+                )
+            });
+        } else if short_form {
+            if calibration_stale {
+                let unseen: Vec<&str> = calibrate::ranks_in(model, target, &refs)
+                    .into_iter()
+                    .filter(|p| !model.posters.contains(&p.name))
+                    .map(|p| p.name.as_str())
+                    .collect();
+                withheld.push(if unseen.is_empty() {
+                    format!("the profiles changed since calibration: same_author is withheld until `{bin} calibrate {}`", target.name)
+                } else {
+                    format!(
+                        "{} added since calibration, never an imposter: same_author is withheld until `{bin} calibrate {}`",
+                        unseen.join(", "),
+                        target.name
+                    )
+                });
+            }
+            if nearest_profile != target.name {
+                withheld.push(format!(
+                    "the nearest poster is {nearest_profile}, not {}: same_author is withheld",
+                    target.name
+                ));
+            }
+            if c.imposters < MIN_IMPOSTERS {
+                warnings.push(format!(
+                    "calibrated against only {} other poster(s): unseen posters may pass as same_author; add more with `{bin} profile build <name> --corpus <their-posts.json> --background`, then `{bin} calibrate {}`",
+                    c.imposters, target.name
+                ));
+            }
+        } else if c.imposters < MIN_IMPOSTERS {
             warnings.push(format!(
                 "calibrated against only {} imposter(s): unseen authors may pass as same_author; run `{bin} background fetch` then `{bin} calibrate {}`",
                 c.imposters, target.name
             ));
         }
-        if let Some(auc) = band_auc.filter(|a| *a < 0.9) {
-            warnings.push(format!(
-                "at {band_words} words this profile's verifier has AUC {auc:.2}: treat the verdict as directional; longer text verifies better"
-            ));
+        if let Some(auc) = weak_auc {
+            if short_form && posts_only && p > P_ABSTAIN_HIGH && p <= P_SAME_WEAK_SHORT_FORM {
+                withheld.push(format!(
+                    "at {band_words} words this voice's verifier has AUC {auc:.2}, and posters it never saw often reach P 0.65-0.9: same_author needs P > {P_SAME_WEAK_SHORT_FORM} here; pool more posts (1,000+ words verify better)"
+                ));
+            } else {
+                warnings.push(format!(
+                    "at {band_words} words this profile's verifier has AUC {auc:.2}: treat the verdict as directional; longer text verifies better"
+                ));
+            }
         }
-        verdict_from_p(p).to_string()
+        match verdict_from_p(p) {
+            "same_author" if books_only || !withheld.is_empty() => {
+                warnings.extend(withheld);
+                "inconclusive".to_string()
+            }
+            v => v.to_string(),
+        }
     } else if names.len() < 2 {
         warnings.push(format!(
             "no other profiles to compare against: install reference authors with `{bin} background fetch`"
@@ -274,6 +380,7 @@ pub fn voice_match(target: &Profile, all: &[Profile], text: &str) -> Result<Voic
 
     Ok(VoiceMatch {
         words,
+        items: (short_form && items.len() > 1).then_some(items.len()),
         band_words,
         cosine_delta: round(delta, 4),
         typicality: round(typicality, 3).max(0.0),
@@ -285,6 +392,88 @@ pub fn voice_match(target: &Profile, all: &[Profile], text: &str) -> Result<Voic
         passages,
         warnings,
     })
+}
+
+/// A separator line between batched items: `---`, `***` or `===` (3+).
+fn is_separator(line: &str) -> bool {
+    let t = line.trim();
+    t.len() >= 3 && [b'-', b'*', b'='].iter().any(|&c| t.bytes().all(|b| b == c))
+}
+
+/// The text's items with their 1-based start lines: split on separator
+/// lines when there are any (a batch of posts), else the whole text as one
+/// item. For a short-form voice, a reply's leading @handles are dropped, as
+/// the importer drops them from the profile's replies.
+fn draft_items(text: &str, short_form: bool) -> Vec<(usize, String)> {
+    let strip = |s: &str| -> String {
+        if !short_form {
+            return s.to_string();
+        }
+        let mut rest = s.trim_start();
+        while let Some(h) = rest.strip_prefix('@') {
+            let end = h.find(char::is_whitespace).unwrap_or(h.len());
+            rest = h[end..].trim_start();
+        }
+        rest.to_string()
+    };
+    if !text.lines().any(is_separator) {
+        return vec![(1, strip(text))];
+    }
+    let mut out = Vec::new();
+    let mut cur: Vec<&str> = Vec::new();
+    let mut start = 1;
+    for (i, line) in text.lines().enumerate() {
+        if is_separator(line) {
+            let t = cur.join("\n");
+            if !t.trim().is_empty() {
+                out.push((start, strip(t.trim())));
+            }
+            cur.clear();
+            start = i + 2;
+        } else {
+            if cur.is_empty() && line.trim().is_empty() {
+                start = i + 2;
+                continue;
+            }
+            cur.push(line);
+        }
+    }
+    let t = cur.join("\n");
+    if !t.trim().is_empty() {
+        out.push((start, strip(t.trim())));
+    }
+    out.retain(|(_, t)| !t.is_empty());
+    out
+}
+
+/// Consecutive items pooled into windows of about `words` words (start
+/// line, text). A trailing pool under half the length joins the one before.
+fn item_windows(items: &[(usize, String)], words: usize) -> Vec<(usize, String)> {
+    let mut out: Vec<(usize, String, usize)> = Vec::new();
+    let mut cur: Option<(usize, String, usize)> = None;
+    for (line, t) in items {
+        let n = text::count_words(t);
+        let c = cur.get_or_insert_with(|| (*line, String::new(), 0));
+        if !c.1.is_empty() {
+            c.1.push_str("\n\n");
+        }
+        c.1.push_str(t);
+        c.2 += n;
+        if c.2 >= words {
+            out.extend(cur.take());
+        }
+    }
+    if let Some(c) = cur {
+        match out.last_mut() {
+            Some(last) if c.2 * 2 < words => {
+                last.1.push_str("\n\n");
+                last.1.push_str(&c.1);
+                last.2 += c.2;
+            }
+            _ => out.push(c),
+        }
+    }
+    out.into_iter().map(|(l, t, _)| (l, t)).collect()
 }
 
 fn median(mut v: Vec<f64>) -> f64 {

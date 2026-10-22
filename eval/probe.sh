@@ -8,28 +8,30 @@
 # Excerpts of 300/800/1500/6000 words, evenly spread through each book.
 #
 # Prereq: eval/validate.sh has run (background, adams and jerome profiles).
-# Downloads go to their own folder under the data dir.
+# Downloads go to their own folder (SRC, default under the data dir).
+# Excerpts are scored in parallel (JOBS, default 8); output is sorted.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="${BIN:-$ROOT/target/release/stylometry}"
 export STYLOMETRY_DATA_DIR="${DATA:-$ROOT/eval/data}"
-SRC="$STYLOMETRY_DATA_DIR/probe-src"
-W="python3 -I $ROOT/eval/windows.py"
+SRC="${SRC:-$STYLOMETRY_DATA_DIR/probe-src}"
 mkdir -p "$SRC"
 
 for id in 269 1342 849; do
   [ -s "$SRC/$id.txt" ] || { curl -sS -m 120 -A "stylometry-cli eval" \
     "https://www.gutenberg.org/cache/epub/$id/pg$id.txt" -o "$SRC/$id.txt"; sleep 1; }
 done
-"$BIN" calibrate jerome --json | jq -c '.data | {profile, cross_work, bands: [.bands[] | {words, auc, holdout_accuracy}]}'
+for p in adams jerome; do
+  "$BIN" calibrate "$p" --json | jq -c '.data | {profile, cross_work, bands: [.bands[] | {words, auc, holdout_accuracy}]}'
+done
 
 for n in 300 800 1500 6000; do
   c=20; [ "$n" = 6000 ] && c=8
   for p in adams jerome; do
-    $W "$BIN" "$p" "$SRC/269.txt" "$n" "$c" same_author
-    $W "$BIN" "$p" "$SRC/1342.txt" "$n" "$c" same_author
+    echo "$p $SRC/269.txt $n $c same_author"
+    echo "$p $SRC/1342.txt $n $c same_author"
   done
-  $W "$BIN" jerome "$SRC/849.txt" "$n" "$c" same_author
-  $W "$BIN" adams "$SRC/849.txt" "$n" "$c" same_author
-done
+  echo "jerome $SRC/849.txt $n $c same_author"
+  echo "adams $SRC/849.txt $n $c same_author"
+done | xargs -P "${JOBS:-8}" -L 1 python3 -I "$ROOT/eval/windows.py" "$BIN" | sort -k2,2n -k1,1

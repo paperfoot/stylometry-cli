@@ -5,15 +5,17 @@
 //! This is the Burrows-Delta reference distribution. z-scoring against it is
 //! what makes a frequency "unusual relative to writers in general" rather than
 //! just "common", which is the whole point of Delta over raw cosine. Feature
-//! spread depends on passage length, so a model is built per length: `k`
-//! consecutive base chunks per passage.
+//! spread depends on passage length, so a model is built per length: every
+//! profile's `windows(words)` at that length (passages of one work for
+//! long-form, pooled posts for short-form).
 
 use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
 use crate::engine::features;
-use crate::engine::profile::Profile;
+use crate::engine::profile::{BASE_CHUNK_WORDS, Profile};
 
 /// Ordered feature names: `words` first, then `trigrams`. Vector layout is
 /// `[word rel-freqs .. ; trigram rel-freqs ..]`.
@@ -37,9 +39,25 @@ pub struct ReferenceModel {
     pub vocab: Vocab,
     pub mean: Vec<f64>,
     pub sd: Vec<f64>,
-    /// Base chunks per passage this model was fit at.
+    /// Base chunks per passage: how v0.3 artifacts recorded the length.
+    /// Kept so they still load; `words` supersedes it.
     #[serde(default = "one")]
     pub k: usize,
+    /// Window length in words this model was fit at (0 in v0.3 artifacts,
+    /// which mean `k` x 250). Read it through `band_words`.
+    #[serde(default)]
+    pub words: usize,
+    /// The other posters a short-form voice's model was fit on, when it was
+    /// fit on posts alone (see `calibrate::reference_pool`); empty when it
+    /// was fit on every profile, books included, and in artifacts from
+    /// before form matching. Frozen with a calibration, so scoring knows
+    /// what P(same author) separates the voice from: these posters, or
+    /// merely books.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub posters: Vec<String>,
+    /// Word and trigram -> vector position, built on first use (not stored).
+    #[serde(skip)]
+    index: OnceLock<(HashMap<String, usize>, HashMap<String, usize>)>,
 }
 
 fn one() -> usize {
@@ -56,10 +74,10 @@ fn top_keys(counts: &HashMap<String, u64>, n: usize, skip: &HashSet<&str>) -> Ve
 }
 
 impl ReferenceModel {
-    /// Build from profiles at passage length `k` base chunks, selecting the
-    /// top `n_words` words (proper nouns excluded: names are topic, not
-    /// style) and `n_trigrams` trigrams by total count across all profiles.
-    pub fn build(profiles: &[Profile], n_words: usize, n_trigrams: usize, k: usize) -> ReferenceModel {
+    /// Build from profiles at a window length of `words`, selecting the top
+    /// `n_words` words (proper nouns excluded: names are topic, not style)
+    /// and `n_trigrams` trigrams by total count across all profiles.
+    pub fn build(profiles: &[Profile], n_words: usize, n_trigrams: usize, words: usize) -> ReferenceModel {
         let mut gw: HashMap<String, u64> = HashMap::new();
         let mut gt: HashMap<String, u64> = HashMap::new();
         let mut names: HashSet<&str> = HashSet::new();
@@ -80,7 +98,10 @@ impl ReferenceModel {
             mean: vec![0.0; vocab.dim()],
             sd: vec![1.0; vocab.dim()],
             vocab,
-            k: k.max(1),
+            k: (words / BASE_CHUNK_WORDS).max(1),
+            words: words.max(1),
+            posters: Vec::new(),
+            index: OnceLock::new(),
         };
 
         let dim = model.vocab.dim();
@@ -105,6 +126,53 @@ impl ReferenceModel {
             model.sd[j] = if var > 1e-12 { var.sqrt() } else { 1.0 };
         }
         model
+    }
+
+    /// Window length in words the model was fit at.
+    pub fn band_words(&self) -> usize {
+        if self.words > 0 { self.words } else { self.k.max(1) * BASE_CHUNK_WORDS }
+    }
+
+    /// A profile's windows at this model's length.
+    pub fn windows(&self, p: &Profile) -> Vec<Vec<usize>> {
+        p.windows(self.band_words())
+    }
+
+    fn index(&self) -> &(HashMap<String, usize>, HashMap<String, usize>) {
+        self.index.get_or_init(|| {
+            let pos = |v: &[String]| v.iter().enumerate().map(|(j, s)| (s.clone(), j)).collect();
+            (pos(&self.vocab.words), pos(&self.vocab.trigrams))
+        })
+    }
+
+    /// Relative-frequency vector of a window of chunks, summed straight into
+    /// the vocab's positions: compare builds a centroid for every loaded
+    /// profile on every call, so no per-window maps.
+    pub fn window_vector(&self, p: &Profile, window: &[usize]) -> Vec<f64> {
+        let (wi, ti) = self.index();
+        let nw = self.vocab.words.len();
+        let mut v = vec![0.0f64; self.vocab.dim()];
+        let (mut wt, mut tt) = (0u64, 0u64);
+        for &i in window {
+            let c = &p.chunks[i];
+            wt += c.n_words as u64;
+            tt += c.n_trigrams as u64;
+            for (w, n) in &c.words {
+                if let Some(&j) = wi.get(w) {
+                    v[j] += *n as f64;
+                }
+            }
+            for (t, n) in &c.trigrams {
+                if let Some(&j) = ti.get(t) {
+                    v[nw + j] += *n as f64;
+                }
+            }
+        }
+        let (wt, tt) = (wt.max(1) as f64, tt.max(1) as f64);
+        for (j, x) in v.iter_mut().enumerate() {
+            *x /= if j < nw { wt } else { tt };
+        }
+        v
     }
 
     /// Raw relative-frequency vector for a feature pair over this vocab.
@@ -139,18 +207,12 @@ impl ReferenceModel {
             .collect()
     }
 
-    /// Raw vectors of every `k`-chunk passage of a profile.
+    /// Raw vectors of every window of a profile at this model's length.
     pub fn raw_vectors(&self, p: &Profile) -> Vec<Vec<f64>> {
-        p.spans(self.k)
-            .iter()
-            .map(|span| {
-                let (wf, tf) = p.span_freqs(span);
-                self.vectorize(&wf, &tf)
-            })
-            .collect()
+        self.windows(p).iter().map(|w| self.window_vector(p, w)).collect()
     }
 
-    /// Z-scored vectors for every `k`-chunk passage of a profile.
+    /// Z-scored vectors for every window of a profile at this length.
     pub fn passage_zvectors(&self, p: &Profile) -> Vec<Vec<f64>> {
         self.raw_vectors(p).iter().map(|v| self.zscore(v)).collect()
     }
@@ -188,4 +250,47 @@ pub fn reference_signature(profiles: &[Profile], n_words: usize, n_trigrams: usi
         .collect();
     parts.sort();
     format!("mfw={n_words};tri={n_trigrams};{}", parts.join("|"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::profile::ProfileKind;
+    use crate::engine::text::Doc;
+
+    fn profile() -> Profile {
+        let words = ["the", "storm", "and", "a", "harbour", "of", "light", "we", "said", "never"];
+        let mut t = String::new();
+        for i in 0..3000 {
+            t.push_str(words[(i * 7 + i / 13) % words.len()]);
+            t.push_str(if i % 12 == 11 { ".\n\n" } else { " " });
+        }
+        let doc = Doc { name: "a".into(), text: t, items: Vec::new() };
+        Profile::build("a", &[doc], ProfileKind::Author).unwrap()
+    }
+
+    #[test]
+    fn dense_window_vector_matches_the_frequency_maps() {
+        let p = profile();
+        let m = ReferenceModel::build(std::slice::from_ref(&p), 50, 80, 500);
+        assert_eq!(m.band_words(), 500);
+        let wins = m.windows(&p);
+        assert!(wins.len() >= 4);
+        for w in &wins {
+            let (wf, tf) = p.span_freqs(w);
+            let a = m.vectorize(&wf, &tf);
+            let b = m.window_vector(&p, w);
+            for (x, y) in a.iter().zip(&b) {
+                assert!((x - y).abs() < 1e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn v03_artifacts_keep_their_length() {
+        // v0.3 froze `k` (base chunks) and no `words`.
+        let m: ReferenceModel =
+            serde_json::from_str(r#"{"vocab":{"words":[],"trigrams":[]},"mean":[],"sd":[],"k":4}"#).unwrap();
+        assert_eq!(m.band_words(), 1000);
+    }
 }
