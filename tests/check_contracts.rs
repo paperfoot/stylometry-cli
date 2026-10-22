@@ -347,6 +347,37 @@ fn never_habits_and_x_length_are_hard_failures_with_counts() {
 }
 
 #[test]
+fn a_post_with_one_off_llm_tells_does_not_pass_cleanly() {
+    let data = tempfile::tempdir().unwrap();
+    let corpus = tempfile::tempdir().unwrap();
+    build_social(data.path(), corpus.path());
+
+    let plain = check_text(data.path(), "bo", "Shipped the lamp fix today. It took 4 tries to get into it.", &[]);
+    let draft = "Shipped the lamp fix today. It took 4 tries to delve into this tapestry.";
+    let j = check_text(data.path(), "bo", draft, &[]);
+    let d = &j["data"];
+    let tells: Vec<&Value> = d["findings"].as_array().unwrap().iter().filter(|f| f["kind"] == "llm_tell").collect();
+    for key in ["delve", "tapestry"] {
+        let f = tells.iter().find(|f| f["key"] == key).unwrap_or_else(|| panic!("one '{key}' is flagged: {}", d["findings"]));
+        assert_eq!(f["count"], 1);
+        assert_eq!(f["lines"], serde_json::json!([1]));
+        assert!(f["message"].as_str().unwrap().contains("never writes it"), "{f}");
+    }
+    assert!(d["score"].as_f64().unwrap() < plain["data"]["score"].as_f64().unwrap(), "tells lower the post's score");
+    let tell_habit = d["habits"].as_array().unwrap().iter().find(|h| h["key"] == "llm_tells_per_item").unwrap();
+    assert_eq!(tell_habit["draft_value"], 2.0);
+    assert!(d["plan"].to_string().contains("Cut or rephrase the LLM tells"), "{}", d["plan"]);
+    let next = j["metadata"]["next"][0].as_str().unwrap();
+    assert!(!next.starts_with("Final pass"), "steps left: re-check before the final pass: {next}");
+
+    // Three stock phrases in one post: a habit none of the author's 120 posts show.
+    let j = check_text(data.path(), "bo", "A testament to the lamp fix: we delve into the tapestry today.", &[]);
+    assert_eq!(j["data"]["pass"], false);
+    let never = j["data"]["findings"].as_array().unwrap().iter().find(|f| f["kind"] == "never" && f["key"] == "stock_phrases");
+    assert!(never.is_some_and(|f| f["hard"] == true && f["message"].as_str().unwrap().contains("of 120")), "{}", j["data"]["findings"]);
+}
+
+#[test]
 fn the_authors_own_formulas_are_not_copying() {
     let data = tempfile::tempdir().unwrap();
     let corpus = tempfile::tempdir().unwrap();

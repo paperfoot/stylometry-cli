@@ -1630,6 +1630,8 @@ const ITEM_CORE: &[Core] = &[
      "ask a question", "turn the questions into statements"),
     ("all_caps_words_per_item", "emphasis caps per item (words the author also writes in lowercase)", Unit::Count,
      "stress a word in CAPS", "drop the CAPS emphasis"),
+    ("llm_tells_per_item", "stock LLM words and phrases per item", Unit::Count,
+     "keep to the author's own words", "cut the stock LLM phrasing"),
     ("lowercase_start_share", "starts in lowercase", Unit::Share,
      "start in lowercase", "start with a capital letter"),
     ("ends_with_punct_share", "ends with . ? ! or …", Unit::Share,
@@ -1846,6 +1848,20 @@ fn item_ending(toks: &[&str]) -> &'static str {
     }
 }
 
+/// Stock LLM words and phrases in a token stream, each place once: "a
+/// testament to" and the "testament" inside it are one phrase.
+pub fn stock_phrases(tokens: &[String]) -> Vec<crate::engine::voice::TellHit> {
+    let mut hits = crate::engine::voice::find_tells(tokens);
+    hits.sort_by(|a, b| a.at.cmp(&b.at).then(b.len.cmp(&a.len)));
+    let mut out: Vec<crate::engine::voice::TellHit> = Vec::new();
+    for h in hits {
+        if out.last().is_none_or(|l| h.at >= l.at + l.len) {
+            out.push(h);
+        }
+    }
+    out
+}
+
 /// Measure one post, email or message, verbatim (line breaks kept).
 pub fn measure_item(t: &str, lower_vocab: &std::collections::HashSet<String>) -> ItemMeasure {
     let lines: Vec<&str> = t.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
@@ -1929,6 +1945,7 @@ pub fn measure_item(t: &str, lower_vocab: &std::collections::HashSet<String>) ->
         char_runs(t, '!') as f64,
         char_runs(t, '?') as f64,
         caps as f64,
+        stock_phrases(&words).len() as f64,
         if lowercase_start { 1.0 } else { 0.0 },
         if ends_punct { 1.0 } else { 0.0 },
         if greeting.is_some() { 1.0 } else { 0.0 },
@@ -2064,7 +2081,7 @@ pub struct ItemHabits {
 }
 
 /// Habits checked by the never-list: key, label, does the item show it.
-pub fn never_flags(m: &ItemMeasure) -> [(&'static str, &'static str, bool); 10] {
+pub fn never_flags(m: &ItemMeasure) -> [(&'static str, &'static str, bool); 11] {
     [
         ("hashtags", "hashtags", m.get("hashtags_per_item") > 0.0),
         ("emoji", "emoji", m.get("emoji_per_item") > 0.0),
@@ -2076,6 +2093,7 @@ pub fn never_flags(m: &ItemMeasure) -> [(&'static str, &'static str, bool); 10] 
         ("lowercase_start", "a lowercase first letter", m.get("lowercase_start_share") > 0.0),
         ("capital_start", "a capitalised first letter", m.capital_start),
         ("line_breaks", "line breaks", m.get("item_lines") > 1.0),
+        ("stock_phrases", "three or more stock LLM phrases in one item", m.get("llm_tells_per_item") >= 3.0),
     ]
 }
 
@@ -2130,7 +2148,7 @@ pub fn habits_of(items: &[ItemMeasure], weights: &[f64]) -> ItemHabits {
         *openers.entry(key).or_insert(0.0) += w;
     }
     let never = if items.len() >= NEVER_MIN_ITEMS {
-        let mut shown = [0usize; 10];
+        let mut shown = [0usize; 11];
         for m in items {
             for (i, f) in never_flags(m).iter().enumerate() {
                 if f.2 {
@@ -2177,10 +2195,11 @@ pub fn item_habits(p: &Profile, kind: crate::engine::profile::ItemKind) -> ItemH
 // ── Item typicality (surprisal) ──────────────────────────────────────────────
 
 /// Feature names in `ItemModel::bins` order, for habit rows.
-pub const ITEM_FEATURES: [&str; 14] = [
+pub const ITEM_FEATURES: [&str; 15] = [
     "item_words", "first_line_words", "emoji_per_item", "hashtags_per_item",
     "mentions_per_item", "links_per_item", "exclaims_per_item", "questions_per_item",
-    "all_caps_words_per_item", "lowercase_start", "ending", "layout", "greeting", "signoff",
+    "all_caps_words_per_item", "lowercase_start", "ending", "layout", "llm_tells_per_item",
+    "greeting", "signoff",
 ];
 
 const ENDINGS: [&str; 7] = ["none", ".", "?", "!", "\u{2026}", "emoji", "link"];
@@ -2245,6 +2264,7 @@ impl ItemModel {
             4, 4, 4, 3, 4, 3, 3, 2,
             ENDINGS.len(),
             LAYOUTS.len(),
+            4,
         ];
         if self.with_greetings {
             s.extend([2, 2]);
@@ -2278,6 +2298,10 @@ impl ItemModel {
             c("lowercase_start_share", 1),
             ENDINGS.iter().position(|e| *e == m.ending).unwrap_or(0),
             LAYOUTS.iter().position(|l| *l == m.layout).unwrap_or(0),
+            // A post rarely repeats a stock phrase, so one is already a
+            // habit: the author's own share of posts with one decides
+            // what it costs.
+            c("llm_tells_per_item", 3),
         ];
         if self.with_greetings {
             b.push(c("has_greeting_share", 1));

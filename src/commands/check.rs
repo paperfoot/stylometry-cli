@@ -198,6 +198,15 @@ pub fn run(ctx: Ctx, args: CheckArgs) -> Result<(), AppError> {
         ]
     } else if args.verify {
         vec![format!("Done: the draft passes. Optional: {bin} compare {draft_arg} --profile {p}")]
+    } else if !report.plan.is_empty() {
+        // Passing with steps left (LLM tells, a drifting rate): closer is better.
+        vec![
+            format!(
+                "It passes; to get closer to the author, apply the {} plan step(s) and re-check: {bin} check {draft_arg} --profile {p}{as_flag}",
+                report.plan.len()
+            ),
+            format!("Final pass with authorship verification: {bin} check {draft_arg} --profile {p}{as_flag} --verify"),
+        ]
     } else {
         vec![format!("Final pass with authorship verification: {bin} check {draft_arg} --profile {p}{as_flag} --verify")]
     };

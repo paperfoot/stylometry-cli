@@ -649,42 +649,66 @@ fn share_in(c: &Concept, w: &str) -> f64 {
 
 // ── Lexis ────────────────────────────────────────────────────────────────────
 
+/// Expected uses at the draft's length below which one use of a tell is
+/// already more than the author would write (they'd have it in under one
+/// draft in ten this long).
+const LONE_TELL_EXPECTED: f64 = 0.1;
+/// Per 1k words: an author this far under it all but never writes the tell.
+const NEVER_TELL_RATE: f64 = 0.05;
+
 /// LLM tells the draft uses more than the author would at this length.
-fn tell_hits(d: &Draft, rates: &HashMap<&'static str, f64>, concepts: &[Concept]) -> Vec<Hit> {
+/// Long drafts need repeats the author's rate can't explain. A post almost
+/// never repeats a word, so in a short draft (`short`) one tell counts when
+/// the author all but never writes it, or when it comes with another one.
+fn tell_hits(d: &Draft, rates: &HashMap<&'static str, f64>, concepts: &[Concept], short: bool) -> Vec<Hit> {
     let words = d.tokens.len().max(1) as f64;
-    let hits = voice::find_tells(&d.tokens);
+    let names = d.names();
+    let hits: Vec<voice::TellHit> = metrics::stock_phrases(&d.tokens)
+        .into_iter()
+        .filter(|h| !names.contains(&d.tokens[h.at]))
+        .collect();
     let mut by_tell: HashMap<&str, usize> = HashMap::new();
     for h in &hits {
         *by_tell.entry(h.tell).or_insert(0) += 1;
     }
-    let names = d.names();
+    let distinct = by_tell.len();
     hits.iter()
-        .filter(|h| !names.contains(&d.tokens[h.at]))
         .filter_map(|h| {
             let author = rates.get(h.tell).copied().unwrap_or(0.0);
             let expected = author * words / 1000.0;
             let n = by_tell[h.tell];
-            // Flag only counts the author's own rate can't explain: about
-            // three Poisson SDs above expectation, and never a lone hit.
-            if n < 2 || (n as f64) < expected + 3.0 * expected.sqrt() + 1.0 {
+            // About three Poisson SDs above what the author's own rate explains.
+            let repeated = n >= 2 && (n as f64) >= expected + 3.0 * expected.sqrt() + 1.0;
+            let lone = short && expected < LONE_TELL_EXPECTED && (author < NEVER_TELL_RATE || distinct >= 2);
+            if !repeated && !lone {
                 return None;
             }
             let alt = preferred_for(h.tell, concepts);
+            let author_use = if author <= 0.0 {
+                "the author never writes it".to_string()
+            } else if author < 1.0 {
+                format!("the author writes it about once per {} words", num(1000.0 / author))
+            } else {
+                format!("the author uses it {author:.2} times per 1k words")
+            };
+            let message = if short {
+                let with = if distinct >= 2 { format!("; the draft has {distinct} different stock phrases") } else { String::new() };
+                format!("'{}' reads as LLM prose: {author_use}{with}", h.tell)
+            } else {
+                format!("'{}' reads as LLM prose: {author_use}, this draft {:.2} per 1k", h.tell, n as f64 * 1000.0 / words)
+            };
             let mut hit = Hit::new(
                 "llm_tell",
                 h.tell,
                 Some(d.token_line[h.at] + 1),
-                format!(
-                    "'{}' reads as LLM prose: the author uses it {:.2} times per 1k words, this draft {:.2}",
-                    h.tell, author, n as f64 * 1000.0 / words
-                ),
+                message,
                 match &alt {
                     Some((w, s)) => format!("Use '{w}' (the author's choice, {:.0}%) or say it plainly", s * 100.0),
                     None => "Cut it, or say the thing plainly the way the author would".into(),
                 },
             );
             hit.excerpt = d.excerpt_at(h.at, h.len);
-            hit.severity = 60.0 + (n as f64 - expected).min(20.0);
+            hit.severity = 60.0 + (n as f64 - expected).min(20.0) + if distinct >= 2 { 10.0 } else { 0.0 };
             hit.alt = alt.map(|a| a.0);
             Some(hit)
         })
@@ -1337,7 +1361,7 @@ fn check_long(target: &Profile, guards: &[&Profile], avoid: &[String], draft_tex
     }, COPY_NGRAM, &long_copy_verdict);
     hits.extend(avoid_hits(&d, avoid, &lx.concepts));
     hits.extend(metric_hits(&rows, &ranges.defs, words));
-    hits.extend(tell_hits(&d, &lx.rates, &lx.concepts));
+    hits.extend(tell_hits(&d, &lx.rates, &lx.concepts, words < SHORT_DRAFT_WORDS));
     hits.extend(with_evidence(word_hits(&d, target, &lx.concepts, &lx.avoided)));
     hits.extend(structure_hits(&d, &rows));
     // Tense drift: a long draft that sits between the author's modes.
@@ -1538,7 +1562,11 @@ fn check_short(target: &Profile, guards: &[&Profile], avoid: &[String], draft_te
                     key,
                     Some(lines[0]),
                     format!("the author never uses {label}: {} of {} {}s", nh.count, nh.of, kind_word(kind)),
-                    format!("Remove the {label}"),
+                    if key == "stock_phrases" {
+                        "Cut the stock phrases the llm_tell findings name and say it in the author's own words".into()
+                    } else {
+                        format!("Remove the {label}")
+                    },
                 );
                 h.hard = true;
                 h.severity = 800.0;
@@ -1560,7 +1588,8 @@ fn check_short(target: &Profile, guards: &[&Profile], avoid: &[String], draft_te
         }
         // Habits the author rarely shows (but not never: those are hard above).
         for (fi, (f, share)) in metrics::ITEM_FEATURES.iter().zip(model.bin_shares(m)).enumerate() {
-            if matches!(*f, "item_words" | "first_line_words") || share >= 0.05 {
+            // Stock phrases get llm_tell findings, which name the words.
+            if matches!(*f, "item_words" | "first_line_words" | "llm_tells_per_item") || share >= 0.05 {
                 continue;
             }
             let covered = metrics::never_flags(m).iter().any(|n| n.2 && ahabits.never.iter().any(|x| x.key == n.0) && habit_covers(f, n.0));
@@ -1600,7 +1629,7 @@ fn check_short(target: &Profile, guards: &[&Profile], avoid: &[String], draft_te
     };
     hits.extend(copy_hits(&d, &guarded, COPY_NGRAM_SHORT, &|r| Some(r.len >= 10 || r.len as f64 >= 0.5 * item_words_at(r.line))));
     hits.extend(avoid_hits(&d, avoid, &lx.concepts));
-    hits.extend(tell_hits(&d, &lx.rates, &lx.concepts));
+    hits.extend(tell_hits(&d, &lx.rates, &lx.concepts, true));
     hits.extend(with_evidence(word_hits(&d, target, &lx.concepts, &lx.avoided)));
 
     // A batch of posts should vary the way the author's do.
@@ -1746,6 +1775,7 @@ fn habit_covers(feature: &str, never_key: &str) -> bool {
             | ("item_lines", "line_breaks")
             | ("layout", "line_breaks")
             | ("ending", "exclamations" | "emoji" | "links")
+            | ("llm_tells_per_item", "stock_phrases")
     )
 }
 
