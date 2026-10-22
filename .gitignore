@@ -6,4 +6,5 @@ target/
 /eval/corpora/
 /eval/holdout/
 /eval/data/
+/eval/data-*/
 .claude/
