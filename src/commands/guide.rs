@@ -632,32 +632,39 @@ fn typography_lines(t: &TypographyHabits, short_form: bool) -> Vec<String> {
     let held = |forms: &[(String, f64)]| forms.first().is_some_and(|f| f.1 >= HABIT_SHARE);
     let mut defaults = Vec::new();
     let mut all_held = true;
-    let mut flag = |forms: &[(String, f64)], form: &str, shown: &'static str| {
+    // `check` lets one or two stray dashes or ellipses pass (real books
+    // have a few), so the promise says when it starts flagging them.
+    let mut counted = false;
+    let mut flag = |forms: &[(String, f64)], form: &str, shown: &'static str, strays: bool| {
         if never(forms, form) {
             defaults.push(shown);
             all_held &= held(forms);
+            counted |= strays;
         }
     };
-    flag(&t.double_quotes, "straight", "straight \" quotes");
-    flag(&t.apostrophes, "straight", "straight ' apostrophes");
-    flag(&t.ellipses, "...", "\"...\"");
-    flag(&t.dashes, "\u{2014}", "closed em dashes (\u{2014})");
+    flag(&t.double_quotes, "straight", "straight \" quotes", false);
+    flag(&t.apostrophes, "straight", "straight ' apostrophes", false);
+    flag(&t.ellipses, "...", "\"...\"", true);
+    flag(&t.dashes, "\u{2014}", "closed em dashes (\u{2014})", true);
     if !short_form {
-        flag(&t.scene_breaks, "---", "`---` breaks");
+        flag(&t.scene_breaks, "---", "`---` breaks", false);
     }
     if !defaults.is_empty() {
+        let promise = match (all_held, counted) {
+            (false, _) => "",
+            (true, false) => "; `check` flags them",
+            (true, true) => "; `check` flags them (dashes and ellipses from three in a draft)",
+        };
         out.push(format!(
-            "Agents default to forms this author never uses: {}. Convert every one{}.",
-            defaults.join(", "),
-            if all_held { "; `check` flags them" } else { "" }
+            "Agents default to forms this author never uses: {}. Convert every one{promise}.",
+            defaults.join(", ")
         ));
     }
     out
 }
 
-/// The share at which a form is a habit `check` holds a draft to (its
-/// typography findings use the same threshold).
-const HABIT_SHARE: f64 = 0.8;
+/// The share at which a form is a habit `check` holds a draft to.
+const HABIT_SHARE: f64 = crate::engine::metrics::TYPOGRAPHY_HABIT_SHARE;
 
 fn typography_section(c: &Ctxt) -> Option<Section> {
     let lines = typography_lines(&c.r.typography, c.p.register.is_short_form());
@@ -1810,7 +1817,10 @@ mod tests {
         assert!(t.contains("Scene breaks: `\u{2022} \u{2022} \u{2022}` on a line of its own (100%)."), "{t}");
         let defaults = lines.last().unwrap();
         assert!(defaults.starts_with("Agents default to forms this author never uses"), "{defaults}");
-        assert!(defaults.ends_with("Convert every one; `check` flags them."), "{defaults}");
+        assert!(
+            defaults.ends_with("Convert every one; `check` flags them (dashes and ellipses from three in a draft)."),
+            "{defaults}"
+        );
         for want in ["straight \" quotes", "straight ' apostrophes", "\"...\"", "`---` breaks"] {
             assert!(defaults.contains(want), "{want}: {defaults}");
         }
