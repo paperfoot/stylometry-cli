@@ -156,13 +156,13 @@ fn annotations() -> Value {
             "examples": [["profile", "rebuild", "ada"]]
         },
         "profile remove": {
-            "effect": "delete",
+            "effect": "write",
             "effect_detail": "Deletes the profile file; requires --confirm",
             "examples": [["profile", "remove", "ada", "--confirm"]]
         },
         "analyze": read(json!([["analyze", "ada"], ["analyze", "./drafts/", "-n", "40"]])),
         "guide": {
-            "effect": "read",
+            "effect": "mixed",
             "effect_detail": "Returns the Markdown brief; also writes it to --out when given",
             "examples": [["guide", "ada", "-o", "ada-brief.md"]]
         },
@@ -372,6 +372,20 @@ mod tests {
                         .map(|v| v.as_str().unwrap()),
                 );
                 assert!(Cli::try_parse_from(argv).is_ok(), "bad example: {example}");
+            }
+        }
+    }
+
+    #[test]
+    fn effects_use_the_schema_vocabulary() {
+        for (path, entry) in entries(&root()).unwrap() {
+            let effect = entry["effect"].as_str().unwrap();
+            assert!(
+                ["read", "write", "mixed"].contains(&effect),
+                "{path}: {effect}"
+            );
+            if effect == "mixed" {
+                assert!(entry["effect_detail"].is_string(), "{path}: explain mixed");
             }
         }
     }
