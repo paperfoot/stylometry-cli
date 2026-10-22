@@ -4,7 +4,7 @@
 use serde::Serialize;
 
 use crate::commands::input;
-use crate::engine::metrics::{self, ItemHabits, Ranges};
+use crate::engine::metrics::{self, ItemHabits, Ranges, TypographyHabits};
 use crate::engine::profile::{ItemKind, Profile, ProfileKind, Register};
 use crate::engine::retrieve;
 use crate::engine::voice::{self, AvoidedWord, Concept, Corpus, DialogueTags, Modes, Phrase, SignatureWord};
@@ -43,6 +43,10 @@ pub struct VoiceReport {
     pub components: Vec<(String, f64)>,
     /// Metric bands (p15 / median / p85) over the author's windows of `window_words`.
     pub ranges: Ranges,
+    /// How the author sets type: quote, apostrophe, ellipsis, dash and
+    /// scene-break forms with their shares (a family with too few marks to
+    /// call a habit is empty). Readers notice these before the words.
+    pub typography: TypographyHabits,
     /// Function words and contractions the author leans on.
     pub style_words: Vec<SignatureWord>,
     /// Content words the author leans on (habit or subject).
@@ -136,6 +140,7 @@ pub fn report(p: &Profile, limit: usize, window: usize) -> VoiceReport {
         words: p.n_tokens,
         works: p.sources.len(),
         components: p.components.clone(),
+        typography: metrics::typography_habits(p),
         ranges,
         recurring_words: voice::habit_words(p, &content_words),
         style_words,
@@ -198,6 +203,23 @@ fn print_human(r: &VoiceReport) {
         }
     );
     println!("{} {} ({})", "register".bold(), r.register.as_str(), r.register_reason);
+    let t = &r.typography;
+    let typo: Vec<String> = [
+        ("quotes", &t.double_quotes),
+        ("apostrophes", &t.apostrophes),
+        ("ellipses", &t.ellipses),
+        ("dashes", &t.dashes),
+        ("scene breaks", &t.scene_breaks),
+    ]
+    .iter()
+    .filter_map(|(name, forms)| {
+        let f: Vec<String> = forms.iter().take(3).map(|(k, s)| format!("{k:?} {:.0}%", s * 100.0)).collect();
+        (!f.is_empty()).then(|| format!("{name} {}", f.join(", ")))
+    })
+    .collect();
+    if !typo.is_empty() {
+        println!("{} {}", "typography".bold(), typo.join("; "));
+    }
     if let Some(m) = &r.modes {
         let modes: Vec<String> = m
             .modes
