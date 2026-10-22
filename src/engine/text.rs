@@ -102,12 +102,35 @@ pub struct Hygiene {
     pub fences: usize,
     pub attributes: usize,
     pub broken_paragraphs: usize,
+    /// Windows-1252 marks read as Latin-1 (U+0097 for an em dash, U+0092
+    /// for an apostrophe), common in text scraped from older web pages.
+    pub mojibake: usize,
 }
 
 impl Hygiene {
     pub fn total(&self) -> usize {
-        self.escapes + self.fences + self.attributes + self.broken_paragraphs
+        self.escapes + self.fences + self.attributes + self.broken_paragraphs + self.mojibake
     }
+}
+
+/// The Windows-1252 character a C1 control (U+0080-U+009F) stands for.
+/// C1 controls never occur in real prose; they are always this mis-decoding.
+fn cp1252(c: char) -> Option<char> {
+    Some(match c as u32 {
+        0x80 => '\u{20AC}',
+        0x82 => '\u{201A}',
+        0x84 => '\u{201E}',
+        0x85 => '\u{2026}',
+        0x91 => '\u{2018}',
+        0x92 => '\u{2019}',
+        0x93 => '\u{201C}',
+        0x94 => '\u{201D}',
+        0x95 => '\u{2022}',
+        0x96 => '\u{2013}',
+        0x97 => '\u{2014}',
+        0x99 => '\u{2122}',
+        _ => return None,
+    })
 }
 
 /// Strip epub/markdown conversion artifacts (pandoc/calibre output: cover
@@ -122,6 +145,7 @@ pub fn clean(raw: &str) -> String {
         acc.fences += h.fences;
         acc.attributes += h.attributes;
         acc.broken_paragraphs += h.broken_paragraphs;
+        acc.mojibake += h.mojibake;
     }
     t
 }
@@ -133,6 +157,7 @@ static HYGIENE: std::sync::Mutex<Hygiene> = std::sync::Mutex::new(Hygiene {
     fences: 0,
     attributes: 0,
     broken_paragraphs: 0,
+    mojibake: 0,
 });
 
 /// Take (and reset) the debris counts accumulated by `clean`.
@@ -144,6 +169,19 @@ pub fn take_hygiene() -> Hygiene {
 pub fn clean_report(raw: &str) -> (String, Hygiene) {
     let mut h = Hygiene::default();
     let mut lines: Vec<String> = Vec::new();
+    let raw: String = if raw.chars().any(|c| ('\u{80}'..='\u{9F}').contains(&c)) {
+        raw.chars()
+            .filter_map(|c| {
+                if !('\u{80}'..='\u{9F}').contains(&c) {
+                    return Some(c);
+                }
+                h.mojibake += 1;
+                cp1252(c)
+            })
+            .collect()
+    } else {
+        raw.to_string()
+    };
     for line in raw.lines() {
         let t = line.trim();
         if t.is_empty() {
@@ -652,6 +690,16 @@ mod tests {
         assert_eq!(h.escapes, 1);
         assert_eq!(h.fences, 2);
         assert_eq!(h.broken_paragraphs, 1);
+    }
+
+    /// A scraped essay read as Latin-1: its dashes were invisible controls,
+    /// so the profile saw no dashes and its passages showed blanks.
+    #[test]
+    fn windows_1252_marks_read_as_latin_1_are_repaired() {
+        let (t, h) = clean_report("Politicians say\u{97}wrongly\u{97}that it\u{92}s 1\u{96}2 years.\u{81}");
+        assert_eq!(t.trim(), "Politicians say\u{2014}wrongly\u{2014}that it\u{2019}s 1\u{2013}2 years.");
+        assert_eq!(h.mojibake, 5);
+        assert_eq!(clean_report("Plain text \u{2014} untouched.").1.mojibake, 0);
     }
 
     #[test]

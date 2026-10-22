@@ -129,8 +129,8 @@ pub fn build(ctx: Ctx, a: BuildArgs) -> Result<(), AppError> {
     }
     if hygiene.total() as f64 > profile.n_tokens as f64 / 1000.0 {
         data.warnings.push(format!(
-            "cleaned conversion debris: {} escapes, {} fence lines, {} attribute blocks, {} broken paragraphs rejoined; spot-check a passage with `{BIN} examples {name}`",
-            hygiene.escapes, hygiene.fences, hygiene.attributes, hygiene.broken_paragraphs
+            "cleaned conversion debris: {} escapes, {} fence lines, {} attribute blocks, {} broken paragraphs rejoined, {} Windows-1252 marks repaired; spot-check a passage with `{BIN} examples {name}`",
+            hygiene.escapes, hygiene.fences, hygiene.attributes, hygiene.broken_paragraphs, hygiene.mojibake
         ));
     }
     print_built(ctx, &data, "Built")
