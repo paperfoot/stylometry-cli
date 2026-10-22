@@ -68,7 +68,7 @@ pub fn spread(p: &Profile, w: &str) -> f64 {
     p.word_chunks.get(w).copied().unwrap_or(0) as f64 / n
 }
 
-fn is_name_or_number(p: &Profile, w: &str) -> bool {
+pub fn is_name_or_number(p: &Profile, w: &str) -> bool {
     let stem = w.strip_suffix("'s").unwrap_or(w);
     p.is_proper_noun(stem)
         || w.chars().any(|c| c.is_ascii_digit())
@@ -110,9 +110,7 @@ pub fn log_odds_z(count: f64, n: f64, english_p: f64) -> f64 {
     (la - lb) / (1.0 / (count + a) + 1.0 / (yb + a)).sqrt()
 }
 
-/// Two-corpus log-odds z (a vs b) with the pooled counts as the prior
-/// (for `diff`, not wired yet).
-#[allow(dead_code)]
+/// Two-corpus log-odds z (a vs b) with the pooled counts as the prior.
 pub fn log_odds_z2(ya: f64, na: f64, yb: f64, nb: f64, pooled_p: f64) -> f64 {
     let a = PRIOR_TOKENS * pooled_p;
     let la = ((ya + a) / (na + PRIOR_TOKENS - ya - a).max(1.0)).ln();
