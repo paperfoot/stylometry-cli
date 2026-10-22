@@ -39,6 +39,8 @@ const PARENT_FIELDS: [&str; 6] = [
 /// each) carry no measurable voice.
 const MIN_ITEM_WORDS: usize = 3;
 
+const BIN: &str = env!("CARGO_BIN_NAME");
+
 /// What a corpus path contained: the documents, and the register the source
 /// format implies (an X archive is social whatever its length), if any.
 pub struct Corpus {
@@ -75,6 +77,11 @@ pub struct ImportReport {
     /// (`tweets-part1.js`, ...: the rest of the same history).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub also_read: Vec<String>,
+    /// Anything that makes the profile differ from what the agent passed:
+    /// files left out as unreadable, other accounts' posts dropped.
+    /// `profile build` should print these.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// Items dropped, by reason.
@@ -161,14 +168,19 @@ pub fn read_corpus_as(path: &Path, register: Option<Register>) -> Result<Corpus,
     let mut docs: Vec<Doc> = Vec::new();
     // Structured files are read first and filtered across files at the end
     // (dominant author, duplicate ids, self-replies need the whole corpus).
-    let mut structured: Vec<(String, Vec<Raw>, Register)> = Vec::new();
+    let mut structured: Vec<Export> = Vec::new();
     let mut archive_parts: HashMap<(Option<PathBuf>, &'static str), usize> = HashMap::new();
     let mut note_pool = NotePool::new(notes);
+    // Exports in a folder that could not be read, kept for the error when
+    // nothing else was readable.
+    let mut failures: Vec<(String, AppError)> = Vec::new();
+    let mut dm_skipped: Vec<&PathBuf> = Vec::new();
+    let mut posts_read = false;
     for f in &files {
         let name = label(path, f);
         let base = base_name(f);
         let ext = f.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-        let parsed: Result<Option<(Vec<Raw>, Register)>, AppError> = (|| {
+        let parsed: Result<Option<(Parsed, Register)>, AppError> = (|| {
             Ok(match ext.as_str() {
                 "md" | "txt" | "markdown" | "text" => {
                     let raw = std::fs::read_to_string(f)?;
@@ -185,21 +197,22 @@ pub fn read_corpus_as(path: &Path, register: Option<Register>) -> Result<Corpus,
                         None
                     } else {
                         let raw = std::fs::read_to_string(f)?;
-                        let (items, rts) = x_archive(&raw, account.as_ref(), &mut note_pool)?;
-                        report.skipped.retweets += rts;
-                        Some((items, Register::Social))
+                        posts_read = true;
+                        Some((x_archive(&raw, account.as_ref(), &mut note_pool)?, Register::Social))
                     }
                 }
                 "js" if is_dm_file(&base) => {
                     if want_dms {
                         let raw = std::fs::read_to_string(f)?;
-                        let (items, others) = x_direct_messages(&raw, account.as_ref())?;
+                        let (p, others) = x_direct_messages(&raw, account.as_ref())?;
                         report.skipped.other_senders += others;
-                        Some((items, Register::Message))
+                        Some((p, Register::Message))
                     } else {
-                        report
-                            .files_skipped
-                            .push(format!("{name}: direct messages (profile them with --register message)"));
+                        report.files_skipped.push(format!(
+                            "{name}: direct messages, left out (profile them with --corpus {})",
+                            f.display()
+                        ));
+                        dm_skipped.push(f);
                         None
                     }
                 }
@@ -209,55 +222,73 @@ pub fn read_corpus_as(path: &Path, register: Option<Register>) -> Result<Corpus,
                     }
                     None
                 }
-                "json" => {
-                    let raw = std::fs::read_to_string(f)?;
-                    let (items, rts) = json_items(&raw)?;
-                    report.skipped.retweets += rts;
-                    Some((items, Register::Social))
-                }
-                "jsonl" | "ndjson" => {
-                    let (items, rts) = jsonl_items(&std::fs::read_to_string(f)?);
-                    report.skipped.retweets += rts;
-                    Some((items, Register::Social))
-                }
-                "csv" => {
-                    let (items, rts) = csv_items(f)?;
-                    report.skipped.retweets += rts;
-                    Some((items, Register::Social))
-                }
+                "json" => Some((json_items(&std::fs::read_to_string(f)?)?, Register::Social)),
+                "jsonl" | "ndjson" => Some((jsonl_items(&std::fs::read_to_string(f)?), Register::Social)),
+                "csv" => Some((csv_items(f)?, Register::Social)),
                 "eml" => Some((
-                    vec![Raw {
-                        item: eml_item(&std::fs::read_to_string(f)?),
-                        author: None,
-                    }],
+                    Parsed {
+                        objects: 1,
+                        items: vec![Raw {
+                            item: eml_item(&std::fs::read_to_string(f)?),
+                            author: None,
+                        }],
+                        ..Parsed::default()
+                    },
                     Register::Email,
                 )),
                 _ => None,
             })
         })();
+        let export_ext = matches!(ext.as_str(), "json" | "jsonl" | "ndjson" | "csv");
         match parsed {
-            Ok(Some((items, reg))) => {
+            // Records but no text field: an export whose column has another
+            // name, not an empty export.
+            Ok(Some((p, _))) if export_ext && p.items.is_empty() && p.retweets == 0 && p.objects > 0 => {
+                let e = AppError::input(
+                    format!("{name} has {} record(s) but none with a text field (looked for {})", p.objects, TEXT_FIELDS.join(", ")),
+                    "Rename the field holding the writing to \"text\"",
+                );
+                if single {
+                    return Err(e);
+                }
+                report.warnings.push(format!("{name} left out: {}", error_text(&e)));
+                failures.push((name, e));
+            }
+            Ok(Some((p, reg))) => {
+                report.skipped.retweets += p.retweets;
                 // An archive splits one account's posts over tweets.js,
                 // tweets-part1.js, ...: one source, sorted by time later.
-                let key = (ext == "js").then(|| (f.parent().map(Path::to_path_buf), reg.as_str()));
+                let key = (ext == "js").then(|| (f.parent().map(|d| d.canonicalize().unwrap_or_else(|_| d.to_path_buf())), reg.as_str()));
                 if let Some(&i) = key.as_ref().and_then(|k| archive_parts.get(k)) {
-                    structured[i].1.extend(items);
+                    structured[i].items.extend(p.items);
                 } else {
                     if let Some(k) = key {
                         archive_parts.insert(k, structured.len());
                     }
-                    structured.push((name, items, reg));
+                    structured.push(Export {
+                        name,
+                        items: p.items,
+                        register: reg,
+                    });
                 }
             }
             Ok(None) => {}
-            // In a folder, one unreadable export shouldn't sink the rest.
-            Err(e) if !single && matches!(ext.as_str(), "json" | "jsonl" | "ndjson" | "csv" | "js") => {
-                report.files_skipped.push(format!("{name}: unreadable ({e})"));
+            // In a folder, one unreadable export shouldn't sink the rest,
+            // but the agent must hear that it was left out.
+            Err(e) if !single && (export_ext || ext == "js") => {
+                report.files_skipped.push(format!("{name}: unreadable ({})", error_text(&e)));
+                report.warnings.push(format!("{name} could not be read and was left out: {}", error_text(&e)));
+                failures.push((name, e));
             }
             Err(e) => return Err(e),
         }
     }
     report.note_tweets_merged = note_pool.merged;
+    if register == Some(Register::Message) && posts_read {
+        report.warnings.push(
+            "--register message on X posts: there is no direct-messages.js here, so this profile is built from public posts".into(),
+        );
+    }
 
     let mut out = Corpus {
         docs,
@@ -267,16 +298,10 @@ pub fn read_corpus_as(path: &Path, register: Option<Register>) -> Result<Corpus,
     };
     finish_structured(&mut out, structured, account.as_ref());
     out.skipped = out.report.skipped.total();
+    recount(&mut out);
 
     if out.docs.is_empty() {
-        let mut why = format!("no readable text found under {}", path.display());
-        if out.skipped > 0 {
-            why.push_str(&format!(" ({} item(s) skipped: retweets, other accounts, or under 3 words)", out.skipped));
-        }
-        return Err(AppError::input(
-            why,
-            "Supported: .md/.txt prose, an unzipped X archive (pass its data/ folder), xmaster/JSON/JSONL/CSV exports with a text column, .eml",
-        ));
+        return Err(nothing_readable(path, &out, failures, &dm_skipped));
     }
     let long_form = out.docs.iter().any(|d| d.items.is_empty());
     if long_form && out.format_register.is_some() {
@@ -290,6 +315,75 @@ pub fn read_corpus_as(path: &Path, register: Option<Register>) -> Result<Corpus,
     Ok(out)
 }
 
+/// The error for a corpus with nothing to profile, naming the actual cause:
+/// exports that failed to read (as if each had been passed directly), DMs
+/// left out on purpose, or items all filtered away.
+fn nothing_readable(path: &Path, c: &Corpus, mut failures: Vec<(String, AppError)>, dm_skipped: &[&PathBuf]) -> AppError {
+    if failures.len() == 1 {
+        return failures.remove(0).1;
+    }
+    if let Some((_, first)) = failures.first() {
+        let list: Vec<String> = failures.iter().map(|(n, e)| format!("{n} ({})", error_text(e))).collect();
+        let fix = match first {
+            AppError::InvalidArguments { suggestion, .. } => suggestion.clone(),
+            _ => "Fix or remove the files listed, then build again".into(),
+        };
+        return AppError::input(format!("no export under {} could be read: {}", path.display(), list.join("; ")), fix);
+    }
+    if let Some(dm) = dm_skipped.first() {
+        return AppError::input(
+            format!(
+                "no posts under {}: it holds direct messages ({}), which are profiled only when asked for",
+                path.display(),
+                dm.display()
+            ),
+            format!("Profile the DMs: {BIN} profile build <name> --corpus {}", dm.display()),
+        );
+    }
+    let mut why = format!("no readable text found under {}", path.display());
+    if c.skipped > 0 {
+        why.push_str(&format!(" ({} item(s) skipped: retweets, other accounts, or under 3 words)", c.skipped));
+    }
+    AppError::input(
+        why,
+        "Supported: .md/.txt prose, an unzipped X archive (pass its data/ folder), xmaster/JSON/JSONL/CSV exports with a text column, .eml",
+    )
+}
+
+/// An error's message without the "Invalid input:" prefix, for warnings.
+fn error_text(e: &AppError) -> String {
+    match e {
+        AppError::InvalidArguments { message, .. } => message.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// Item counts per kind, recomputed after every filter.
+fn recount(c: &mut Corpus) {
+    c.report.items = 0;
+    c.report.kinds.clear();
+    for i in c.docs.iter().flat_map(|d| &d.items) {
+        c.report.items += 1;
+        *c.report.kinds.entry(kind_name(i.meta.kind)).or_insert(0) += 1;
+    }
+}
+
+/// One structured file's parse: its items and what was dropped on the way.
+#[derive(Default)]
+struct Parsed {
+    items: Vec<Raw>,
+    retweets: usize,
+    /// Records seen, with or without text.
+    objects: usize,
+}
+
+/// A structured file after parsing, before the cross-file filters.
+struct Export {
+    name: String,
+    items: Vec<Raw>,
+    register: Register,
+}
+
 /// One parsed item plus what is needed to filter it across files.
 struct Raw {
     item: Item,
@@ -300,10 +394,10 @@ struct Raw {
 /// Cross-file filters: keep the owner's account, drop repeated ids, mark
 /// replies to the owner's own posts as thread parts, drop items too short
 /// to measure; then sort each file's items by date.
-fn finish_structured(out: &mut Corpus, structured: Vec<(String, Vec<Raw>, Register)>, account: Option<&Account>) {
+fn finish_structured(out: &mut Corpus, structured: Vec<Export>, account: Option<&Account>) {
     let mut authors: HashMap<String, usize> = HashMap::new();
-    for (_, items, _) in &structured {
-        for r in items {
+    for e in &structured {
+        for r in &e.items {
             if let Some(a) = &r.author {
                 *authors.entry(norm_handle(a)).or_insert(0) += 1;
             }
@@ -319,13 +413,13 @@ fn finish_structured(out: &mut Corpus, structured: Vec<(String, Vec<Raw>, Regist
 
     let own_ids: HashSet<String> = structured
         .iter()
-        .flat_map(|(_, items, _)| items)
+        .flat_map(|e| &e.items)
         .filter(|r| r.author.as_deref().is_none_or(|a| Some(norm_handle(a)) == owner))
         .filter_map(|r| r.item.meta.id.clone())
         .collect();
 
     let mut seen: HashSet<String> = HashSet::new();
-    for (name, items, reg) in structured {
+    for Export { name, items, register: reg } in structured {
         let mut kept: Vec<Item> = Vec::with_capacity(items.len());
         for Raw { mut item, author } in items {
             if let (Some(a), Some(o)) = (&author, &owner) {
@@ -360,10 +454,6 @@ fn finish_structured(out: &mut Corpus, structured: Vec<(String, Vec<Raw>, Regist
             (None, Some(_)) => std::cmp::Ordering::Greater,
             (None, None) => std::cmp::Ordering::Equal,
         });
-        for i in &kept {
-            *out.report.kinds.entry(kind_name(i.meta.kind)).or_insert(0) += 1;
-        }
-        out.report.items += kept.len();
         // JSON/CSV exports of long items (newsletters, blog posts) are not social.
         let is_archive = name.ends_with(".js");
         let reg = if reg == Register::Social && !is_archive && median_words(&kept) > 60 {
@@ -377,6 +467,15 @@ fn finish_structured(out: &mut Corpus, structured: Vec<(String, Vec<Raw>, Regist
             text: String::new(),
             items: kept,
         });
+    }
+    // A home-timeline dump is cut to one account: say whose.
+    if let (Some(o), n) = (&owner, out.report.skipped.other_authors) {
+        if n > 0 {
+            let others = authors.len().saturating_sub(1);
+            out.report.warnings.push(format!(
+                "kept only @{o}'s posts; left out {n} post(s) by {others} other account(s) (pass a dump of a single account if @{o} is not the writer)"
+            ));
+        }
     }
 }
 
@@ -474,6 +573,7 @@ pub fn keep_since(c: &mut Corpus, day: &str) -> Result<(), AppError> {
         d.items.retain(|i| i.meta.date.as_deref().is_none_or(|dt| dt.get(..10).is_none_or(|x| x >= day)));
     }
     c.docs.retain(|d| !d.items.is_empty() || !d.text.is_empty());
+    recount(c);
     Ok(())
 }
 
@@ -942,13 +1042,14 @@ impl NotePool {
 }
 
 /// X archive `tweets.js` (or `tweet.js`, `tweets-partN.js`):
-/// `window.YTD.tweets.part0 = [ {"tweet": {...}}, ... ]`. Returns the items
-/// and the number of retweets skipped.
-fn x_archive(raw: &str, account: Option<&Account>, notes: &mut NotePool) -> Result<(Vec<Raw>, usize), AppError> {
+/// `window.YTD.tweets.part0 = [ {"tweet": {...}}, ... ]`.
+fn x_archive(raw: &str, account: Option<&Account>, notes: &mut NotePool) -> Result<Parsed, AppError> {
     let v = ytd_json(raw, "tweets.js")?;
     let mut items = Vec::new();
     let mut retweets = 0;
+    let mut objects = 0;
     for e in v.as_array().into_iter().flatten() {
+        objects += 1;
         let o = e.get("tweet").filter(|t| t.is_object()).unwrap_or(e);
         let Some(full) = first_str(o, &["full_text", "text"]) else {
             continue;
@@ -1023,13 +1124,18 @@ fn x_archive(raw: &str, account: Option<&Account>, notes: &mut NotePool) -> Resu
             author: None,
         });
     }
-    Ok((items, retweets))
+    Ok(Parsed {
+        items,
+        retweets,
+        objects,
+        ..Parsed::default()
+    })
 }
 
 /// `direct-messages.js`: the owner's own messages only (the other side's
 /// writing would leak into the profile). The owner is `account.js`'s id, or
 /// failing that the one sender present in every conversation.
-fn x_direct_messages(raw: &str, account: Option<&Account>) -> Result<(Vec<Raw>, usize), AppError> {
+fn x_direct_messages(raw: &str, account: Option<&Account>) -> Result<(Parsed, usize), AppError> {
     let v = ytd_json(raw, "direct-messages.js")?;
     let convs: Vec<&Value> = v
         .as_array()
@@ -1070,8 +1176,10 @@ fn x_direct_messages(raw: &str, account: Option<&Account>) -> Result<(Vec<Raw>, 
     };
     let mut items = Vec::new();
     let mut others = 0;
+    let mut objects = 0;
     for c in &convs {
         for m in messages(c) {
+            objects += 1;
             if first_id(&m, &["senderId"]).as_deref() != Some(owner.as_str()) {
                 others += 1;
                 continue;
@@ -1100,7 +1208,12 @@ fn x_direct_messages(raw: &str, account: Option<&Account>) -> Result<(Vec<Raw>, 
             });
         }
     }
-    Ok((items, others))
+    let parsed = Parsed {
+        items,
+        objects,
+        ..Parsed::default()
+    };
+    Ok((parsed, others))
 }
 
 // ── JSON / JSONL / CSV ──────────────────────────────────────────────────
@@ -1164,23 +1277,27 @@ fn item_of(o: &Value) -> Result<Raw, bool> {
     })
 }
 
-/// Parse a list of objects; returns items and retweets skipped.
-fn items_of<'a>(objs: impl Iterator<Item = &'a Value>) -> (Vec<Raw>, usize) {
-    let mut items = Vec::new();
-    let mut retweets = 0;
-    for o in objs {
+/// Parse one file's objects.
+fn items_of(objs: &[Value]) -> Parsed {
+    let unwrap = |o: &'_ Value| -> Value { o.get("tweet").filter(|t| t.is_object()).unwrap_or(o).clone() };
+    let rows: Vec<Value> = objs.iter().map(unwrap).collect();
+    let mut p = Parsed {
+        objects: rows.iter().filter(|o| o.is_object()).count(),
+        ..Parsed::default()
+    };
+    for o in &rows {
         match item_of(o) {
-            Ok(r) => items.push(r),
-            Err(true) => retweets += 1,
+            Ok(r) => p.items.push(r),
+            Err(true) => p.retweets += 1,
             Err(false) => {}
         }
     }
-    (items, retweets)
+    p
 }
 
 /// A JSON file: an array of items, an xmaster envelope (`data.tweets`), or
 /// any object holding one array of items.
-fn json_items(raw: &str) -> Result<(Vec<Raw>, usize), AppError> {
+fn json_items(raw: &str) -> Result<Parsed, AppError> {
     let v: Value = serde_json::from_str(raw)
         .map_err(|e| AppError::input(format!("invalid JSON: {e}"), "Pass a JSON array of objects with a \"text\" field, or xmaster --json output"))?;
     fn find_array(v: &Value) -> Option<&Vec<Value>> {
@@ -1197,15 +1314,15 @@ fn json_items(raw: &str) -> Result<(Vec<Raw>, usize), AppError> {
             _ => None,
         }
     }
-    Ok(find_array(&v).map(|a| items_of(a.iter())).unwrap_or_default())
+    Ok(find_array(&v).map(|a| items_of(a)).unwrap_or_default())
 }
 
-fn jsonl_items(raw: &str) -> (Vec<Raw>, usize) {
+fn jsonl_items(raw: &str) -> Parsed {
     let objs: Vec<Value> = raw.lines().filter_map(|l| serde_json::from_str::<Value>(l.trim()).ok()).collect();
-    items_of(objs.iter())
+    items_of(&objs)
 }
 
-fn csv_items(path: &Path) -> Result<(Vec<Raw>, usize), AppError> {
+fn csv_items(path: &Path) -> Result<Parsed, AppError> {
     let mut rdr = csv::ReaderBuilder::new().flexible(true).from_path(path).map_err(|e| {
         AppError::input(format!("cannot read CSV {}: {e}", path.display()), "Pass a CSV with a header row and a text column")
     })?;
@@ -1232,7 +1349,7 @@ fn csv_items(path: &Path) -> Result<(Vec<Raw>, usize), AppError> {
         }
         objs.push(Value::Object(o));
     }
-    Ok(items_of(objs.iter()))
+    Ok(items_of(&objs))
 }
 
 /// The body of an .eml message: headers dropped, quoted replies and the
@@ -1286,8 +1403,8 @@ mod tests {
           {"tweet": {"full_text": "RT @someone: not mine at all here", "favorite_count": "0", "retweet_count": "0"}},
           {"tweet": {"id_str": "11", "full_text": "@friend thanks, that helps a lot", "in_reply_to_status_id_str": "1", "in_reply_to_user_id_str": "99", "display_text_range": ["0", "32"], "favorite_count": 1, "retweet_count": "0"}}
         ]"#;
-        let (items, rts) = x_archive(raw, None, &mut pool()).unwrap();
-        assert_eq!(rts, 1);
+        let Parsed { items, retweets, .. } = x_archive(raw, None, &mut pool()).unwrap();
+        assert_eq!(retweets, 1);
         assert_eq!(texts(&items), ["Shipping the new build today & it's fast", "thanks, that helps a lot"]);
         let m = &items[0].item.meta;
         assert_eq!((m.likes, m.reposts, m.impressions), (Some(12.0), Some(3.0), None));
@@ -1304,7 +1421,7 @@ mod tests {
             username: Some("me".into()),
         };
         let raw = r#"[{"tweet": {"id_str": "2", "full_text": "and the second part of the thread", "in_reply_to_status_id_str": "1", "in_reply_to_user_id_str": "42"}}]"#;
-        let (items, _) = x_archive(raw, Some(&acct), &mut pool()).unwrap();
+        let items = x_archive(raw, Some(&acct), &mut pool()).unwrap().items;
         assert_eq!(items[0].item.meta.kind, ItemKind::ThreadPart);
     }
 
@@ -1325,7 +1442,7 @@ mod tests {
           {"tweet": {"id_str": "2", "full_text": "This is exactly what I meant earlier https://t.co/Q1", "entities": {"urls": [{"url": "https://t.co/Q1", "expanded_url": "https://twitter.com/x/status/5"}]}}},
           {"tweet": {"id_str": "3", "full_text": "Read my post https://t.co/L1 about it", "entities": {"urls": [{"url": "https://t.co/L1", "expanded_url": "https://example.com/a"}]}}}
         ]"#;
-        let (items, _) = x_archive(raw, None, &mut pool()).unwrap();
+        let items = x_archive(raw, None, &mut pool()).unwrap().items;
         assert_eq!(texts(&items), ["Look at this view from the office", "This is exactly what I meant earlier", "Read my post https://t.co/L1 about it"]);
         assert!(items[0].item.meta.media);
         assert_eq!(items[1].item.meta.kind, ItemKind::Quote);
@@ -1340,7 +1457,7 @@ mod tests {
             text: full.into(),
         }]);
         let raw = r#"[{"tweet": {"id_str": "7", "full_text": "This is a long premium post that goes on well past the old limit, and… https://t.co/N1", "created_at": "Fri Mar 01 10:00:00 +0000 2024"}}]"#;
-        let (items, _) = x_archive(raw, None, &mut notes).unwrap();
+        let items = x_archive(raw, None, &mut notes).unwrap().items;
         assert_eq!(items[0].item.text, full);
         assert_eq!(notes.merged, 1);
 
@@ -1349,7 +1466,7 @@ mod tests {
             created: Some("2024-03-09T10:00:00.000Z".into()),
             text: full.into(),
         }]);
-        let (items, _) = x_archive(raw, None, &mut notes).unwrap();
+        let items = x_archive(raw, None, &mut notes).unwrap().items;
         assert!(items[0].item.text.ends_with("https://t.co/N1"));
         assert_eq!(notes.merged, 0);
     }
@@ -1398,7 +1515,7 @@ mod tests {
           {"id":"1","author":"@me","text":"Your agent needs keys.\n\nIt shouldn't see them.","likes":6,"retweets":1,"impressions":129,"date":"2026-10-19T14:49:58.000Z"},
           {"id":"2","author":"@me","text":"@pal @other Thanks, that's from my own usage","likes":1,"retweets":0,"impressions":0,"date":"2026-10-19T19:44:56.000Z"}
         ]}}"#;
-        let (items, _) = json_items(raw).unwrap();
+        let items = json_items(raw).unwrap().items;
         assert!(items[0].item.text.contains("\n\n"));
         assert_eq!(items[0].item.meta.impressions, Some(129.0));
         assert_eq!(items[0].item.meta.reposts, Some(1.0));
@@ -1433,14 +1550,14 @@ mod tests {
             {"messageCreate": {"senderId": "1", "id": "d", "text": "not yet, will look tonight &amp; reply", "createdAt": "2024-02-01T10:05:00.000Z"}}
           ]}}
         ]"#;
-        let (items, others) = x_direct_messages(raw, None).unwrap();
+        let (p, others) = x_direct_messages(raw, None).unwrap();
         assert_eq!(others, 2);
-        assert_eq!(texts(&items), ["hey are you around later today", "not yet, will look tonight & reply"]);
+        assert_eq!(texts(&p.items), ["hey are you around later today", "not yet, will look tonight & reply"]);
         // One conversation can't say who the owner is without account.js.
         let one = r#"[{"dmConversation": {"messages": [{"messageCreate": {"senderId": "1", "text": "hi there you"}}]}}]"#;
         assert!(x_direct_messages(one, None).is_err());
         let acct = Account { id: Some("1".into()), username: None };
-        assert_eq!(x_direct_messages(one, Some(&acct)).unwrap().0.len(), 1);
+        assert_eq!(x_direct_messages(one, Some(&acct)).unwrap().0.items.len(), 1);
     }
 
     #[test]
@@ -1526,6 +1643,119 @@ mod tests {
 
     fn ytd(name: &str, v: &Value) -> String {
         format!("window.YTD.{name}.part0 = {v}")
+    }
+
+    fn dm_archive(dir: &Path) {
+        write(dir, "data/account.js", &ytd("account", &serde_json::json!([{"account": {"username": "owner", "accountId": "4242"}}])));
+        let msgs: Vec<Value> = (0..6)
+            .flat_map(|i| {
+                [
+                    serde_json::json!({"messageCreate": {"senderId": "4242", "id": format!("m{i}"), "text": format!("OWN sure, plan {i} sounds good to me"), "createdAt": "2020-01-01T10:00:00.000Z"}}),
+                    serde_json::json!({"messageCreate": {"senderId": "77", "id": format!("o{i}"), "text": format!("OTHER what about plan {i} this week"), "createdAt": "2020-01-01T10:01:00.000Z"}}),
+                ]
+            })
+            .collect();
+        write(dir, "data/direct-messages.js", &ytd("direct_messages", &serde_json::json!([{"dmConversation": {"messages": msgs}}])));
+    }
+
+    #[test]
+    fn dm_only_folder_names_the_file_and_the_command_that_works() {
+        let tmp = tempfile::tempdir().unwrap();
+        dm_archive(tmp.path());
+        let Err(AppError::InvalidArguments { message, suggestion }) = read_corpus(tmp.path()) else {
+            panic!("a DM-only folder must be an input error");
+        };
+        assert!(message.contains("direct messages") && message.contains("direct-messages.js"), "{message}");
+        let dm = tmp.path().join("data/direct-messages.js");
+        assert!(suggestion.contains(&format!("--corpus {}", dm.display())), "{suggestion}");
+        // The suggested path works today; a folder with --register message
+        // works once profile build passes the register through.
+        for c in [read_corpus(&dm).unwrap(), read_corpus_as(tmp.path(), Some(Register::Message)).unwrap()] {
+            let all: Vec<&Item> = c.docs.iter().flat_map(|d| &d.items).collect();
+            assert_eq!(all.len(), 6);
+            assert!(all.iter().all(|i| i.text.starts_with("OWN ")));
+        }
+    }
+
+    #[test]
+    fn skipped_dm_hint_points_at_the_file_not_a_flag_that_reads_posts() {
+        let tmp = tempfile::tempdir().unwrap();
+        dm_archive(tmp.path());
+        let rows: Vec<Value> = (0..5)
+            .map(|i| serde_json::json!({"tweet": {"id_str": i.to_string(), "full_text": format!("a public post about plan {i} today")}}))
+            .collect();
+        write(tmp.path(), "data/tweets.js", &ytd("tweets", &Value::Array(rows)));
+        let c = read_corpus(tmp.path()).unwrap();
+        let hint = c.report.files_skipped.iter().find(|s| s.contains("direct messages")).unwrap();
+        assert!(hint.contains("--corpus") && !hint.contains("--register"), "{hint}");
+        // Asking for messages on posts alone says so.
+        let f = tmp.path().join("data/tweets.js");
+        let c = read_corpus_as(&f, Some(Register::Message)).unwrap();
+        assert!(c.report.warnings.iter().any(|w| w.contains("public posts")), "{:?}", c.report.warnings);
+    }
+
+    fn xm(rows: &[(usize, &str, &str)]) -> String {
+        let rows: Vec<Value> = rows
+            .iter()
+            .map(|(id, a, t)| serde_json::json!({"id": id.to_string(), "author": a, "text": t, "impressions": 10, "likes": 1, "retweets": 0, "date": "2026-10-01T10:00:00.000Z"}))
+            .collect();
+        serde_json::json!({"data": {"tweets": rows}}).to_string()
+    }
+
+    #[test]
+    fn left_out_exports_and_other_authors_become_warnings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut rows: Vec<(usize, &str, &str)> = (1..6).map(|i| (i, "@me", "a post of mine about the garden fence")).collect();
+        rows.push((9, "@stranger", "someone else's post on the timeline"));
+        write(tmp.path(), "good.json", &xm(&rows));
+        let big = xm(&rows);
+        write(tmp.path(), "big-2025.json", &big[..big.len() / 2]);
+        write(tmp.path(), "notes.csv", "title,words\nfoo,12\n");
+        write(tmp.path(), "named.json", r#"[{"tweet_text": "the column has another name here"}]"#);
+        let c = read_corpus(tmp.path()).unwrap();
+        let w = &c.report.warnings;
+        for name in ["big-2025.json", "notes.csv", "named.json"] {
+            assert!(w.iter().any(|x| x.starts_with(name) && x.contains("left out")), "{name}: {w:?}");
+        }
+        assert!(w.iter().any(|x| x.contains("kept only @me's posts") && x.contains("1 post(s) by 1 other account")), "{w:?}");
+        assert_eq!(c.report.items, 5);
+        assert_eq!(c.report.kinds.get("post"), Some(&5));
+        let json = serde_json::to_value(&c.report).unwrap();
+        assert!(json["warnings"].is_array() && json["skipped"]["other_authors"] == 1, "{json}");
+    }
+
+    #[test]
+    fn records_without_text_are_named_but_strings_and_dms_are_not_records() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "book/ch1.md", "It was late when she left the house, and the rain had not stopped.\n");
+        write(tmp.path(), "book/package.json", r#"{"keywords": ["a", "b"]}"#);
+        let c = read_corpus(&tmp.path().join("book")).unwrap();
+        assert!(c.report.warnings.is_empty(), "{:?}", c.report.warnings);
+        // Only the other side wrote in this conversation: no owner's items,
+        // which is not a "missing text field".
+        write(tmp.path(), "dm/data/account.js", &ytd("account", &serde_json::json!([{"account": {"accountId": "4242"}}])));
+        let msgs = serde_json::json!([{"dmConversation": {"messages": [{"messageCreate": {"senderId": "77", "id": "o1", "text": "are you around later today"}}]}}]);
+        let dm = write(tmp.path(), "dm/data/direct-messages.js", &ytd("direct_messages", &msgs));
+        let Err(AppError::InvalidArguments { message, .. }) = read_corpus(&dm) else {
+            panic!("expected an input error");
+        };
+        assert!(!message.contains("text field") && message.contains("1 item(s) skipped"), "{message}");
+    }
+
+    #[test]
+    fn a_folder_where_every_export_failed_reports_why() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "notes.csv", "title,words\nfoo,12\n");
+        let Err(AppError::InvalidArguments { message, suggestion }) = read_corpus(tmp.path()) else {
+            panic!("expected an input error");
+        };
+        assert!(message.contains("no text column"), "{message}");
+        assert!(suggestion.contains("text"), "{suggestion}");
+        write(tmp.path(), "broken.json", "{ not json");
+        let Err(AppError::InvalidArguments { message, .. }) = read_corpus(tmp.path()) else {
+            panic!("expected an input error");
+        };
+        assert!(message.contains("broken.json") && message.contains("notes.csv"), "{message}");
     }
 
     #[test]

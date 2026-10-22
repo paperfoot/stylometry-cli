@@ -381,6 +381,20 @@ fn casual_posts(n: usize) -> Vec<String> {
         .collect()
 }
 
+/// Run `profile build` and return (exit code, envelope); error envelopes
+/// are on stderr.
+fn try_build(data: &Path, corpus: &Path, name: &str, extra: &[&str]) -> (i32, Value) {
+    let out = bin()
+        .env("STYLOMETRY_DATA_DIR", data)
+        .args(["profile", "build", name, "--json", "--corpus"])
+        .arg(corpus)
+        .args(extra)
+        .output()
+        .unwrap();
+    let body = if out.stdout.is_empty() { &out.stderr } else { &out.stdout };
+    (out.status.code().unwrap_or(-1), serde_json::from_slice(body).unwrap_or(Value::Null))
+}
+
 #[test]
 fn separated_lowercase_posts_stay_separate_items() {
     let tmp = tempfile::tempdir().unwrap();
@@ -400,6 +414,39 @@ fn blank_line_lowercase_posts_stay_separate_items() {
     std::fs::write(&f, casual_posts(24).join("\n\n")).unwrap();
     let p = build(&tmp.path().join("store"), &f, "blank", &["--register", "social"]);
     assert_eq!(items(&p).len(), 24);
+}
+
+#[test]
+fn dm_only_folder_says_how_to_profile_the_dms() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data = tmp.path().join("arch/data");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(data.join("account.js"), ytd("account", &json!([{"account": {"username": "owner", "accountId": "4242"}}]))).unwrap();
+    let msgs: Vec<Value> = (0..24)
+        .map(|i| json!({"messageCreate": {"senderId": "4242", "id": format!("m{i}"), "text": format!("sure, {} sounds good to me", TOPICS[i % 8]), "createdAt": "2020-01-01T10:00:00.000Z"}}))
+        .collect();
+    std::fs::write(data.join("direct-messages.js"), ytd("direct_messages", &json!([{"dmConversation": {"messages": msgs}}]))).unwrap();
+    let (code, env) = try_build(&tmp.path().join("store"), &tmp.path().join("arch"), "dm", &[]);
+    assert_eq!(code, 3);
+    let msg = env["error"]["message"].as_str().unwrap();
+    let fix = env["error"]["suggestion"].as_str().unwrap();
+    assert!(msg.contains("direct-messages.js"), "{msg}");
+    assert!(fix.contains("--corpus") && fix.contains("direct-messages.js"), "{fix}");
+    // The suggestion, followed literally, builds the DM profile.
+    let p = build(&tmp.path().join("store"), &data.join("direct-messages.js"), "dm", &[]);
+    assert_eq!(p["register"], "message");
+    assert_eq!(items(&p).len(), 24);
+}
+
+#[test]
+fn folder_of_failed_exports_reports_the_real_cause() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("exports");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("notes.csv"), "title,words\nfoo,12\nbar,30\n").unwrap();
+    let (code, env) = try_build(&tmp.path().join("store"), &dir, "x", &[]);
+    assert_eq!(code, 3);
+    assert!(env["error"]["message"].as_str().unwrap().contains("no text column"), "{env}");
 }
 
 #[test]
