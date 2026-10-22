@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use serde::Serialize;
 
 use crate::engine::profile::{self, Profile, ProfileKind, Register, BASE_CHUNK_WORDS, MIN_CHUNKS};
-use crate::engine::{import, store};
+use crate::engine::{import, store, texture};
 use crate::error::AppError;
 use crate::output::{self, Ctx};
 
@@ -27,8 +27,37 @@ struct BuiltProfile {
     /// whose account was kept.
     #[serde(skip_serializing_if = "Option::is_none")]
     import: Option<import::ImportReport>,
+    /// JEV's texture bands, measured at build when a key is found.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    texture: Option<BuiltTexture>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     warnings: Vec<String>,
+}
+
+/// What measuring the author's texture did at build.
+#[derive(Serialize)]
+struct BuiltTexture {
+    /// measured | up_to_date | failed
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage: Option<texture::Usage>,
+}
+
+/// Measure the author's texture bands (`profiles/<name>.texture.json`) when
+/// JEV is on and keyed; `None` when it is not (the build stays local), and
+/// for background profiles, which are never a target.
+fn measure_texture(p: &Profile) -> Option<BuiltTexture> {
+    if p.kind == ProfileKind::Background {
+        return None;
+    }
+    let jev = crate::engine::jev::Jev::load().ok()?;
+    Some(match texture::author(&jev, p) {
+        Ok((_, Some(u))) => BuiltTexture { status: "measured", reason: None, usage: Some(u) },
+        Ok((_, None)) => BuiltTexture { status: "up_to_date", reason: None, usage: None },
+        Err(why) => BuiltTexture { status: "failed", reason: Some(why), usage: None },
+    })
 }
 
 fn built(p: &Profile, path: PathBuf) -> BuiltProfile {
@@ -43,6 +72,7 @@ fn built(p: &Profile, path: PathBuf) -> BuiltProfile {
         path: path.display().to_string(),
         hygiene: None,
         import: None,
+        texture: None,
         warnings: Vec::new(),
     }
 }
@@ -78,11 +108,25 @@ fn print_built(ctx: Ctx, data: &BuiltProfile, verb: &str) -> Result<(), AppError
                 r.account.as_ref().map(|a| format!(" from {a}")).unwrap_or_default()
             );
         }
+        print_texture(d.texture.as_ref());
         for w in &d.warnings {
             println!("  {} {}", "warning:".yellow().bold(), w.yellow());
         }
         println!("  {}", d.path.dimmed());
     })
+}
+
+fn print_texture(t: Option<&BuiltTexture>) {
+    use owo_colors::OwoColorize;
+    match t {
+        Some(BuiltTexture { usage: Some(u), .. }) => println!(
+            "  texture: measured {} passages with JEV ({} requests, ${:.4})",
+            u.passages, u.requests, u.cost_usd
+        ),
+        Some(BuiltTexture { reason: Some(r), .. }) => println!("  {} {}", "texture:".yellow(), r.yellow()),
+        Some(_) => println!("  texture: bands up to date"),
+        None => {}
+    }
 }
 
 /// Arguments of `profile build`.
@@ -123,6 +167,7 @@ pub fn build(ctx: Ctx, a: BuildArgs) -> Result<(), AppError> {
     let path = store::save(&profile)?;
     let mut data = built(&profile, path);
     data.hygiene = Some(hygiene);
+    data.texture = measure_texture(&profile);
     data.warnings.extend(corpus_in.report.warnings.iter().cloned());
     if corpus_in.report.items > 0 {
         data.import = Some(corpus_in.report.clone());
@@ -161,7 +206,9 @@ pub fn blend(ctx: Ctx, name: String, from: Vec<String>, force: bool) -> Result<(
     }
     let profile = Profile::blend(&name, &parts)?;
     let path = store::save(&profile)?;
-    let data = built(&profile, path);
+    let mut data = built(&profile, path);
+    // From the blend's own text, each component weighted by its share.
+    data.texture = measure_texture(&profile);
     let next = vec![
         format!("{BIN} analyze {name}"),
         format!("{BIN} guide {name}"),
@@ -175,6 +222,7 @@ pub fn blend(ctx: Ctx, name: String, from: Vec<String>, force: bool) -> Result<(
             .map(|(n, s)| format!("{n} {:.0}%", s * 100.0))
             .collect();
         println!("Blended {} from {}", d.name.green().bold(), mix.join(" + "));
+        print_texture(d.texture.as_ref());
         println!("  {}", d.path.dimmed());
     })
 }
@@ -192,7 +240,9 @@ pub fn rebuild(ctx: Ctx, name: String) -> Result<(), AppError> {
     let register = store::load(&name).ok().map(|p| (p.register, p.register_reason));
     let profile = Profile::build_with(&name, &docs, kind, register, MIN_CHUNKS)?;
     let path = store::save(&profile)?;
-    print_built(ctx, &built(&profile, path), "Rebuilt")
+    let mut data = built(&profile, path);
+    data.texture = measure_texture(&profile);
+    print_built(ctx, &data, "Rebuilt")
 }
 
 #[derive(Serialize)]
@@ -381,6 +431,7 @@ pub fn remove(ctx: Ctx, name: String, confirm: bool) -> Result<(), AppError> {
         ));
     }
     store::remove(&name)?;
+    let _ = std::fs::remove_file(texture::sidecar_path(&name));
     #[derive(Serialize)]
     struct Removed {
         removed: String,

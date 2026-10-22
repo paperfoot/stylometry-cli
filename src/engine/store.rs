@@ -151,7 +151,8 @@ pub fn list_names() -> Vec<String> {
         for e in rd.flatten() {
             let p = e.path();
             if p.extension().and_then(|s| s.to_str()) == Some("json") {
-                if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                // `<name>.texture.json` sidecars are not profiles.
+                if let Some(stem) = p.file_stem().and_then(|s| s.to_str()).filter(|s| !s.contains('.')) {
                     names.push(stem.to_string());
                 }
             }
