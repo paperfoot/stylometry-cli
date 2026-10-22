@@ -34,6 +34,25 @@ const RELEVANCE: &str = include_str!("data/jev_relevance.json");
 /// more is sent: a hanging server costs one timeout, not one per passage.
 pub const BREAKER: usize = 4;
 
+/// Set once JEV stopped answering (breaker tripped, budget spent) in this
+/// process: later commands' features (a brief ranks examples and reads
+/// texture) go local at once instead of each paying its own timeout.
+static STOPPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether JEV gave up earlier in this run.
+pub fn stopped() -> bool {
+    STOPPED.load(Ordering::SeqCst)
+}
+
+/// Give up on JEV for the rest of this run. Unit tests share one process
+/// and build many clients, so there the flag stays per client (the
+/// contract tests run the binary and cover it).
+pub fn stop() {
+    if cfg!(not(test)) {
+        STOPPED.store(true, Ordering::SeqCst);
+    }
+}
+
 pub struct Jev {
     agent: ureq::Agent,
     key: String,
@@ -89,10 +108,6 @@ impl Answers {
         self.0.get(id)?.get("score")?.as_f64().filter(|v| v.is_finite() && *v >= 0.0)
     }
 
-    /// The probability of one option of a Choice.
-    pub fn prob(&self, id: &str, option: &str) -> Option<f64> {
-        self.0.get(id)?.get("probabilities")?.get(option)?.as_f64()
-    }
 
     /// A Noul's probability or a Score's level, whichever the question is.
     pub fn value(&self, id: &str) -> Option<f64> {
@@ -137,6 +152,9 @@ impl Jev {
     pub fn from_config(cfg: &JevConfig) -> Result<Jev, String> {
         if let Some(why) = unavailable_reason(cfg) {
             return Err(why);
+        }
+        if stopped() {
+            return Err("JEV stopped answering earlier in this run".into());
         }
         let key = resolve_key(cfg).ok_or("no key")?;
         let timeout = Duration::from_millis(cfg.timeout_ms.max(500));
@@ -231,6 +249,7 @@ impl Jev {
             // The breaker or the budget: nothing more goes out.
             let left = self.time_left();
             if self.streak.load(Ordering::SeqCst) >= BREAKER || left.is_some_and(|t| t.is_zero()) {
+                stop();
                 if attempt > 0 {
                     break;
                 }
@@ -271,7 +290,9 @@ impl Jev {
                 std::thread::sleep(Duration::from_millis(800));
                 continue;
             }
-            self.streak.fetch_add(1, Ordering::SeqCst);
+            if self.streak.fetch_add(1, Ordering::SeqCst) + 1 >= BREAKER {
+                stop();
+            }
             self.inflight.fetch_sub(1, Ordering::SeqCst);
             self.usage.failed.fetch_add(1, Ordering::Relaxed);
             return None;

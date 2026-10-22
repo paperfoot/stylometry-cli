@@ -92,11 +92,6 @@ const FIT_WEAK: f64 = 0.8;
 /// of requests (25 s) and a brief, which retrieves several times, for 58 s.
 const JEV_BUDGET: Duration = Duration::from_millis(3000);
 
-/// Set once JEV failed or ran out of time in this process, so later
-/// retrievals (a brief retrieves several times) keep the word ranking
-/// without asking again.
-static JEV_FAILED: AtomicBool = AtomicBool::new(false);
-
 /// What ordered the picks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -719,7 +714,9 @@ fn judge_fit(n_cands: usize, pool: &[usize], excerpts: &[String], task: &str) ->
     if pool.is_empty() {
         return Err(None);
     }
-    if JEV_FAILED.load(Ordering::Relaxed) {
+    // Once JEV failed or ran out of time in this process, later retrievals
+    // (a brief retrieves several times) and texture keep their local path.
+    if crate::engine::jev::stopped() {
         return Err(Some("JEV did not answer earlier in this run: ranked by shared words instead".into()));
     }
     let cfg = crate::config::load().map(|c| c.jev).unwrap_or_default();
@@ -730,7 +727,7 @@ fn judge_fit(n_cands: usize, pool: &[usize], excerpts: &[String], task: &str) ->
         .map(|x| json!({ "piece_to_write": task, "author_passage": x }))
         .collect();
     let got = fits_within(jev, states, cfg.workers, JEV_BUDGET).map_err(|why| {
-        JEV_FAILED.store(true, Ordering::Relaxed);
+        crate::engine::jev::stop();
         Some(why)
     })?;
     let mut fits = vec![None; n_cands];

@@ -54,7 +54,7 @@ impl Default for JevConfig {
             key_env: "TYPESAFE_API_KEY".into(),
             key_command: String::new(),
             workers: 8,
-            timeout_ms: 8000,
+            timeout_ms: 4000,
             budget_ms: 30_000,
         }
     }
