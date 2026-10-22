@@ -2324,3 +2324,28 @@ impl ItemModel {
             .collect()
     }
 }
+
+// ── v0.4 round 2 contract (MECH lane owns the body) ────────────────────────
+
+/// How the author sets type: the forms they use, with shares. Only forms
+/// with enough evidence are reported (an author who never writes an
+/// ellipsis has no ellipsis habit). Keys are the literal glyph forms.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct TypographyHabits {
+    /// "curly" (“ ”) vs "straight" (") double quotes.
+    pub double_quotes: Vec<(String, f64)>,
+    /// "curly" (’) vs "straight" (') apostrophes in contractions/possessives.
+    pub apostrophes: Vec<(String, f64)>,
+    /// "…", "...", ". . .", ".." (two-dot joiner).
+    pub ellipses: Vec<(String, f64)>,
+    /// "—" (closed em dash), " — " (spaced), "--", " - " (spaced hyphen), "–" (en dash).
+    pub dashes: Vec<(String, f64)>,
+    /// Scene/section break lines: "***", "* * *", "•••", "---", "#".
+    pub scene_breaks: Vec<(String, f64)>,
+}
+
+/// The author's typography habits. FOUNDATION STUB: the MECH lane implements it.
+pub fn typography_habits(p: &crate::engine::profile::Profile) -> TypographyHabits {
+    let _ = p;
+    TypographyHabits::default()
+}
