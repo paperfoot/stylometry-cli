@@ -118,6 +118,43 @@ pub const MIN_PASSAGE_WORDS: usize = 60;
 /// are too short to judge (rough AUC 0.79 per post vs 0.92 per batch).
 pub const POSTS_PER_PASSAGE: usize = 4;
 
+/// What a draft is judged in, and so what of the author's it is compared
+/// with: like with like.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Unit {
+    /// About `PASSAGE_WORDS` words of long-form text.
+    Passage,
+    /// `POSTS_PER_PASSAGE` posts judged together.
+    Batch,
+    /// One post alone: drafts of one to three posts.
+    Post,
+}
+
+impl Unit {
+    pub fn plural(self) -> &'static str {
+        match self {
+            Unit::Passage => "passage(s)",
+            Unit::Batch => "batch(es) of posts",
+            Unit::Post => "post(s)",
+        }
+    }
+}
+
+/// A draft's judged units: long-form text in passages; short-form text in
+/// batches of `POSTS_PER_PASSAGE` posts, or, with fewer posts than that,
+/// each post of 15+ words alone (compared with the author's single posts).
+pub fn draft_units(draft: &str, short_form: bool) -> (Unit, Vec<Passage>) {
+    if !short_form {
+        return (Unit::Passage, passages(draft, false));
+    }
+    let all = posts(draft);
+    if all.len() >= POSTS_PER_PASSAGE {
+        return (Unit::Batch, passages(draft, true));
+    }
+    (Unit::Post, all.into_iter().filter(|x| text::count_words(&x.text) >= MIN_POST_WORDS).collect())
+}
+
 /// One judged unit of text, with the 1-based line range it came from.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Passage {
@@ -146,13 +183,11 @@ pub fn normalize(t: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Split a draft or an author's text into judged passages: long-form text
-/// into paragraph-aligned groups of about `PASSAGE_WORDS`, short-form text
-/// (posts separated by `---` lines) into batches of `POSTS_PER_PASSAGE`.
-pub fn passages(raw: &str, short_form: bool) -> Vec<Passage> {
-    // Blocks: blank-line separated runs of lines, with their line ranges;
-    // `---` lines separate posts and scene breaks, and belong to no block.
-    let mut blocks: Vec<(String, usize, usize, bool)> = Vec::new(); // (text, start, end, starts_post)
+/// Blocks: blank-line separated runs of lines as (text, first line, last
+/// line, starts a post); `---` lines separate posts and scene breaks, and
+/// belong to no block.
+fn blocks(raw: &str) -> Vec<(String, usize, usize, bool)> {
+    let mut blocks: Vec<(String, usize, usize, bool)> = Vec::new();
     let mut cur: Vec<&str> = Vec::new();
     let mut start = 0;
     let mut new_post = true;
@@ -180,7 +215,30 @@ pub fn passages(raw: &str, short_form: bool) -> Vec<Passage> {
         cur.push(line);
     }
     flush(&mut cur, start, lines.len(), &mut new_post, &mut blocks);
+    blocks
+}
 
+/// Each post of short-form text (posts separated by `---` lines) as its own
+/// passage, with its line range.
+pub fn posts(raw: &str) -> Vec<Passage> {
+    let mut out: Vec<Passage> = Vec::new();
+    for b in blocks(raw) {
+        match out.last_mut() {
+            Some(last) if !b.3 => {
+                last.text = format!("{}\n\n{}", last.text, normalize(&b.0));
+                last.end_line = b.2;
+            }
+            _ => out.push(Passage { text: normalize(&b.0), start_line: b.1, end_line: b.2 }),
+        }
+    }
+    out
+}
+
+/// Split a draft or an author's text into judged passages: long-form text
+/// into paragraph-aligned groups of about `PASSAGE_WORDS`, short-form text
+/// (posts separated by `---` lines) into batches of `POSTS_PER_PASSAGE`.
+pub fn passages(raw: &str, short_form: bool) -> Vec<Passage> {
+    let blocks = blocks(raw);
     let words = |s: &str| s.split_whitespace().count();
     let mut out = Vec::new();
     let mut group: Vec<&(String, usize, usize, bool)> = Vec::new();
@@ -250,7 +308,8 @@ const MIN_POST_WORDS: usize = 15;
 const MIN_WINDOWS: usize = 3;
 /// JEV's price, USD per million input tokens (output tokens are free).
 pub const PRICE_PER_M_INPUT: f64 = 0.042;
-const SIDECAR_SCHEMA: u32 = 1;
+/// 2: short-form sidecars also hold single posts.
+const SIDECAR_SCHEMA: u32 = 2;
 
 /// One of the author's judged passages: its work, its place in the work,
 /// its weight (a blend weighs each component by its share) and its values.
@@ -279,7 +338,15 @@ pub struct Sidecar {
     /// Sampled passages JEV did not answer: the next run retries them.
     pub failed: usize,
     pub measured_at: u64,
+    /// Long-form: ~150-word passages; short-form: batches of posts.
     pub passages: Vec<AuthorPassage>,
+    /// Short-form only: the author's single posts (15+ words) judged one by
+    /// one, the unit a draft of one to three posts is compared with. One
+    /// post shows less of everything than four joined together.
+    #[serde(default)]
+    pub posts: Vec<AuthorPassage>,
+    #[serde(default)]
+    pub total_posts: usize,
 }
 
 /// What a run of JEV calls cost.
@@ -397,50 +464,76 @@ fn judge(jev: &Jev, texts: &[&str]) -> Vec<Option<BTreeMap<String, f64>>> {
     jev.ask_all(&states, &q).iter().map(|a| a.as_ref().and_then(values_of)).collect()
 }
 
-/// The author's passages per work, and the (work, passage) pairs to judge.
-fn author_plan(p: &Profile) -> (Vec<(usize, Vec<Passage>, f64)>, Vec<(usize, usize)>) {
+/// The author's single posts per work, 15+ words each (short-form only).
+fn author_posts(p: &Profile) -> Vec<(usize, Vec<Passage>, f64)> {
+    if !p.register.is_short_form() {
+        return Vec::new();
+    }
+    author_works(p)
+        .into_iter()
+        .map(|(s, t, w)| (s, posts(&t).into_iter().filter(|x| text::count_words(&x.text) >= MIN_POST_WORDS).collect(), w))
+        .collect()
+}
+
+/// The (work, passage) pairs to judge, and of them those not yet answered
+/// (in JEV's cache): batches or long passages, then single posts.
+#[allow(clippy::type_complexity)]
+fn author_plan(p: &Profile) -> (Vec<(usize, Vec<Passage>, f64)>, Vec<(usize, usize)>, Vec<(usize, Vec<Passage>, f64)>, Vec<(usize, usize)>) {
     let short = p.register.is_short_form();
     let works: Vec<(usize, Vec<Passage>, f64)> =
         author_works(p).into_iter().map(|(s, t, w)| (s, passages(&t, short), w)).collect();
     let picks = sample(&works.iter().map(|w| w.1.len()).collect::<Vec<_>>());
-    (works, picks)
+    let post_works = author_posts(p);
+    let post_picks = sample(&post_works.iter().map(|w| w.1.len()).collect::<Vec<_>>());
+    (works, picks, post_works, post_picks)
 }
 
 /// How many of the author's sampled passages JEV would still be asked
 /// about (the rest are in its cache).
 pub fn author_pending(jev: &Jev, p: &Profile) -> usize {
-    let (works, picks) = author_plan(p);
+    let (works, picks, post_works, post_picks) = author_plan(p);
     let q = jev_questions();
-    picks.iter().filter(|&&(w, i)| !jev.is_cached(&json!({ "text": works[w].1[i].text }), &q)).count()
+    let texts = picks.iter().map(|&(w, i)| &works[w].1[i].text).chain(post_picks.iter().map(|&(w, i)| &post_works[w].1[i].text));
+    texts.filter(|t| !jev.is_cached(&json!({ "text": t }), &q)).count()
 }
 
-/// Judge a sample of the author's passages and save the sidecar. When JEV
-/// stops answering or the time budget runs out partway, nothing is saved
-/// and the bands are not used: a partial sample would lean on the first
-/// works. What was answered is cached, so the next run picks up where this
-/// one stopped.
+/// Judge a sample of the author's passages (and, short-form, single
+/// posts) and save the sidecar. When JEV stops answering or the time budget
+/// runs out partway, nothing is saved and the bands are not used: a partial
+/// sample would lean on the first works. What was answered is cached, so
+/// the next run picks up where this one stopped.
 pub fn measure_author(jev: &Jev, p: &Profile) -> Result<(Sidecar, Usage), String> {
     let before = jev.usage();
     let short = p.register.is_short_form();
-    let (works, picks) = author_plan(p);
+    let (works, picks, post_works, post_picks) = author_plan(p);
     if picks.is_empty() {
         return Err("the profile has no passages to judge".into());
     }
-    let texts: Vec<&str> = picks.iter().map(|&(w, i)| works[w].1[i].text.as_str()).collect();
-    let answers = judge(jev, &texts);
-    let mut per_work = vec![0usize; works.len()];
-    for &(w, _) in &picks {
-        per_work[w] += 1;
-    }
+    let texts: Vec<&str> = picks
+        .iter()
+        .map(|&(w, i)| works[w].1[i].text.as_str())
+        .chain(post_picks.iter().map(|&(w, i)| post_works[w].1[i].text.as_str()))
+        .collect();
+    let mut answers = judge(jev, &texts);
+    let post_answers = answers.split_off(picks.len());
     let blend = p.kind == ProfileKind::Blend;
-    let mut judged = Vec::new();
-    for (&(w, i), a) in picks.iter().zip(answers) {
-        if let Some(values) = a {
-            let weight = if blend { works[w].2 / per_work[w] as f64 } else { 1.0 };
-            judged.push(AuthorPassage { source: works[w].0, index: i, weight, values });
+    let judged_of = |works: &[(usize, Vec<Passage>, f64)], picks: &[(usize, usize)], answers: Vec<Option<BTreeMap<String, f64>>>| {
+        let mut per_work = vec![0usize; works.len()];
+        for &(w, _) in picks {
+            per_work[w] += 1;
         }
-    }
-    let usage = Usage::between(judged.len(), before, jev.usage());
+        let mut judged = Vec::new();
+        for (&(w, i), a) in picks.iter().zip(answers) {
+            if let Some(values) = a {
+                let weight = if blend { works[w].2 / per_work[w] as f64 } else { 1.0 };
+                judged.push(AuthorPassage { source: works[w].0, index: i, weight, values });
+            }
+        }
+        judged
+    };
+    let judged = judged_of(&works, &picks, answers);
+    let judged_posts = judged_of(&post_works, &post_picks, post_answers);
+    let usage = Usage::between(judged.len() + judged_posts.len(), before, jev.usage());
     if usage.skipped > 0 {
         return Err(format!(
             "{}: judged {} of the author's {} sampled passages before it stopped. The answers are cached, so the next run continues; `stylometry profile rebuild {}` allows longer",
@@ -462,9 +555,11 @@ pub fn measure_author(jev: &Jev, p: &Profile) -> Result<(Sidecar, Usage), String
         register: p.register.as_str().to_string(),
         short_form: short,
         total_passages: works.iter().map(|w| w.1.len()).sum(),
-        failed: picks.len() - judged.len(),
+        failed: texts.len() - judged.len() - judged_posts.len(),
         measured_at: crate::engine::profile::now_unix(),
         passages: judged,
+        posts: judged_posts,
+        total_posts: post_works.iter().map(|w| w.1.len()).sum(),
     };
     // Not fatal: the bands still serve this run, and the next one re-saves.
     let _ = save(&sc);
@@ -520,8 +615,14 @@ impl Bands {
     }
 }
 
+/// Bands over the author's passages (long-form) or batches of posts.
 pub fn bands(sc: &Sidecar, k: usize) -> Option<Bands> {
-    let mut ps: Vec<&AuthorPassage> = sc.passages.iter().collect();
+    bands_of(&sc.passages, k)
+}
+
+/// Bands over `k` consecutive judged units of the author's.
+pub fn bands_of(units: &[AuthorPassage], k: usize) -> Option<Bands> {
+    let mut ps: Vec<&AuthorPassage> = units.iter().collect();
     ps.sort_by_key(|a| (a.source, a.index));
     let mut runs: Vec<Vec<&AuthorPassage>> = Vec::new();
     for a in ps {
@@ -875,6 +976,10 @@ pub struct Texture {
     pub status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// passage | batch | post: what the draft was judged in, and the
+    /// author's text compared with (a one-post draft with single posts).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unit: Option<Unit>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -886,7 +991,11 @@ pub struct Texture {
     pub keys: Vec<KeyRow>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub passages: Vec<PassageRow>,
-    /// The author's judged passages behind the bands.
+    /// What to keep in mind reading the verdict (one post is a small sample).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// The author's judged units behind the bands (single posts when `unit`
+    /// is post).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub author_passages: Option<usize>,
     /// Passages per author stretch the draft was compared with.
@@ -911,11 +1020,13 @@ impl Texture {
         Texture {
             status: "unavailable",
             reason: Some(reason.into()),
+            unit: None,
             model: None,
             questions_version: None,
             pass: None,
             keys: Vec::new(),
             passages: Vec::new(),
+            note: None,
             author_passages: None,
             band_passages: None,
             author_windows: None,
@@ -1033,18 +1144,22 @@ fn too_slow_for_author(jev: &Jev, p: &Profile, sent: usize, took: Duration) -> O
 pub fn assess_with(jev: &Jev, p: &Profile, draft: &str) -> Texture {
     jev.start_budget(jev.budget);
     let started = Instant::now();
-    let short = p.register.is_short_form();
-    let ps = passages(draft, short);
+    let (unit, ps) = draft_units(draft, p.register.is_short_form());
     if ps.is_empty() {
-        return Texture::unavailable("the draft has no prose passages to judge");
+        return Texture::unavailable(if unit == Unit::Post {
+            format!("the draft's posts are under {MIN_POST_WORDS} words: too short to judge texture")
+        } else {
+            "the draft has no prose passages to judge".into()
+        });
     }
     // The draft first: when JEV does not answer, stop before the author.
     let before = jev.usage();
     let answers = judge(jev, &ps.iter().map(|x| x.text.as_str()).collect::<Vec<_>>());
     if answers.iter().all(Option::is_none) {
         return Texture::unavailable(format!(
-            "JEV did not answer for any of the draft's {} passage(s) ({}); the rest of the check is unchanged",
+            "JEV did not answer for any of the draft's {} {} ({}); the rest of the check is unchanged",
             ps.len(),
+            unit.plural(),
             jev.halted().unwrap_or_else(|| "network, timeout or a bad response".into())
         ));
     }
@@ -1063,10 +1178,13 @@ pub fn assess_with(jev: &Jev, p: &Profile, draft: &str) -> Texture {
     };
     let judged: Vec<(&Passage, BTreeMap<String, f64>)> =
         ps.iter().zip(answers).filter_map(|(x, a)| a.map(|a| (x, a))).collect();
-    let (Some(b), Some(pb)) = (bands(&sc, judged.len()), bands(&sc, 1)) else {
+    // Like with like: single posts against the author's single posts.
+    let author_units = if unit == Unit::Post { &sc.posts } else { &sc.passages };
+    let (Some(b), Some(pb)) = (bands_of(author_units, judged.len()), bands_of(author_units, 1)) else {
         return Texture::unavailable(format!(
-            "the author's {} judged passage(s) are too few for texture bands",
-            sc.passages.len()
+            "the author's {} judged {} are too few for texture bands",
+            author_units.len(),
+            unit.plural()
         ));
     };
     let mut keys: Vec<KeyRow> = jev_keys()
@@ -1095,17 +1213,23 @@ pub fn assess_with(jev: &Jev, p: &Profile, draft: &str) -> Texture {
         })
         .collect();
     let off: Vec<&'static str> = keys.iter().filter(|k| k.status == "off").map(|k| k.key).collect();
-    drill(jev, draft, short, &off, &mut passages);
+    drill(jev, draft, p.register.is_short_form(), &off, &mut passages);
     let u = jev.usage();
     Texture {
         status: "measured",
         reason: None,
+        unit: Some(unit),
         model: Some(jev.model.clone()),
         questions_version: Some(sc.questions_version.clone()),
         pass: Some(pass_of(&keys)),
         keys,
         passages,
-        author_passages: Some(sc.passages.len()),
+        note: (unit == Unit::Post).then(|| {
+            format!(
+                "judged post by post against the author's own single posts: one post is a small sample, and about one in four of the author's own falls outside on some key; {POSTS_PER_PASSAGE}+ posts are judged together for a firmer reading"
+            )
+        }),
+        author_passages: Some(author_units.len()),
         band_passages: Some(b.k),
         author_windows: Some(b.windows),
         author_measured,
@@ -1160,6 +1284,20 @@ mod tests {
         assert!(p[1].text.contains("post 8"));
     }
 
+    #[test]
+    fn one_to_three_posts_are_judged_alone_and_four_or_more_in_batches() {
+        let post = |i: usize| format!("post {i} says something plain about the thing I fixed today and why it took so long\nwith a second line");
+        let three = [post(0), "ok".into(), post(2)].join("\n---\n");
+        let (unit, ps) = draft_units(&three, true);
+        assert_eq!(unit, Unit::Post);
+        assert_eq!(ps.len(), 2, "the two-word post is too short to judge alone");
+        assert_eq!((ps[1].start_line, ps[1].end_line), (6, 7));
+        assert!(ps[1].text.starts_with("post 2") && ps[1].text.ends_with("second line"));
+        let four: Vec<String> = (0..4).map(post).collect();
+        assert_eq!(draft_units(&four.join("\n---\n"), true).0, Unit::Batch);
+        assert_eq!(draft_units(&four.join("\n\n"), false).0, Unit::Passage);
+    }
+
     fn sidecar(runs: &[(usize, usize)], value: impl Fn(usize, usize) -> f64) -> Sidecar {
         let passages = runs
             .iter()
@@ -1183,6 +1321,8 @@ mod tests {
             failed: 0,
             measured_at: 0,
             passages,
+            posts: Vec::new(),
+            total_posts: 0,
         }
     }
 

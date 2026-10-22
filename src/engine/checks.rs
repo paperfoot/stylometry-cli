@@ -2269,8 +2269,16 @@ pub fn add_texture(c: &mut Checked, t: &texture::Texture, draft_text: &str) {
         (p.lines[0]..=p.lines[1]).filter(|&l| lines.get(l - 1).is_some_and(|s| !s.trim().is_empty())).collect()
     };
     let n = t.passages.len();
-    let unit = if c.register.is_short_form() { "batch(es) of posts" } else { "passage(s)" };
+    let unit = t.unit.unwrap_or(texture::Unit::Passage);
     let k = t.band_passages.unwrap_or(1);
+    // What of the author's the draft was compared with: like with like.
+    let against = match (unit, k) {
+        (texture::Unit::Post, 1) => "for single posts of their own".to_string(),
+        (texture::Unit::Post, k) => format!("for {k} consecutive posts of their own"),
+        (texture::Unit::Batch, k) => format!("for {k}-batch stretches of their own posts"),
+        (texture::Unit::Passage, k) => format!("for {k}-passage stretches of their own text"),
+    };
+    let unit = unit.plural();
     let mut findings = Vec::new();
     for row in &off {
         let Some(def) = texture::key(row.key) else { continue };
@@ -2341,7 +2349,7 @@ pub fn add_texture(c: &mut Checked, t: &texture::Texture, draft_text: &str) {
             lines: lines_of,
             excerpts,
             message: format!(
-                "{more} {}: {} over the draft's {n} {unit}, {which} the author's {}–{} (median {}) for {k}-passage stretches of their own text; {at}",
+                "{more} {}: {} over the draft's {n} {unit}, {which} the author's {}–{} (median {}) {against}; {at}",
                 row.label,
                 t2(row.draft),
                 t2(row.low),

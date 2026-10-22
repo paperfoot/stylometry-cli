@@ -15,6 +15,8 @@ use serde_json::{Value, json};
 
 /// A passage containing this word reads as polished, smooth imitation.
 const SMOOTH: &str = "luminous";
+/// A passage containing this word gets the middle of the author's spread.
+const TYPICAL: &str = "plainpost";
 
 #[derive(Clone, Copy)]
 enum Mode {
@@ -81,10 +83,17 @@ fn serve(mut stream: std::net::TcpStream, mode: Mode) -> std::io::Result<()> {
 
 /// Canned answers derived from the request: author-like values with a
 /// little spread per passage, or smooth AI prose when the marker is there.
+/// As with the real model, a short text shows less roughness than a longer
+/// one: one post has fewer chances to over-explain or run on than four.
 fn answer(req: &Value) -> Value {
     // Passage questions get `text`; the sentence drill-down gets `sentence`.
     let text = req["state"]["text"].as_str().or(req["state"]["sentence"].as_str()).unwrap_or("");
-    let j = (text.bytes().fold(2166136261u32, |h, b| (h ^ b as u32).wrapping_mul(16777619)) % 1000) as f64 / 1000.0;
+    let j = if text.contains(TYPICAL) {
+        0.5
+    } else {
+        (text.bytes().fold(2166136261u32, |h, b| (h ^ b as u32).wrapping_mul(16777619)) % 1000) as f64 / 1000.0
+    };
+    let length = 0.4 + 0.6 * (text.split_whitespace().count() as f64 / 60.0).min(1.0);
     let smooth = text.contains(SMOOTH);
     let value = |k: &str| match (k, smooth) {
         ("figure" | "crafted", true) => 0.9,
@@ -94,13 +103,13 @@ fn answer(req: &Value) -> Value {
         ("polish", true) => 2.8,
         ("button" | "figurative", true) => 0.9,
         (_, true) => 0.05,
-        ("rough", false) => 0.55 + 0.2 * j,
+        ("rough", false) => (0.55 + 0.2 * j) * length,
         ("polish", false) => 1.2 + 0.4 * j,
         ("button", false) => 0.2 + 0.2 * j,
         ("figurative", false) => 0.15 + 0.1 * j,
-        ("overexplain", false) => 0.6 + 0.1 * j,
-        ("repeat", false) => 0.35 + 0.1 * j,
-        ("splice", false) => 0.15 + 0.05 * j,
+        ("overexplain", false) => (0.6 + 0.1 * j) * length,
+        ("repeat", false) => (0.35 + 0.1 * j) * length,
+        ("splice", false) => (0.15 + 0.05 * j) * length,
         _ => 0.4 + 0.3 * j,
     };
     let mut answers = serde_json::Map::new();
@@ -405,6 +414,68 @@ fn guide_has_a_texture_section_from_the_authors_bands() {
     // Second run: bands from the sidecar, nothing measured.
     let again = json_of(jev(data.path(), &endpoint), &["guide", "ann"]);
     assert!(again["data"]["texture"].get("author_measured").is_none());
+}
+
+/// Posts of 20-30 plain words, with a little variety; `marker` in each.
+fn posts(seed: u64, n: usize, marker: &str) -> Vec<String> {
+    let mut r = Lcg(seed);
+    (0..n)
+        .map(|i| {
+            let a = NOUNS[r.next(12)];
+            let b = NOUNS[r.next(12)];
+            format!(
+                "fixed the {a} today after it broke again {marker}, it took most of the morning and the {b} was in the way the whole time, so post {i} is about that"
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_single_post_is_judged_against_the_authors_single_posts_not_batches() {
+    let endpoint = mock(Mode::Answer);
+    let (data, corpus) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    std::fs::write(corpus.path().join("posts.txt"), posts(5, 64, "").join("\n---\n")).unwrap();
+    let mut c = jev(data.path(), &endpoint);
+    c.args(["profile", "build", "ann", "--register", "social", "--corpus"]).arg(corpus.path());
+    let out = c.output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let sidecar: Value = serde_json::from_slice(&std::fs::read(data.path().join("profiles/ann.texture.json")).unwrap()).unwrap();
+    assert_eq!(sidecar["posts"].as_array().unwrap().len(), 64, "every post of 15+ words judged alone");
+    assert_eq!(sidecar["passages"].as_array().unwrap().len(), 16, "and in batches of four");
+
+    // One author-like post: typical of the author's single posts.
+    let draft = corpus.path().join("post.md");
+    std::fs::write(&draft, &posts(77, 1, TYPICAL)[0]).unwrap();
+    let v = check(jev(data.path(), &endpoint), &draft);
+    let t = &v["data"]["texture"];
+    assert_eq!(t["status"], "measured", "{t}");
+    assert_eq!(t["unit"], "post", "{t}");
+    assert_eq!(t["author_passages"], 64, "{t}");
+    assert!(t["note"].as_str().unwrap().contains("single posts"), "{t}");
+    // Against batches of four it would read as too smooth: one post shows
+    // less roughness than four joined together.
+    let rough = t["keys"].as_array().unwrap().iter().find(|k| k["key"] == "rough").unwrap();
+    let mut batch: Vec<f64> = sidecar["passages"].as_array().unwrap().iter().map(|p| p["values"]["rough"].as_f64().unwrap()).collect();
+    batch.sort_by(f64::total_cmp);
+    assert!(rough["draft"].as_f64().unwrap() < batch[2], "the batch band would flag it: {rough} vs {batch:?}");
+    assert_eq!(rough["status"], "ok", "{rough}");
+    assert_eq!(t["pass"], true, "the author's own kind of post reads like the author: {t}");
+    let tex = v["data"]["findings"].as_array().unwrap().iter().filter(|f| f["kind"] == "texture").count();
+    assert_eq!(tex, 0, "no advice to rough up a genuine post: {}", v["data"]["findings"]);
+
+    // Four posts or more are judged together, against the author's batches.
+    let four = corpus.path().join("four.md");
+    std::fs::write(&four, posts(78, 4, TYPICAL).join("\n---\n")).unwrap();
+    let t = &check(jev(data.path(), &endpoint), &four)["data"]["texture"];
+    assert_eq!((t["unit"].as_str(), t["author_passages"].as_u64()), (Some("batch"), Some(16)), "{t}");
+    assert_eq!(t["pass"], true, "{t}");
+
+    // A post too short to judge says so.
+    let short = corpus.path().join("short.md");
+    std::fs::write(&short, "fixed it, finally").unwrap();
+    let t = &check(jev(data.path(), &endpoint), &short)["data"]["texture"];
+    assert_eq!(t["status"], "unavailable");
+    assert!(t["reason"].as_str().unwrap().contains("too short"), "{t}");
 }
 
 #[test]
