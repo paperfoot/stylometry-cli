@@ -1096,6 +1096,19 @@ mod tests {
     }
 
     #[test]
+    fn fit_orders_the_pool_above_the_rest() {
+        // Candidates 0-2 judged (pool order 1, 0, 2), 3 not.
+        let score = [0.9, 0.95, 0.5, 0.99];
+        let fits = [Some(0.5), Some(1.0), Some(3.0), None];
+        let s = fit_scores(&score, &[1, 0, 2], &fits);
+        assert!(s[2] > s[1] && s[1] > s[0], "{s:?}");
+        assert!(s[3] < s[0] && s[3] <= 0.1, "unjudged stays below the pool: {s:?}");
+        // Equal fits: the pool's order (the word ranking) decides.
+        let s = fit_scores(&score, &[1, 0, 2], &[Some(1.0), Some(1.0), Some(1.0), None]);
+        assert!(s[1] > s[0] && s[0] > s[2], "{s:?}");
+    }
+
+    #[test]
     fn engagement_ranks_within_groups() {
         let g = vec![(0, 1.0), (1, 5.0), (2, 3.0)];
         let mut out = HashMap::new();
