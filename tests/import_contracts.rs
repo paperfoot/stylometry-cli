@@ -492,3 +492,25 @@ fn long_xmaster_posts_stay_social_with_their_meta() {
     assert_eq!(count(&it, "reply"), 13);
     assert!(it.iter().all(|i| i.2.get("date").is_some()), "items keep their meta");
 }
+
+#[test]
+fn since_keeps_spreadsheet_dates_and_names_an_empty_result() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut csv = String::from("id,text,date\n");
+    for i in 0..30 {
+        csv.push_str(&format!("{},\"{}\",{:02}/15/2026\n", i + 1, post(i), 1 + i % 12));
+    }
+    let f = tmp.path().join("posts.csv");
+    std::fs::write(&f, csv).unwrap();
+    let p = build(&tmp.path().join("store"), &f, "s", &["--since", "2025-01-01"]);
+    let it = items(&p);
+    assert_eq!(it.len(), 30);
+    assert_eq!(find(&it, "1").2["date"], "2026-01-15");
+    let sources: Vec<&str> = p["sources"].as_array().unwrap().iter().map(|s| s["name"].as_str().unwrap()).collect();
+    assert_eq!(sources, ["2026-Q1", "2026-Q2", "2026-Q3", "2026-Q4"], "dates give time blocks");
+    // Everything older than --since: say so, not "corpus too small".
+    let (code, env) = try_build(&tmp.path().join("store"), &f, "s2", &["--since", "2027-01-01"]);
+    assert_eq!(code, 3);
+    let msg = env["error"]["message"].as_str().unwrap();
+    assert!(msg.contains("--since 2027-01-01 left no items") && msg.contains("newest 2026-12-15"), "{msg}");
+}

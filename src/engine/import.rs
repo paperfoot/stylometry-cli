@@ -35,6 +35,9 @@ const PARENT_FIELDS: [&str; 6] = [
     "in_reply_to",
 ];
 
+/// Fields holding an item's date, in priority order.
+const DATE_FIELDS: [&str; 6] = ["created_at", "createdAt", "date", "timestamp", "time", "sent_at"];
+
 /// Fields only X-shaped exports have (archive rows, xmaster, X API, X
 /// analytics CSV). A file of them is social however long its posts are.
 const X_FIELDS: [&str; 9] = [
@@ -91,11 +94,27 @@ pub struct ImportReport {
     /// (`tweets-part1.js`, ...: the rest of the same history).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub also_read: Vec<String>,
+    /// Items whose date is in a format not understood; kept, as undated.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub unparsed_dates: usize,
+    /// What `--since` dropped and kept.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since: Option<SinceReport>,
     /// Anything that makes the profile differ from what the agent passed:
-    /// files left out as unreadable, other accounts' posts dropped.
-    /// `profile build` should print these.
+    /// files left out as unreadable, other accounts' posts dropped, dates
+    /// not understood. `profile build` should print these.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+}
+
+/// The effect of `--since`.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SinceReport {
+    pub day: String,
+    /// Dated items before `day`.
+    pub dropped: usize,
+    /// Items without a usable date, kept because their age is unknown.
+    pub kept_undated: usize,
 }
 
 /// Items dropped, by reason.
@@ -190,6 +209,7 @@ pub fn read_corpus_as(path: &Path, register: Option<Register>) -> Result<Corpus,
     let mut failures: Vec<(String, AppError)> = Vec::new();
     let mut dm_skipped: Vec<&PathBuf> = Vec::new();
     let mut posts_read = false;
+    let mut date_example: Option<String> = None;
     for f in &files {
         let name = label(path, f);
         let base = base_name(f);
@@ -270,6 +290,10 @@ pub fn read_corpus_as(path: &Path, register: Option<Register>) -> Result<Corpus,
             }
             Ok(Some((p, reg))) => {
                 report.skipped.retweets += p.retweets;
+                report.unparsed_dates += p.unparsed_dates;
+                if let (None, Some(d)) = (&date_example, p.date_example) {
+                    date_example = Some(format!("'{d}' in {name}"));
+                }
                 // An archive splits one account's posts over tweets.js,
                 // tweets-part1.js, ...: one source, sorted by time later.
                 let key = (ext == "js").then(|| (f.parent().map(|d| d.canonicalize().unwrap_or_else(|_| d.to_path_buf())), reg.as_str()));
@@ -299,6 +323,12 @@ pub fn read_corpus_as(path: &Path, register: Option<Register>) -> Result<Corpus,
         }
     }
     report.note_tweets_merged = note_pool.merged;
+    if let Some(ex) = date_example {
+        report.warnings.push(format!(
+            "{} item(s) have dates in a format not understood (e.g. {ex}): kept as undated, so they get no time block and --since keeps them",
+            report.unparsed_dates
+        ));
+    }
     if register == Some(Register::Message) && posts_read {
         report.warnings.push(
             "--register message on X posts: there is no direct-messages.js here, so this profile is built from public posts".into(),
@@ -393,6 +423,8 @@ struct Parsed {
     /// X-shaped rows (archive, xmaster envelope, X columns): social however
     /// long the posts, so never relabelled blog by length.
     x_shaped: bool,
+    unparsed_dates: usize,
+    date_example: Option<String>,
 }
 
 /// A structured file after parsing, before the cross-file filters.
@@ -583,17 +615,61 @@ fn skip_reason(name: &str) -> Option<&'static str> {
     }
 }
 
-/// Drop dated items before `day` (YYYY-MM-DD). Undated items are kept.
+/// Drop dated items before `day` (YYYY-MM-DD). Items without a usable
+/// date are kept and counted: their age is unknown, and comparing a raw
+/// "01/15/2026" with "2025-01-01" as text would drop every one of them.
 pub fn keep_since(c: &mut Corpus, day: &str) -> Result<(), AppError> {
-    if day.len() != 10 || day.as_bytes()[4] != b'-' || day.as_bytes()[7] != b'-' {
+    if ymd_prefix(day).is_none() || day.len() != 10 {
         return Err(AppError::input(format!("--since '{day}' is not YYYY-MM-DD"), "Example: --since 2025-01-01"));
     }
+    let had_items = c.docs.iter().any(|d| !d.items.is_empty());
+    let mut since = SinceReport {
+        day: day.to_string(),
+        ..SinceReport::default()
+    };
+    let mut newest: Option<String> = None;
     for d in &mut c.docs {
-        d.items.retain(|i| i.meta.date.as_deref().is_none_or(|dt| dt.get(..10).is_none_or(|x| x >= day)));
+        d.items.retain(|i| match i.meta.date.as_deref().and_then(ymd_prefix) {
+            Some(x) if x >= day => true,
+            Some(x) => {
+                since.dropped += 1;
+                if newest.as_deref().is_none_or(|n| x > n) {
+                    newest = Some(x.to_string());
+                }
+                false
+            }
+            None => {
+                since.kept_undated += 1;
+                true
+            }
+        });
     }
     c.docs.retain(|d| !d.items.is_empty() || !d.text.is_empty());
     recount(c);
+    if since.kept_undated > 0 && since.dropped > 0 {
+        c.report.warnings.push(format!(
+            "--since {day}: {} item(s) without a usable date were kept (their age is unknown)",
+            since.kept_undated
+        ));
+    }
+    let dropped = since.dropped;
+    c.report.since = Some(since);
+    if had_items && c.docs.is_empty() {
+        let newest = newest.unwrap_or_default();
+        return Err(AppError::input(
+            format!("--since {day} left no items: all {dropped} dated item(s) are older (newest {newest})"),
+            format!("Use an earlier day, e.g. --since {}-01-01, or drop --since", newest.get(..4).unwrap_or("2020")),
+        ));
+    }
     Ok(())
+}
+
+/// The `YYYY-MM-DD` a date string starts with, if it does.
+fn ymd_prefix(s: &str) -> Option<&str> {
+    let d = s.get(..10)?;
+    let b = d.as_bytes();
+    let digits = |r: std::ops::Range<usize>| b[r].iter().all(u8::is_ascii_digit);
+    (digits(0..4) && b[4] == b'-' && digits(5..7) && b[7] == b'-' && digits(8..10)).then_some(d)
 }
 
 fn median_words(items: &[Item]) -> usize {
@@ -825,19 +901,117 @@ fn ytd_json(raw: &str, what: &str) -> Result<Value, AppError> {
 
 /// ISO-8601 for the date shapes exports use: X archive ("Wed Oct 10
 /// 20:19:24 +0000 2018"), RFC 2822 email dates, Unix seconds or
-/// milliseconds, and ISO itself. Anything else is kept as given.
-pub fn iso_date(s: &str) -> String {
+/// milliseconds, ISO itself, `YYYY/MM/DD`, and spreadsheet dates
+/// ("01/15/2026", "15.01.2026"; see `parse_date` for the day/month order).
+/// `None` when the shape is not understood: a raw string must never be
+/// compared with ISO days as text.
+pub fn iso_date(s: &str) -> Option<String> {
+    parse_date(s, None)
+}
+
+/// `iso_date` with the order of an ambiguous numeric date ("05/03/2026")
+/// decided by the file it came from (see `day_first_in`). A date whose
+/// first number is over 12 is day-first whatever the file says.
+fn parse_date(s: &str, day_first: Option<bool>) -> Option<String> {
     let t = s.trim();
-    let b = t.as_bytes();
-    if b.len() >= 10 && b[..4].iter().all(u8::is_ascii_digit) && b[4] == b'-' {
-        return t.to_string();
+    if t.is_empty() {
+        return None;
     }
-    if !t.is_empty() && t.bytes().all(|c| c.is_ascii_digit()) {
-        if let Ok(n) = t.parse::<i64>() {
-            return epoch_iso(if t.len() >= 13 { n / 1000 } else { n });
+    if ymd_prefix(t).is_some() {
+        return Some(t.to_string());
+    }
+    // Unix seconds (9–10 digits, 1973 on) or milliseconds (12–13); a bare
+    // "2026" is a year, not 33 minutes after the epoch.
+    if t.bytes().all(|c| c.is_ascii_digit()) {
+        let n = t.parse::<i64>().ok()?;
+        return match t.len() {
+            9 | 10 => Some(epoch_iso(n)),
+            12 | 13 => Some(epoch_iso(n / 1000)),
+            _ => None,
+        };
+    }
+    if let Some((a, b, c, sep, rest)) = numeric_date(t) {
+        let day_first = if a > 12 {
+            true
+        } else if b > 12 {
+            false
+        } else {
+            // Slashes are the US month-first habit; dots and dashes European.
+            day_first.unwrap_or(sep != '/')
+        };
+        let (y, m, d) = match (a > 31, day_first) {
+            (true, _) => (a, b, c), // 2026/1/15
+            (false, true) => (c, b, a),
+            (false, false) => (c, a, b),
+        };
+        return ymd_time(y, m, d, rest);
+    }
+    parse_wordy_date(t)
+}
+
+/// "A/B/C rest" with `/`, `.` or `-` between 1–4 digit numbers, one of A or
+/// C a four-digit year: the three numbers, the separator, and what follows
+/// (a time, usually).
+fn numeric_date(t: &str) -> Option<(u32, u32, u32, char, &str)> {
+    let end = t.find(|c: char| c.is_whitespace() || c == 'T' || c == ',').unwrap_or(t.len());
+    let (date, rest) = t.split_at(end);
+    let sep = date.chars().find(|c| matches!(c, '/' | '.' | '-'))?;
+    let parts: Vec<&str> = date.split(sep).collect();
+    let [a, b, c] = parts.as_slice() else {
+        return None;
+    };
+    if [a, b, c].iter().any(|p| p.is_empty() || p.len() > 4 || !p.bytes().all(|x| x.is_ascii_digit())) {
+        return None;
+    }
+    if a.len() != 4 && c.len() != 4 {
+        return None;
+    }
+    Some((a.parse().ok()?, b.parse().ok()?, c.parse().ok()?, sep, rest.trim_start_matches([',', 'T']).trim()))
+}
+
+/// Whether this file's numeric dates put the day first: yes when some
+/// date's first number is over 12, no when some second number is, `None`
+/// without evidence (each date then follows its separator's convention).
+fn day_first_in<'a>(dates: impl Iterator<Item = &'a str>) -> Option<bool> {
+    let (mut day_first, mut month_first) = (false, false);
+    for d in dates {
+        if let Some((a, b, ..)) = numeric_date(d.trim()).filter(|n| n.0 <= 31) {
+            day_first |= a > 12;
+            month_first |= b > 12;
         }
     }
-    parse_wordy_date(t).unwrap_or_else(|| t.to_string())
+    match (day_first, month_first) {
+        (true, false) => Some(true),
+        (false, true) => Some(false),
+        _ => None,
+    }
+}
+
+/// "YYYY-MM-DD", plus "THH:MM:SS" when `rest` starts with a time ("3:04
+/// PM", "15:04:05"). Invalid months or days are no date.
+fn ymd_time(y: u32, m: u32, d: u32, rest: &str) -> Option<String> {
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || !(1000..=9999).contains(&y) {
+        return None;
+    }
+    let date = format!("{y:04}-{m:02}-{d:02}");
+    let mut words = rest.split_whitespace();
+    let Some(time) = words.next().filter(|w| w.contains(':')) else {
+        return Some(date);
+    };
+    let hms: Vec<u32> = time.split(':').map_while(|x| x.get(..2.min(x.len()))?.parse().ok()).collect();
+    let (Some(&h), Some(&mi)) = (hms.first(), hms.get(1)) else {
+        return Some(date);
+    };
+    let pm = words.next().map(str::to_lowercase);
+    let h = match pm.as_deref() {
+        Some("pm") if h < 12 => h + 12,
+        Some("am") if h == 12 => 0,
+        _ => h,
+    };
+    if h > 23 || mi > 59 {
+        return Some(date);
+    }
+    Some(format!("{date}T{h:02}:{mi:02}:{:02}", hms.get(2).copied().unwrap_or(0)))
 }
 
 fn month_num(m: &str) -> Option<u32> {
@@ -907,12 +1081,18 @@ fn epoch_iso(secs: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", rem / 3600, rem % 3600 / 60, rem % 60)
 }
 
-fn date_of(o: &Value) -> Option<String> {
-    ["created_at", "createdAt", "date", "timestamp", "time", "sent_at"].iter().find_map(|k| match o.get(*k)? {
-        Value::String(s) if !s.trim().is_empty() => Some(iso_date(s)),
+/// The item's date as ISO, from the first date field that parses.
+fn date_of(o: &Value, day_first: Option<bool>) -> Option<String> {
+    DATE_FIELDS.iter().find_map(|k| match o.get(*k)? {
+        Value::String(s) => parse_date(s, day_first),
         Value::Number(n) => n.as_i64().map(|n| epoch_iso(if n > 100_000_000_000 { n / 1000 } else { n })),
         _ => None,
     })
+}
+
+/// The first non-empty raw date string, to report one that didn't parse.
+fn raw_date(o: &Value) -> Option<&str> {
+    DATE_FIELDS.iter().find_map(|k| o.get(*k)?.as_str().filter(|s| !s.trim().is_empty()))
 }
 
 // ── Handles and links ───────────────────────────────────────────────────
@@ -1003,7 +1183,7 @@ fn parse_notes(raw: &str) -> Vec<Note> {
             let n = n.get("noteTweet").unwrap_or(n);
             let text = n.get("core").and_then(|c| c.get("text")).or_else(|| n.get("text"))?.as_str()?;
             Some(Note {
-                created: first_str(n, &["createdAt", "created_at"]).map(iso_date),
+                created: first_str(n, &["createdAt", "created_at"]).and_then(iso_date),
                 text: unescape_html(text),
             })
         })
@@ -1121,7 +1301,7 @@ fn x_archive(raw: &str, account: Option<&Account>, notes: &mut NotePool) -> Resu
             full.to_string()
         };
         body = unescape_html(&drop_links(&body, &[media_links.clone(), quote_links].concat()));
-        let date = first_str(o, &["created_at"]).map(iso_date);
+        let date = first_str(o, &["created_at"]).and_then(iso_date);
         if let Some(t) = notes.full_text(&body, date.as_deref()) {
             let t = if matches!(kind, ItemKind::Reply | ItemKind::ThreadPart) { strip_leading_handles(&t) } else { &t };
             body = drop_links(t, &media_links);
@@ -1219,7 +1399,7 @@ fn x_direct_messages(raw: &str, account: Option<&Account>) -> Result<(Parsed, us
                     text: unescape_html(&drop_links(t, &media_links)),
                     meta: ItemMeta {
                         id: first_id(&m, &["id"]),
-                        date: date_of(&m),
+                        date: date_of(&m, None),
                         media,
                         ..ItemMeta::default()
                     },
@@ -1241,7 +1421,7 @@ fn x_direct_messages(raw: &str, account: Option<&Account>) -> Result<(Parsed, us
 
 /// An item from one JSON object of any supported export shape, or why not:
 /// `Err(true)` for a retweet, `Err(false)` for an object without text.
-fn item_of(o: &Value) -> Result<Raw, bool> {
+fn item_of(o: &Value, day_first: Option<bool>) -> Result<Raw, bool> {
     let o = o.get("tweet").filter(|t| t.is_object()).unwrap_or(o);
     let text = first_str(o, &TEXT_FIELDS).ok_or(false)?;
     if text.starts_with("RT @") {
@@ -1288,7 +1468,7 @@ fn item_of(o: &Value) -> Result<Raw, bool> {
                 reposts: first_num(metrics, &["retweets", "reposts", "retweet_count", "repost_count", "shares"]),
                 // xmaster writes 0 when it doesn't know the impressions.
                 impressions: first_num(metrics, &["impressions", "impression_count", "views"]).filter(|&n| n > 0.0),
-                date: date_of(o),
+                date: date_of(o, day_first),
                 media,
             },
         },
@@ -1298,10 +1478,12 @@ fn item_of(o: &Value) -> Result<Raw, bool> {
     })
 }
 
-/// Parse one file's objects; rows with X columns mark the file as X-shaped.
+/// Parse one file's objects. Numeric dates are read in the order the whole
+/// file implies, and rows with X columns mark the file as X-shaped.
 fn items_of(objs: &[Value]) -> Parsed {
     let unwrap = |o: &'_ Value| -> Value { o.get("tweet").filter(|t| t.is_object()).unwrap_or(o).clone() };
     let rows: Vec<Value> = objs.iter().map(unwrap).collect();
+    let day_first = day_first_in(rows.iter().filter_map(raw_date));
     let x_rows = rows.iter().filter(|o| X_FIELDS.iter().any(|k| o.get(*k).is_some())).count();
     let mut p = Parsed {
         objects: rows.iter().filter(|o| o.is_object()).count(),
@@ -1309,8 +1491,16 @@ fn items_of(objs: &[Value]) -> Parsed {
         ..Parsed::default()
     };
     for o in &rows {
-        match item_of(o) {
-            Ok(r) => p.items.push(r),
+        match item_of(o, day_first) {
+            Ok(r) => {
+                if r.item.meta.date.is_none() {
+                    if let Some(d) = raw_date(o) {
+                        p.unparsed_dates += 1;
+                        p.date_example.get_or_insert_with(|| d.trim().to_string());
+                    }
+                }
+                p.items.push(r);
+            }
             Err(true) => p.retweets += 1,
             Err(false) => {}
         }
@@ -1400,7 +1590,7 @@ fn eml_item(raw: &str) -> Item {
     let date = raw
         .lines()
         .take_while(|l| !l.trim().is_empty())
-        .find_map(|l| l.strip_prefix("Date:").map(|d| iso_date(d.trim())));
+        .find_map(|l| l.strip_prefix("Date:").and_then(|d| iso_date(d.trim())));
     Item {
         text: lines.join("\n").trim().to_string(),
         meta: ItemMeta {
@@ -1519,14 +1709,26 @@ mod tests {
 
     #[test]
     fn dates_become_iso() {
-        assert_eq!(iso_date("Wed Oct 10 20:19:24 +0000 2018"), "2018-10-10T20:19:24Z");
-        assert_eq!(iso_date("Wed Oct 10 20:19:24 +0200 2018"), "2018-10-10T20:19:24+02:00");
-        assert_eq!(iso_date("Tue, 21 Oct 2026 10:00:00 +0000"), "2026-10-21T10:00:00Z");
-        assert_eq!(iso_date("Tue, 21 Oct 2026"), "2026-10-21");
-        assert_eq!(iso_date("2026-10-19T14:49:58.000Z"), "2026-10-19T14:49:58.000Z");
-        assert_eq!(iso_date("1539202764"), "2018-10-10T20:19:24Z");
-        assert_eq!(iso_date("1539202764000"), "2018-10-10T20:19:24Z");
-        assert_eq!(iso_date("last tuesday"), "last tuesday");
+        let iso = |s: &str| iso_date(s).unwrap_or_else(|| panic!("{s} did not parse"));
+        assert_eq!(iso("Wed Oct 10 20:19:24 +0000 2018"), "2018-10-10T20:19:24Z");
+        assert_eq!(iso("Wed Oct 10 20:19:24 +0200 2018"), "2018-10-10T20:19:24+02:00");
+        assert_eq!(iso("Tue, 21 Oct 2026 10:00:00 +0000"), "2026-10-21T10:00:00Z");
+        assert_eq!(iso("Tue, 21 Oct 2026"), "2026-10-21");
+        assert_eq!(iso("2026-10-19T14:49:58.000Z"), "2026-10-19T14:49:58.000Z");
+        assert_eq!(iso("1539202764"), "2018-10-10T20:19:24Z");
+        assert_eq!(iso("1539202764000"), "2018-10-10T20:19:24Z");
+        // Spreadsheet and scheduler dates: US slashes, European dots and
+        // dashes, year-first slashes, with or without a time.
+        assert_eq!(iso("01/15/2026"), "2026-01-15");
+        assert_eq!(iso("1/5/2026 3:04 PM"), "2026-01-05T15:04:00");
+        assert_eq!(iso("15/01/2026"), "2026-01-15", "a first number over 12 is a day");
+        assert_eq!(iso("05.03.2026 10:30"), "2026-03-05T10:30:00");
+        assert_eq!(iso("05-03-2026"), "2026-03-05");
+        assert_eq!(iso("2026/3/5"), "2026-03-05");
+        // Not understood: no date, never a raw string compared as text.
+        for s in ["last tuesday", "13/13/2026", "2026", "", "12/1/26"] {
+            assert_eq!(iso_date(s), None, "{s}");
+        }
     }
 
     #[test]
@@ -1554,12 +1756,12 @@ mod tests {
     #[test]
     fn explicit_kind_and_parent_columns_win() {
         let o: Value = serde_json::json!({"id": 5, "text": "@x not a reply, an opener", "kind": "post"});
-        let r = item_of(&o).ok().unwrap();
+        let r = item_of(&o, None).ok().unwrap();
         assert_eq!(r.item.meta.kind, ItemKind::Post);
         assert_eq!(r.item.text, "@x not a reply, an opener");
         assert_eq!(r.item.meta.id.as_deref(), Some("5"));
         let o: Value = serde_json::json!({"text": "fine by me then", "is_reply": "true", "parent_id": ""});
-        let r = item_of(&o).ok().unwrap();
+        let r = item_of(&o, None).ok().unwrap();
         assert_eq!(r.item.meta.kind, ItemKind::Reply);
         assert_eq!(r.item.meta.parent_id, None);
     }
@@ -1818,5 +2020,56 @@ mod tests {
         let api: Vec<Value> = (0..4).map(|i| serde_json::json!({"id": i, "text": long, "public_metrics": {"like_count": 1}})).collect();
         let c = read_corpus(&write(tmp.path(), "api.json", &Value::Array(api).to_string())).unwrap();
         assert_eq!(c.format_register, Some(Register::Social));
+    }
+
+    #[test]
+    fn numeric_dates_follow_the_files_order() {
+        // One unambiguous day-first date decides the whole file.
+        let rows: Vec<Value> = ["05/03/2026", "25/03/2026"].iter().map(|d| serde_json::json!({"text": "a post about the fence today", "date": d})).collect();
+        let p = items_of(&rows);
+        let dates: Vec<_> = p.items.iter().map(|r| r.item.meta.date.clone().unwrap()).collect();
+        assert_eq!(dates, ["2026-03-05", "2026-03-25"]);
+        let rows: Vec<Value> = ["05/03/2026", "03/25/2026", "sometime in spring"].iter().map(|d| serde_json::json!({"text": "a post about the fence today", "date": d})).collect();
+        let p = items_of(&rows);
+        assert_eq!(p.items[0].item.meta.date.as_deref(), Some("2026-05-03"));
+        assert_eq!(p.items[2].item.meta.date, None);
+        assert_eq!((p.unparsed_dates, p.date_example.as_deref()), (1, Some("sometime in spring")));
+    }
+
+    fn corpus_of(dates: &[Option<&str>]) -> Corpus {
+        let items = dates
+            .iter()
+            .map(|d| Item {
+                text: "a post about the fence today".into(),
+                meta: ItemMeta {
+                    date: d.map(str::to_string),
+                    ..ItemMeta::default()
+                },
+            })
+            .collect();
+        Corpus {
+            docs: vec![Doc { name: "x".into(), text: String::new(), items }],
+            format_register: Some(Register::Social),
+            skipped: 0,
+            report: ImportReport::default(),
+        }
+    }
+
+    #[test]
+    fn since_never_compares_raw_dates_as_text() {
+        let mut c = corpus_of(&[Some("2024-12-31"), Some("2025-01-01T00:00:00Z"), Some("01/15/2026"), None]);
+        keep_since(&mut c, "2025-01-01").unwrap();
+        assert_eq!(c.report.items, 3, "an unparsed or missing date is kept, not dropped");
+        let s = c.report.since.as_ref().unwrap();
+        assert_eq!((s.dropped, s.kept_undated), (1, 2));
+        assert!(c.report.warnings.iter().any(|w| w.contains("2 item(s) without a usable date")));
+
+        let mut c = corpus_of(&[Some("2019-05-01"), Some("2020-02-03")]);
+        let Err(AppError::InvalidArguments { message, suggestion }) = keep_since(&mut c, "2025-01-01") else {
+            panic!("everything older than --since is an input error");
+        };
+        assert!(message.contains("all 2 dated item(s) are older (newest 2020-02-03)"), "{message}");
+        assert!(suggestion.contains("--since 2020-01-01"), "{suggestion}");
+        assert!(keep_since(&mut corpus_of(&[]), "2025-1-01").is_err());
     }
 }
