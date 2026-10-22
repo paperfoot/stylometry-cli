@@ -55,10 +55,25 @@ when it isn't.
 ## Install
 
 ```bash
-brew install paperfoot/tap/stylometry                             # Homebrew
-cargo install stylometry-cli                                      # crates.io (binary: stylometry)
-cargo install --git https://github.com/paperfoot/stylometry-cli   # from source
+# macOS / Linux: Homebrew (prebuilt binary)
+brew install paperfoot/tap/stylometry
+
+# macOS / Linux: one-line installer (prebuilt binary into ~/.cargo/bin)
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/paperfoot/stylometry-cli/releases/latest/download/stylometry-cli-installer.sh | sh
+
+# Windows (PowerShell)
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/paperfoot/stylometry-cli/releases/latest/download/stylometry-cli-installer.ps1 | iex"
+
+# Rust users
+cargo binstall stylometry-cli    # prebuilt binary
+cargo install stylometry-cli     # build from crates.io
 ```
+
+Binaries for macOS (Apple silicon, Intel), Linux (x86_64, arm64) and Windows
+are on every [release](https://github.com/paperfoot/stylometry-cli/releases).
+Then `stylometry skill install` adds the agent skill, and `stylometry doctor`
+checks the setup. For JEV texture checks, put a TypeSafe key in
+`TYPESAFE_API_KEY` (or AKM); without one everything still works locally.
 
 ## Quick start
 
@@ -145,9 +160,11 @@ with line numbers. `--strict` exits 5 on failure, for gates.
 
 ## JEV: judgments counting cannot make
 
-With a [TypeSafe](https://typesafe.ai) key (`TYPESAFE_API_KEY`, or a
-`jev.key_command` in `stylometry config path` such as
-`akm get TYPESAFE_API_KEY --raw`), three things use JEV:
+JEV is on by default whenever a [TypeSafe](https://typesafe.ai) key is found:
+in `STYLOMETRY_TYPESAFE_API_KEY` or `TYPESAFE_API_KEY`, in AKM under either
+name (read automatically when `akm` is installed), or from any
+`jev.key_command` in `stylometry config path`.
+Three things use it:
 
 - **`check` → `texture`**: each ~150-word passage of the draft is asked a few
   narrow questions (rough edges? polish? does it end on a crafted line? a

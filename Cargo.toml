@@ -1,12 +1,13 @@
 [package]
 # crates.io package name; the installed binary is `stylometry` (see [[bin]]).
 name = "stylometry-cli"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 rust-version = "1.85"
-description = "Capture a writer's voice and help AI agents write in it: novels, non-fiction, blogs, X posts, emails. Briefs with matched examples, scored draft checks with a revision plan, LLM-tell detection, calibrated authorship verification. Local, single binary."
+description = "Capture a writer's voice and help AI agents write in it: novels, non-fiction, blogs, X posts, emails. Briefs with matched examples, scored draft checks with a revision plan, prose-texture checks (JEV), LLM-tell detection, calibrated authorship verification. Single binary."
 license = "MIT AND CC-BY-SA-4.0"
 repository = "https://github.com/paperfoot/stylometry-cli"
+homepage = "https://github.com/paperfoot/stylometry-cli"
 readme = "README.md"
 keywords = ["stylometry", "authorship", "forensics", "nlp", "cli"]
 categories = ["command-line-utilities", "text-processing"]
@@ -45,3 +46,7 @@ lto = true
 strip = true
 opt-level = 3
 codegen-units = 1
+
+# The profile that dist builds release artifacts with (CI).
+[profile.dist]
+inherits = "release"
