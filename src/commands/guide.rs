@@ -627,30 +627,35 @@ fn typography_lines(t: &TypographyHabits, short_form: bool) -> Vec<String> {
         out.push(line);
     }
     let never = |forms: &[(String, f64)], form: &str| !forms.is_empty() && share_of(forms, form) < NEVER_FORM_SHARE;
+    let held = |forms: &[(String, f64)]| forms.first().is_some_and(|f| f.1 >= HABIT_SHARE);
     let mut defaults = Vec::new();
-    if never(&t.double_quotes, "straight") {
-        defaults.push("straight \" quotes");
-    }
-    if never(&t.apostrophes, "straight") {
-        defaults.push("straight ' apostrophes");
-    }
-    if never(&t.ellipses, "...") {
-        defaults.push("\"...\"");
-    }
-    if never(&t.dashes, "\u{2014}") {
-        defaults.push("closed em dashes (\u{2014})");
-    }
-    if !short_form && never(&t.scene_breaks, "---") {
-        defaults.push("`---` breaks");
+    let mut all_held = true;
+    let mut flag = |forms: &[(String, f64)], form: &str, shown: &'static str| {
+        if never(forms, form) {
+            defaults.push(shown);
+            all_held &= held(forms);
+        }
+    };
+    flag(&t.double_quotes, "straight", "straight \" quotes");
+    flag(&t.apostrophes, "straight", "straight ' apostrophes");
+    flag(&t.ellipses, "...", "\"...\"");
+    flag(&t.dashes, "\u{2014}", "closed em dashes (\u{2014})");
+    if !short_form {
+        flag(&t.scene_breaks, "---", "`---` breaks");
     }
     if !defaults.is_empty() {
         out.push(format!(
-            "Agents default to forms this author never uses: {}. Convert every one; `check` flags them.",
-            defaults.join(", ")
+            "Agents default to forms this author never uses: {}. Convert every one{}.",
+            defaults.join(", "),
+            if all_held { "; `check` flags them" } else { "" }
         ));
     }
     out
 }
+
+/// The share at which a form is a habit `check` holds a draft to (its
+/// typography findings use the same threshold).
+const HABIT_SHARE: f64 = 0.8;
 
 fn typography_section(c: &Ctxt) -> Option<Section> {
     let lines = typography_lines(&c.r.typography, c.p.register.is_short_form());
@@ -668,7 +673,7 @@ fn typography_note(t: &TypographyHabits) -> String {
     ];
     let forms: Vec<String> = families
         .iter()
-        .filter_map(|(f, v)| v.first().filter(|x| x.1 >= 0.8).map(|x| form_short(*f, &x.0)))
+        .filter_map(|(f, v)| v.first().filter(|x| x.1 >= HABIT_SHARE).map(|x| form_short(*f, &x.0)))
         .collect();
     let what = if forms.is_empty() { String::new() } else { format!(" ({})", forms.join(", ")) };
     format!("Their punctuation and quote marks are part of the voice{what}: set yours the same way.")
@@ -1767,6 +1772,7 @@ mod tests {
         assert!(t.contains("Scene breaks: `\u{2022} \u{2022} \u{2022}` on a line of its own (100%)."), "{t}");
         let defaults = lines.last().unwrap();
         assert!(defaults.starts_with("Agents default to forms this author never uses"), "{defaults}");
+        assert!(defaults.ends_with("Convert every one; `check` flags them."), "{defaults}");
         for want in ["straight \" quotes", "straight ' apostrophes", "\"...\"", "`---` breaks"] {
             assert!(defaults.contains(want), "{want}: {defaults}");
         }
@@ -1786,6 +1792,12 @@ mod tests {
         assert!(t.contains("Ellipses: .. (two dots, as a joiner) (73%); also ... 27%."), "{t}");
         assert!(t.contains("Dashes: spaced hyphen (word - word) (40%); also -- 40%, word\u{2014}word 20%."), "{t}");
         assert!(!t.contains("Scene breaks") && !t.contains("Agents default"), "{t}");
+        // A default the author never uses, in a family with no 80% habit:
+        // convert it, but `check` holds no draft to a mixed habit.
+        let mixed = TypographyHabits { dashes: vec![("--".into(), 0.45), (" - ".into(), 0.33), (" \u{2014} ".into(), 0.22)], ..Default::default() };
+        let t = typography_lines(&mixed, true).join("\n");
+        assert!(t.contains("Agents default to forms this author never uses: closed em dashes (\u{2014}). Convert every one."), "{t}");
+        assert!(!t.contains("`check` flags"), "{t}");
         // Nothing measured, nothing said.
         assert!(typography_lines(&TypographyHabits::default(), false).is_empty());
     }
