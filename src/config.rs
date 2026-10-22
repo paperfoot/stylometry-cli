@@ -1,7 +1,7 @@
 //! Configuration loading with 3-tier precedence:
 //!   1. Compiled defaults
 //!   2. TOML config file (platform config dir / config.toml)
-//!   3. Environment variables (STYLOMETRY_*)
+//!   3. Environment variables (STYLOMETRY_*, `__` between nesting levels)
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -84,7 +84,9 @@ pub fn load() -> Result<AppConfig, AppError> {
 
     Figment::from(Serialized::defaults(AppConfig::default()))
         .merge(Toml::file(config_path()))
-        .merge(Env::prefixed(&prefix).split("_"))
+        // Double underscores separate nesting; single underscores belong to
+        // field names, e.g. STYLOMETRY_UPDATE__INSTALL_SOURCE.
+        .merge(Env::prefixed(&prefix).split("__"))
         .extract()
         .map_err(|e| AppError::Config(e.to_string()))
 }

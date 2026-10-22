@@ -1,3 +1,8 @@
+//! `update`: distribution-aware update check (docs/update-standard.md of the
+//! agent-cli-framework). Package managers own their binaries; a standalone
+//! install gets a real release check and the release URL. Neither form ever
+//! replaces the binary: there is no verified (checksummed, staged)
+//! self-replacement yet.
 use serde::Serialize;
 use std::path::Path;
 
@@ -8,10 +13,12 @@ use crate::output::{self, Ctx};
 #[derive(Serialize)]
 struct UpdateResult {
     current_version: String,
-    latest_version: String,
+    /// Verified latest release, or null when not checked.
+    latest_version: Option<String>,
     status: String,
     install_source: String,
     update_mode: String,
+    /// A literal command for the owning package manager, or null.
     upgrade_command: Option<String>,
     release_url: Option<String>,
     requires_skill_reinstall: bool,
@@ -121,22 +128,13 @@ fn detect_install_source(config: &AppConfig) -> Result<InstallSource, AppError> 
         return Ok(InstallSource::UvTool);
     }
 
-    // Local development builds from target/ behave like standalone release
-    // assets for the purposes of demonstrating the command contract.
-    if path.contains("/target/") {
-        return Ok(InstallSource::Standalone);
-    }
-
+    // A development build under target/ proves nothing about how the tool is
+    // installed: uncertain ownership is `unknown` (instructions only).
     Ok(InstallSource::Unknown)
 }
 
-fn release_url(config: &AppConfig, version: &str) -> String {
-    format!(
-        "https://github.com/{}/{}/releases/tag/v{}",
-        config.update.owner, config.update.repo, version
-    )
-}
-
+/// A literal upgrade command for the owning package manager, or None. Never
+/// prose disguised as a command.
 fn upgrade_command(source: InstallSource, config: &AppConfig) -> Option<String> {
     let crate_name = &config.update.crate_name;
     let formula = &config.update.formula;
@@ -159,141 +157,122 @@ fn upgrade_command(source: InstallSource, config: &AppConfig) -> Option<String> 
         InstallSource::Apt => Some(format!(
             "sudo apt update && sudo apt install --only-upgrade {crate_name}"
         )),
-        InstallSource::Managed => {
-            Some("Use the managed environment rollout command for this tool".into())
-        }
-        InstallSource::Unknown => Some(format!(
-            "Install the latest release from https://github.com/{}/{}",
-            config.update.owner, config.update.repo
-        )),
-        InstallSource::Auto | InstallSource::Standalone => None,
+        InstallSource::Auto
+        | InstallSource::Standalone
+        | InstallSource::Managed
+        | InstallSource::Unknown => None,
     }
 }
 
-fn managed_result(
-    current: &str,
-    source: InstallSource,
-    config: &AppConfig,
-    status: &str,
-) -> UpdateResult {
-    UpdateResult {
-        current_version: current.into(),
-        latest_version: current.into(),
-        status: status.into(),
-        install_source: source.as_str().into(),
-        update_mode: match source {
-            InstallSource::Managed => "disabled",
-            InstallSource::Unknown => "instructions_only",
-            _ => "package_manager",
-        }
-        .into(),
-        upgrade_command: upgrade_command(source, config),
-        release_url: Some(format!(
-            "https://github.com/{}/{}",
-            config.update.owner, config.update.repo
-        )),
-        requires_skill_reinstall: true,
+/// Configured identifiers end up in a shell command: reject anything that
+/// isn't a plain package name.
+fn validate_package_identifier(value: &str) -> Result<(), AppError> {
+    if value.is_empty()
+        || value.starts_with('-')
+        || !value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "@/._+-".contains(c))
+    {
+        return Err(AppError::Config(
+            "invalid update package identifier; use a package name without whitespace, shell syntax, or leading '-'".into(),
+        ));
     }
+    Ok(())
 }
 
-pub fn run(ctx: Ctx, check: bool, config: &AppConfig) -> Result<(), AppError> {
+/// The latest published release version (without a leading `v`), read from
+/// GitHub. Read-only: nothing is downloaded or replaced.
+fn latest_release(config: &AppConfig) -> Result<String, AppError> {
+    let release = self_update::backends::github::Update::configure()
+        .repo_owner(&config.update.owner)
+        .repo_name(&config.update.repo)
+        .bin_name(env!("CARGO_BIN_NAME"))
+        .current_version(env!("CARGO_PKG_VERSION"))
+        .build()
+        .and_then(|u| u.get_latest_release())
+        .map_err(|e| AppError::Update(format!("could not read the latest release: {e}")))?;
+    Ok(release.version.trim_start_matches('v').to_string())
+}
+
+pub fn run(ctx: Ctx, _check: bool, config: &AppConfig) -> Result<(), AppError> {
     let current = env!("CARGO_PKG_VERSION");
-    let name = env!("CARGO_BIN_NAME");
     let source = detect_install_source(config)?;
+    let mut result = UpdateResult {
+        current_version: current.into(),
+        latest_version: None,
+        status: "not_checked".into(),
+        install_source: source.as_str().into(),
+        update_mode: "instructions_only".into(),
+        upgrade_command: None,
+        release_url: Some(format!(
+            "https://github.com/{}/{}/releases/latest",
+            config.update.owner, config.update.repo
+        )),
+        requires_skill_reinstall: false,
+    };
 
-    if !config.update.enabled {
-        let mut result = managed_result(current, source, config, "disabled");
-        result.update_mode = "disabled".into();
-        output::print_success_or(ctx, &result, |_| {
-            println!("Updates are disabled in config");
-        });
-        return Ok(());
+    match source {
+        _ if !config.update.enabled => {
+            result.status = "disabled".into();
+            result.update_mode = "disabled".into();
+        }
+        InstallSource::Managed => {
+            result.status = "disabled".into();
+            result.update_mode = "disabled".into();
+        }
+        InstallSource::Unknown | InstallSource::Auto => {}
+        InstallSource::Standalone => {
+            let latest = latest_release(config)?;
+            let newer = self_update::version::bump_is_greater(current, &latest).unwrap_or(false);
+            result.status = if newer {
+                "update_available"
+            } else {
+                "up_to_date"
+            }
+            .into();
+            result.release_url = Some(format!(
+                "https://github.com/{}/{}/releases/tag/v{latest}",
+                config.update.owner, config.update.repo
+            ));
+            result.latest_version = Some(latest);
+            result.requires_skill_reinstall = newer;
+        }
+        InstallSource::Homebrew => {
+            validate_package_identifier(&config.update.formula)?;
+            if !config.update.tap.is_empty() {
+                validate_package_identifier(&config.update.tap)?;
+            }
+            result.status = "managed_install".into();
+            result.update_mode = "package_manager".into();
+            result.upgrade_command = upgrade_command(source, config);
+        }
+        _ => {
+            validate_package_identifier(&config.update.crate_name)?;
+            result.status = "managed_install".into();
+            result.update_mode = "package_manager".into();
+            result.upgrade_command = upgrade_command(source, config);
+        }
     }
 
-    if source != InstallSource::Standalone {
-        let result = managed_result(current, source, config, "managed_install");
-        output::print_success_or(ctx, &result, |r| {
+    let name = env!("CARGO_BIN_NAME");
+    output::print_success_or(ctx, &result, |r| match r.status.as_str() {
+        "disabled" => println!("Updates are disabled by configuration or the installation owner"),
+        "up_to_date" => println!("Up to date (v{})", r.current_version),
+        "update_available" => {
+            let latest = r.latest_version.as_deref().unwrap_or("?");
+            println!("Update available: v{} -> v{latest}", r.current_version);
+            if let Some(url) = &r.release_url {
+                println!("Download: {url}");
+            }
+            println!("Then run `{name} skill install` to refresh agent skills");
+        }
+        _ => {
             println!("Installed via {}", r.install_source);
             if let Some(command) = &r.upgrade_command {
                 println!("Update with: {command}");
+            } else if let Some(url) = &r.release_url {
+                println!("Release instructions: {url}");
             }
-        });
-        return Ok(());
-    }
-
-    let updater = self_update::backends::github::Update::configure()
-        .repo_owner(&config.update.owner)
-        .repo_name(&config.update.repo)
-        .bin_name(name)
-        .current_version(current)
-        .build()
-        .map_err(|e| AppError::Update(e.to_string()))?;
-
-    if check {
-        let latest = updater
-            .get_latest_release()
-            .map_err(|e| AppError::Update(e.to_string()))?;
-        let v = latest.version.trim_start_matches('v').to_string();
-        let up_to_date = v == current;
-
-        let result = UpdateResult {
-            current_version: current.into(),
-            latest_version: v,
-            status: if up_to_date {
-                "up_to_date".into()
-            } else {
-                "update_available".into()
-            },
-            install_source: source.as_str().into(),
-            update_mode: "self_replace".into(),
-            upgrade_command: None,
-            release_url: Some(release_url(config, latest.version.trim_start_matches('v'))),
-            requires_skill_reinstall: !up_to_date,
-        };
-        output::print_success_or(ctx, &result, |r| {
-            if up_to_date {
-                println!("Up to date (v{})", r.current_version);
-            } else {
-                println!(
-                    "Update available: v{} -> v{}",
-                    r.current_version, r.latest_version
-                );
-                println!("Run `{name} update` to install");
-            }
-        });
-    } else {
-        let release = updater
-            .update()
-            .map_err(|e| AppError::Update(e.to_string()))?;
-        let v = release.version().trim_start_matches('v').to_string();
-        let up_to_date = v == current;
-
-        let result = UpdateResult {
-            current_version: current.into(),
-            latest_version: v,
-            status: if up_to_date {
-                "up_to_date".into()
-            } else {
-                "updated".into()
-            },
-            install_source: source.as_str().into(),
-            update_mode: "self_replace".into(),
-            upgrade_command: None,
-            release_url: Some(release_url(
-                config,
-                release.version().trim_start_matches('v'),
-            )),
-            requires_skill_reinstall: !up_to_date,
-        };
-        output::print_success_or(ctx, &result, |r| {
-            if up_to_date {
-                println!("Already up to date (v{})", r.current_version);
-            } else {
-                println!("Updated: v{} -> v{}", r.current_version, r.latest_version);
-                println!("Run `{name} skill install` to update agent skills");
-            }
-        });
-    }
-
-    Ok(())
+        }
+    })
 }
