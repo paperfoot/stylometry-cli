@@ -38,6 +38,11 @@ pub struct JevConfig {
     pub workers: usize,
     /// Per-request deadline, milliseconds.
     pub timeout_ms: u64,
+    /// Time budget for one command's JEV work, milliseconds (`check` and
+    /// `guide`; `profile build` allows four times this). Past it nothing
+    /// more is sent and texture reports unavailable, so a slow server
+    /// cannot stall a check.
+    pub budget_ms: u64,
 }
 
 impl Default for JevConfig {
@@ -50,6 +55,7 @@ impl Default for JevConfig {
             key_command: String::new(),
             workers: 8,
             timeout_ms: 8000,
+            budget_ms: 30_000,
         }
     }
 }

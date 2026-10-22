@@ -1,0 +1,64 @@
+{
+ "figure": {
+  "type": "noul",
+  "instructions": {
+   "question": "Is `sentence` built on a fresh figure of speech: an inventive metaphor, simile or personification?",
+   "focus": "Judge only `sentence`. `context` is the passage it comes from, to show how it is used. Ignore the topic, the opinions and the punctuation marks."
+  },
+  "criteria": {
+   "true": {
+    "what": "`sentence` makes an image a plain writer would not reach for: it compares something to an unlike thing, or gives a thing feelings or intentions",
+    "examples": [
+     "The kitchen held its breath while the kettle made up its mind.",
+     "His apology arrived like a parcel with the wrong address on it.",
+     "Grief rode in the passenger seat the whole way home."
+    ]
+   },
+   "false": {
+    "what": "`sentence` says what it means literally",
+    "examples": [
+     "I put the kettle on and waited.",
+     "He said sorry, but it came a week too late.",
+     "The drive home took two hours."
+    ],
+    "not_for": [
+     "Everyday idioms and dead metaphors such as 'fell in love', 'a lot on my mind' or 'hit the ground running' are not fresh figures",
+     "A plain comparison of like with like, such as 'it costs about as much as a month of rent', is not a figure",
+     "Product names and technical terms"
+    ]
+   }
+  }
+ },
+ "kicker": {
+  "type": "noul",
+  "instructions": {
+   "question": "Is `sentence` a beat placed to land: a short line that gives `context` its punchline, reveal or twist?",
+   "focus": "Judge only `sentence`, read in its place in `context`. Ignore the topic and the punctuation marks."
+  },
+  "criteria": {
+   "true": {
+    "what": "A short line set up by what comes before it, written so the moment lands: a punchline, a reveal, a twist or a dramatic close",
+    "examples": [
+     "The envelope was empty.",
+     "He had known the whole time.",
+     "Then the lights went out.",
+     "That was the last of the money."
+    ]
+   },
+   "false": {
+    "what": "A sentence that carries the story, argument or post forward: it reports, explains, asks or reacts",
+    "examples": [
+     "I put my bag down and sat on the step.",
+     "She asked if I wanted tea, and I said yes.",
+     "We ship the fix on Monday.",
+     "Thanks to everyone who tried the beta."
+    ],
+    "not_for": [
+     "A closing line that only says what happens next is not a punchline",
+     "A plain fact, number or opinion, even when it is short or ends the paragraph",
+     "A question or a request to the reader"
+    ]
+   }
+  }
+ }
+}

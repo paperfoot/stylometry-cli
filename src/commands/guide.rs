@@ -32,7 +32,7 @@ use crate::commands::input;
 use crate::engine::metrics::{self, Band, ItemHabits, TypographyHabits, Unit};
 use crate::engine::profile::{ItemKind, Profile, Register};
 use crate::engine::retrieve::{self, Request, TopicMatch};
-use crate::engine::{lexicon, store, text, voice};
+use crate::engine::{lexicon, store, text, texture, voice};
 use crate::error::AppError;
 use crate::output::{self, Ctx};
 
@@ -80,11 +80,27 @@ struct Guide {
     exemplar_words: usize,
     sections: Vec<String>,
     exemplars: Vec<ExemplarRow>,
+    /// The Texture section's source: JEV's judgment of the author's own
+    /// passages (measured now when missing or stale).
+    texture: GuideTexture,
     #[serde(skip_serializing_if = "Option::is_none")]
     path: Option<String>,
     markdown: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     warnings: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct GuideTexture {
+    /// measured | unavailable
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author_passages: Option<usize>,
+    /// Set when the author's passages were measured during this run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author_measured: Option<texture::Usage>,
 }
 
 /// Arguments of `guide` (see cli.rs for their help text).
@@ -169,11 +185,21 @@ pub fn run(ctx: Ctx, a: GuideArgs) -> Result<(), AppError> {
         exemplars: a.exemplars,
         notes: Default::default(),
     };
-    let (sections, picks, topic_match) = match register {
+    let (mut sections, picks, topic_match) = match register {
         Register::Social => social(&c),
         Register::Email | Register::Message => mail(&c),
         Register::Fiction => fiction(&c),
         Register::Nonfiction | Register::Blog => prose(&c),
+    };
+    // Texture goes after the giveaways, before the author's own text.
+    let texture = match texture::author_bands(&p) {
+        Ok((bands, n, measured)) => {
+            let at = sections.iter().position(|s| s.exemplar).unwrap_or(sections.len().saturating_sub(1));
+            let hedges = texture::hedge_band(&p, a.window);
+            sections.insert(at, texture_section(&bands, n, p.register.is_short_form(), hedges));
+            GuideTexture { status: "measured", reason: None, author_passages: Some(n), author_measured: measured }
+        }
+        Err(why) => GuideTexture { status: "unavailable", reason: Some(why), author_passages: None, author_measured: None },
     };
     warnings.extend(c.notes.take());
     let markdown = render(&sections);
@@ -206,6 +232,7 @@ pub fn run(ctx: Ctx, a: GuideArgs) -> Result<(), AppError> {
                 engagement_pct: e.engagement_pct,
             })
             .collect(),
+        texture,
         path,
         markdown,
         warnings,
@@ -510,6 +537,59 @@ fn giveaways(c: &Ctxt, extra: &[String]) -> Option<Section> {
         return None;
     }
     Some(sec("What gives imitations away", body))
+}
+
+/// The author's prose texture as JEV reads their own passages: how plain
+/// or polished, which kinds of roughness they have, what they rarely do,
+/// what AI drafts do instead, and that faked roughness gives itself away.
+/// Hedges are counted (per 1,000 words), not judged.
+fn texture_section(b: &texture::Bands, n: usize, short: bool, hedges: Option<[f64; 3]>) -> Section {
+    let unit = if short { "batches of posts" } else { "passages" };
+    let m = |k: &str| b.get(k)[1];
+    let share = |k: &str| format!("{:.0}%", m(k) * 100.0);
+    let [plo, pmed, phi] = b.get("polish");
+    let plain = match pmed {
+        x if x < 1.3 => "plain and direct",
+        x if x < 1.8 => "clear, lightly crafted",
+        x if x < 2.3 => "polished",
+        _ => "highly crafted",
+    };
+    let mut lines = vec![
+        format!("Polish {pmed:.1} on a 0-3 scale ({plain}; their {unit} run {plo:.1}-{phi:.1})."),
+        format!(
+            "Rough edges {}: clunky or loose sentences an editor would smooth. Their kinds: over-explaining {}, a noun repeated where a pronoun would do {}, loosely joined run-ons {}.",
+            share("rough"),
+            share("overexplain"),
+            share("repeat"),
+            share("splice")
+        ),
+    ];
+    let (often, rarely): (Vec<_>, Vec<_>) = [("crafted closing lines", "button"), ("fresh figures of speech", "figurative")]
+        .into_iter()
+        .map(|(label, k)| (format!("{label} {}", share(k)), m(k)))
+        .partition(|(_, v)| *v >= 0.5);
+    let list = |v: Vec<(String, f64)>| v.into_iter().map(|x| x.0).collect::<Vec<_>>().join(", ");
+    if !rarely.is_empty() {
+        lines.push(format!("Rare in their {unit}, keep it so: {}.", list(rarely)));
+    }
+    if !often.is_empty() {
+        lines.push(format!("Common in their {unit}: {}.", list(often)));
+    }
+    if let Some([lo, med, hi]) = hedges {
+        lines.push(format!(
+            "Filler hedges (I guess, kind of, sort of), counted: {med:.1} per 1,000 words, usually {lo:.1}-{hi:.1}. Stay in that range: piled-on hedges gave tuned imitations away."
+        ));
+    }
+    lines.push(
+        "AI drafts go the other way: bare model drafts score polish about 2.0-2.5 and rough edges only 30-50%, and end on kickers and fresh metaphors. `check` reports it as `texture`.".into(),
+    );
+    lines.push(
+        "Don't fake roughness: padding, filler hedges, added explanations and mechanical noun repetition read as imitation too. These shares describe the author; they are not targets. Write it plain the first time instead of roughening a polished draft; never misspell on purpose.".into(),
+    );
+    sec(
+        "Texture",
+        format!("JEV judged {n} of the author's {unit} (percentages: how likely one reads that way):\n\n{}", bullets(&lines)),
+    )
 }
 
 /// Tidy moves blind readers named in imitations, with a plain example each.
