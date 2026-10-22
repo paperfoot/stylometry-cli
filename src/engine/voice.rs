@@ -69,10 +69,10 @@ pub fn spread(p: &Profile, w: &str) -> f64 {
 }
 
 /// Names, numbers, single letters, and the placeholders links and @handles
-/// become ("url", "user"): none of them is a word choice.
+/// become (`text::is_placeholder`): none of them is a word choice.
 pub fn is_name_or_number(p: &Profile, w: &str) -> bool {
     let stem = w.strip_suffix("'s").unwrap_or(w);
-    matches!(w, "url" | "user")
+    text::is_placeholder(w)
         || p.is_proper_noun(stem)
         || w.chars().any(|c| c.is_ascii_digit())
         || (w.chars().count() == 1 && w != "i" && w != "a")
@@ -658,7 +658,7 @@ pub fn signature_formulas(p: &Profile, limit: usize) -> Vec<Phrase> {
         .filter(|(k, _)| !absorbed.contains(k))
         .filter(|(k, _)| {
             k.split(' ')
-                .filter(|w| !matches!(*w, "url" | "user") && !lexicon::is_function_word(w) && !style::is_contraction(w))
+                .filter(|w| !text::is_placeholder(w) && !lexicon::is_function_word(w) && !style::is_contraction(w))
                 .count()
                 >= 1
         })
@@ -891,7 +891,7 @@ pub fn habit_words(p: &Profile, words: &[SignatureWord]) -> Vec<SignatureWord> {
     let topical = topical_words(p, 50);
     words
         .iter()
-        .filter(|w| w.spread >= 0.3 && !topical.contains(w.word.as_str()) && !matches!(w.word.as_str(), "url" | "user"))
+        .filter(|w| w.spread >= 0.3 && !topical.contains(w.word.as_str()) && !text::is_placeholder(&w.word))
         .cloned()
         .collect()
 }

@@ -295,7 +295,7 @@ impl Profile {
         for d in docs {
             if register.is_short_form() {
                 let items = if d.items.is_empty() {
-                    crate::engine::import::split_items(&d.text)
+                    crate::engine::import::split_items_for(&d.text, register)
                 } else {
                     d.items.clone()
                 };
@@ -307,7 +307,7 @@ impl Profile {
                 // Sources are time blocks (calendar quarters, or runs of 200
                 // undated items) so calibration can hold out whole periods
                 // rather than one giant "work" per archive file.
-                for (block, group) in time_blocks(items) {
+                for (block, group) in time_blocks(items, &d.name) {
                     let words: usize = group.iter().map(|i| text::count_words(&i.text)).sum();
                     let idx = match sources.iter().position(|s: &Source| s.name == block) {
                         Some(i) => {
@@ -755,18 +755,37 @@ pub fn is_chapter_heading(line: &str) -> bool {
     }
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
     let first = first.trim_end_matches(['.', ':']);
-    let roman = !first.is_empty() && first.chars().all(|c| "ivxlc".contains(c));
+    // Single "c"/"l" are initials far more often than numerals.
+    let roman = !first.is_empty()
+        && first.chars().all(|c| "ivxlc".contains(c))
+        && !matches!(first, "c" | "l");
     let numeric = !first.is_empty() && first.chars().all(|c| c.is_ascii_digit());
     matches!(first, "chapter" | "part" | "book" | "prologue" | "epilogue" | "interlude")
         || ((roman || numeric) && t.split_whitespace().count() <= 2)
 }
 
-/// Split a work into sections at chapter headings (the heading line itself
-/// is kept with its section; `paragraphs` drops it later).
+/// A standalone ALL-CAPS title line ("THE PILLAR-BOX"): how Gutenberg
+/// essay collections and many novels head their sections.
+fn is_caps_title(line: &str) -> bool {
+    let t = line.trim().trim_start_matches('#').trim();
+    let letters = t.chars().filter(|c| c.is_alphabetic()).count();
+    letters >= 3
+        && t.split_whitespace().count() <= 8
+        && t.chars().filter(|c| c.is_alphabetic()).all(|c| c.is_uppercase())
+        && !t.ends_with([',', ';'])
+}
+
+/// Split a work into sections at chapter headings and standalone title
+/// lines. A heading must stand alone (blank line or edge on both sides), so
+/// a stray "C." or a shouted line of dialogue mid-paragraph never splits.
 fn split_sections(t: &str) -> Vec<String> {
+    let lines: Vec<&str> = t.lines().collect();
+    let blank = |i: Option<&&str>| i.is_none_or(|l| l.trim().is_empty());
     let mut out: Vec<String> = vec![String::new()];
-    for line in t.lines() {
-        if is_chapter_heading(line) && !out.last().unwrap().trim().is_empty() {
+    for (i, line) in lines.iter().enumerate() {
+        let standalone = blank(if i == 0 { None } else { lines.get(i - 1) }) && blank(lines.get(i + 1));
+        let heading = standalone && (is_chapter_heading(line) || is_caps_title(line));
+        if heading && !out.last().unwrap().trim().is_empty() {
             out.push(String::new());
         }
         let cur = out.last_mut().unwrap();
@@ -795,7 +814,7 @@ pub fn quarter_of(date: &str) -> Option<String> {
 
 /// Group items into time blocks: by quarter when most items are dated,
 /// else consecutive runs of 200. Block order follows first appearance.
-fn time_blocks(items: Vec<crate::engine::text::Item>) -> Vec<(String, Vec<crate::engine::text::Item>)> {
+fn time_blocks(items: Vec<crate::engine::text::Item>, doc: &str) -> Vec<(String, Vec<crate::engine::text::Item>)> {
     let dated = items
         .iter()
         .filter(|i| i.meta.date.as_deref().and_then(quarter_of).is_some())
@@ -810,7 +829,7 @@ fn time_blocks(items: Vec<crate::engine::text::Item>) -> Vec<(String, Vec<crate:
                 .and_then(quarter_of)
                 .unwrap_or_else(|| "undated".into())
         } else {
-            format!("items {}-{}", n / 200 * 200 + 1, n / 200 * 200 + 200)
+            format!("{doc} items {}-{}", n / 200 * 200 + 1, n / 200 * 200 + 200)
         };
         match out.iter_mut().find(|(k, _)| *k == key) {
             Some((_, g)) => g.push(it),

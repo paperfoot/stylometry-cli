@@ -277,8 +277,18 @@ fn fold_apostrophes(w: &str) -> String {
     w.replace(['\u{2019}', '\u{02BC}'], "'")
 }
 
+/// Placeholder words links and @handles become: chosen so they can't
+/// collide with real words ("url", "user") that a writer might use.
+pub const LINK_TOKEN: &str = "linkref";
+pub const HANDLE_TOKEN: &str = "handleref";
+
+/// True for a link/handle placeholder token, in any case.
+pub fn is_placeholder(w: &str) -> bool {
+    w.eq_ignore_ascii_case(LINK_TOKEN) || w.eq_ignore_ascii_case(HANDLE_TOKEN)
+}
+
 /// Replace web debris that would pollute word and trigram counts: links
-/// become the token `URL`, @handles become `@USER`. Posts are full of both,
+/// become the token `LINKREF`, @handles become `@HANDLEREF`. Posts are full of both,
 /// and "https", "t.co" or a friend's handle say nothing about voice. The
 /// rate of links and mentions is measured separately, from the raw text.
 pub fn normalize_web(text: &str) -> std::borrow::Cow<'_, str> {
@@ -293,11 +303,11 @@ pub fn normalize_web(text: &str) -> std::borrow::Cow<'_, str> {
         let lead = &core[..core.len() - bare.len()];
         if bare.starts_with("http://") || bare.starts_with("https://") || bare.starts_with("www.") {
             out.push_str(lead);
-            out.push_str("URL");
+            out.push_str("LINKREF");
         } else if let Some(h) = bare.strip_prefix('@').filter(|h| h.chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_')) {
             let end = h.find(|c: char| !(c.is_alphanumeric() || c == '_')).unwrap_or(h.len());
             out.push_str(lead);
-            out.push_str("@USER");
+            out.push_str("@HANDLEREF");
             out.push_str(&h[end..]);
         } else {
             out.push_str(core);
@@ -626,7 +636,7 @@ mod tests {
     fn links_and_handles_are_normalised() {
         assert_eq!(
             word_tokens("thanks @sam_k! see https://t.co/x1 (www.a.io)"),
-            vec!["thanks", "user", "see", "url", "url"]
+            vec!["thanks", "handleref", "see", "linkref", "linkref"]
         );
         assert_eq!(normalize_web("no web here"), "no web here");
     }

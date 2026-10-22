@@ -358,7 +358,6 @@ fn unreadable_export_in_a_folder_is_skipped_not_fatal() {
 }
 
 #[test]
-#[ignore = "needs profile.rs to call import::split_items_for(text, register) (integrator)"]
 fn email_txt_files_stay_whole_without_separators() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("mail");
@@ -407,7 +406,6 @@ fn separated_lowercase_posts_stay_separate_items() {
 }
 
 #[test]
-#[ignore = "needs commands/profile.rs to call import::read_corpus_as(&corpus, register) (integrator)"]
 fn blank_line_lowercase_posts_stay_separate_items() {
     let tmp = tempfile::tempdir().unwrap();
     let f = tmp.path().join("social_blank.txt");

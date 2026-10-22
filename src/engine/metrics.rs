@@ -1879,18 +1879,17 @@ pub fn measure_item(t: &str, lower_vocab: &std::collections::HashSet<String>) ->
         .collect();
     let mentions = toks.iter().filter(|w| is_mention(w)).count();
     let emojis = emojis_in(t);
-    let words: Vec<String> = text::word_tokens(t).into_iter().filter(|w| w != "url").collect();
+    let words: Vec<String> = text::word_tokens(t).into_iter().filter(|w| !text::is_placeholder(w)).collect();
     let first_line_words = lines
         .first()
-        .map(|l| text::word_tokens(l).into_iter().filter(|w| w != "url").count())
+        .map(|l| text::word_tokens(l).into_iter().filter(|w| !text::is_placeholder(w)).count())
         .unwrap_or(0);
     let caps = text::word_tokens_cased(&text::normalize_web(t))
         .into_iter()
         .filter(|w| {
             w.chars().filter(|c| c.is_alphabetic()).count() >= 2
                 && w.chars().all(|c| !c.is_alphabetic() || c.is_uppercase())
-                && w != "URL"
-                && w != "USER"
+                && !text::is_placeholder(w)
                 && lower_vocab.contains(&w.to_lowercase())
         })
         .count();

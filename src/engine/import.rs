@@ -758,12 +758,6 @@ pub fn split_on_separators(text: &str) -> Vec<Item> {
     blocks(text, is_separator_line)
 }
 
-/// The register-blind split `profile.rs` used before registers reached it:
-/// separators, else blank lines. Prefer `split_items_for`.
-pub fn split_items(text: &str) -> Vec<Item> {
-    split_items_for(text, Register::Social)
-}
-
 fn blocks(text: &str, boundary: impl Fn(&str) -> bool) -> Vec<Item> {
     let mut items = Vec::new();
     let mut cur: Vec<&str> = Vec::new();
@@ -1814,7 +1808,6 @@ mod tests {
         assert!(e[0].text.starts_with("Hi Tom,") && e[0].text.ends_with("Best,\nB"));
         assert_eq!(split_items_for(email, Register::Message).len(), 1);
         assert_eq!(split_on_separators(blank).len(), 1);
-        assert_eq!(split_items(blank).len(), 2, "the register-blind wrapper keeps the old behaviour");
     }
 
     /// Casual posts: lowercase start, no final period. `text::clean` alone

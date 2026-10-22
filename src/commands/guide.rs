@@ -427,7 +427,7 @@ fn habits(c: &Ctxt) -> Option<Section> {
     let phrases: Vec<&str> = r
         .phrases
         .iter()
-        .filter(|ph| !ph.phrase.split(' ').any(|w| topical.contains(w) || matches!(w, "url" | "user")))
+        .filter(|ph| !ph.phrase.split(' ').any(|w| topical.contains(w) || crate::engine::text::is_placeholder(w)))
         .take(8)
         .map(|ph| ph.phrase.as_str())
         .collect();

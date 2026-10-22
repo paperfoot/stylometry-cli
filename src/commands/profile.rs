@@ -23,6 +23,10 @@ struct BuiltProfile {
     path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     hygiene: Option<crate::engine::text::Hygiene>,
+    /// For structured imports: items per kind, what was skipped and why,
+    /// whose account was kept.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    import: Option<import::ImportReport>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     warnings: Vec<String>,
 }
@@ -38,6 +42,7 @@ fn built(p: &Profile, path: PathBuf) -> BuiltProfile {
         passages: p.chunks.len(),
         path: path.display().to_string(),
         hygiene: None,
+        import: None,
         warnings: Vec::new(),
     }
 }
@@ -64,6 +69,15 @@ fn print_built(ctx: Ctx, data: &BuiltProfile, verb: &str) -> Result<(), AppError
             if d.register.is_short_form() { "items" } else { "passages" }
         );
         println!("  register: {} ({}); override with --register", d.register.as_str(), d.register_reason);
+        if let Some(r) = &d.import {
+            let kinds: Vec<String> = r.kinds.iter().map(|(k, n)| format!("{n} {k}")).collect();
+            println!(
+                "  imported {} item(s){}{}",
+                r.items,
+                if kinds.is_empty() { String::new() } else { format!(": {}", kinds.join(", ")) },
+                r.account.as_ref().map(|a| format!(" from {a}")).unwrap_or_default()
+            );
+        }
         for w in &d.warnings {
             println!("  {} {}", "warning:".yellow().bold(), w.yellow());
         }
@@ -91,7 +105,7 @@ pub fn build(ctx: Ctx, a: BuildArgs) -> Result<(), AppError> {
         ));
     }
     let _ = crate::engine::text::take_hygiene();
-    let mut corpus_in = import::read_corpus(&corpus)?;
+    let mut corpus_in = import::read_corpus_as(&corpus, register)?;
     let hygiene = crate::engine::text::take_hygiene();
     if let Some(day) = &since {
         import::keep_since(&mut corpus_in, day)?;
@@ -109,6 +123,10 @@ pub fn build(ctx: Ctx, a: BuildArgs) -> Result<(), AppError> {
     let path = store::save(&profile)?;
     let mut data = built(&profile, path);
     data.hygiene = Some(hygiene);
+    data.warnings.extend(corpus_in.report.warnings.iter().cloned());
+    if corpus_in.report.items > 0 {
+        data.import = Some(corpus_in.report.clone());
+    }
     if hygiene.total() as f64 > profile.n_tokens as f64 / 1000.0 {
         data.warnings.push(format!(
             "cleaned conversion debris: {} escapes, {} fence lines, {} attribute blocks, {} broken paragraphs rejoined; spot-check a passage with `{BIN} examples {name}`",

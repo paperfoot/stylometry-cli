@@ -112,7 +112,7 @@ fn term(p: &Profile, w: &str, names_ok: bool) -> Option<String> {
     let w = w.strip_suffix("'s").unwrap_or(w);
     if w.chars().count() < 3
         || w.chars().any(|c| c.is_ascii_digit())
-        || matches!(w, "url" | "user")
+        || crate::engine::text::is_placeholder(w)
         || lexicon::is_function_word(w)
         || lexicon::is_stopword(w)
         || style::is_contraction(w)
@@ -178,7 +178,7 @@ static NULL_WORDS: std::sync::LazyLock<(Vec<&'static str>, Vec<f64>)> = std::syn
     for &(w, z) in lexicon::zipf_table() {
         if w.len() < 3
             || !w.bytes().all(|b| b.is_ascii_lowercase())
-            || matches!(w, "url" | "user")
+            || crate::engine::text::is_placeholder(w)
             || lexicon::is_function_word(w)
             || lexicon::is_stopword(w)
         {

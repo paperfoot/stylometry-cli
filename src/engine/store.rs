@@ -121,7 +121,18 @@ pub fn load_text(name: &str) -> Result<(ProfileKind, Vec<Doc>), AppError> {
         let src = c.get("source").and_then(|s| s.as_u64()).unwrap_or(0) as usize;
         let paras = c.get("paragraphs").and_then(|p| p.as_array()).ok_or_else(outdated)?;
         let doc = docs.get_mut(src).ok_or_else(outdated)?;
-        for p in paras.iter().filter_map(|p| p.as_str()) {
+        let text: Vec<&str> = paras.iter().filter_map(|p| p.as_str()).collect();
+        // A short-form chunk is one item: restore it whole, with its meta,
+        // so a rebuild neither splits posts at inner blank lines nor loses
+        // kind, date and engagement.
+        if let Some(meta) = c.get("meta").filter(|m| !m.is_null()) {
+            doc.items.push(crate::engine::text::Item {
+                text: text.join("\n\n"),
+                meta: serde_json::from_value(meta.clone()).unwrap_or_default(),
+            });
+            continue;
+        }
+        for p in text {
             doc.text.push_str(p);
             doc.text.push_str("\n\n");
         }

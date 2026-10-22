@@ -72,8 +72,7 @@ fn leanings(a: &Profile, b: &Profile, limit: usize) -> (Vec<Leaning>, Vec<Leanin
     words.dedup();
     let mut scored: Vec<Leaning> = words
         .into_iter()
-        // "url" and "user" are the placeholders links and @handles become.
-        .filter(|w| !matches!(w.as_str(), "url" | "user"))
+        .filter(|w| !crate::engine::text::is_placeholder(w))
         .filter(|w| !voice::is_name_or_number(a, w) && !voice::is_name_or_number(b, w))
         .filter_map(|w| {
             let ya = a.word_counts.get(w).copied().unwrap_or(0) as f64;

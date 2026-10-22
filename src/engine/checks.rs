@@ -340,7 +340,7 @@ impl<'a> Draft<'a> {
             }
             let c = text::word_tokens_cased(&text::normalize_web(&prose_of_line(l)));
             for t in &c {
-                if t == "URL" || t == "USER" {
+                if text::is_placeholder(t) {
                     continue;
                 }
                 tokens.push(t.to_lowercase());
