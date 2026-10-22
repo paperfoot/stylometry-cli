@@ -27,6 +27,8 @@ pub struct JevConfig {
     pub enabled: bool,
     /// Pinned model; thresholds were measured against this version.
     pub model: String,
+    /// API endpoint (tests point this at a local mock server).
+    pub endpoint: String,
     /// Environment variable holding the API key.
     pub key_env: String,
     /// Command whose output is the key, when the variable is unset (run
@@ -43,6 +45,7 @@ impl Default for JevConfig {
         Self {
             enabled: true,
             model: "jev-1.13.0".into(),
+            endpoint: "https://api.typesafe.ai/v1/systemone".into(),
             key_env: "TYPESAFE_API_KEY".into(),
             key_command: String::new(),
             workers: 8,

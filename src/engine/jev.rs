@@ -17,8 +17,6 @@ use sha2::{Digest, Sha256};
 use crate::config::JevConfig;
 use crate::engine::store;
 
-const URL: &str = "https://api.typesafe.ai/v1/systemone";
-
 /// The question sets, exported from the evals that measured them.
 /// `texture`: genuine vs imitation AUC 0.90-1.00 for rough edges across
 /// fiction, essays and posts (`~/x/stylometry-jev-eval`, 2026-10-22).
@@ -30,6 +28,7 @@ pub struct Jev {
     agent: ureq::Agent,
     key: String,
     pub model: String,
+    endpoint: String,
     workers: usize,
     cache: PathBuf,
     usage: Usage,
@@ -126,6 +125,7 @@ impl Jev {
             agent,
             key,
             model: cfg.model.clone(),
+            endpoint: cfg.endpoint.clone(),
             workers: cfg.workers.clamp(1, 12),
             cache: store::data_dir().join("jev-cache"),
             usage: Usage::default(),
@@ -143,7 +143,7 @@ impl Jev {
     pub fn ask(&self, state: &Value, questions: &Value) -> Option<Answers> {
         let body = json!({ "model": self.model, "state": state, "questions": questions });
         let text = body.to_string();
-        let path = self.cache.join(format!("{}.json", hex(&Sha256::digest(text.as_bytes())[..16])));
+        let path = self.cache.join(format!("{}.json", hex(&Sha256::digest(format!("{}\n{text}", self.endpoint).as_bytes())[..16])));
         if let Some(a) = std::fs::read_to_string(&path).ok().and_then(|s| answers_of(&s, questions)) {
             self.usage.cached.fetch_add(1, Ordering::Relaxed);
             return Some(a);
@@ -152,7 +152,7 @@ impl Jev {
             self.usage.requests.fetch_add(1, Ordering::Relaxed);
             let res = self
                 .agent
-                .post(URL)
+                .post(&self.endpoint)
                 .header("Authorization", &format!("Bearer {}", self.key))
                 .header("Content-Type", "application/json")
                 .send(text.as_str())
