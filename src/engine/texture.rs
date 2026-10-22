@@ -13,6 +13,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -289,6 +290,8 @@ pub struct Usage {
     pub requests: usize,
     pub cached: usize,
     pub failed: usize,
+    /// Never sent: JEV stopped answering or the time budget ran out.
+    pub skipped: usize,
     pub input_tokens: u64,
     pub cost_usd: f64,
 }
@@ -301,6 +304,7 @@ impl Usage {
             requests: after.requests - before.requests,
             cached: after.cached - before.cached,
             failed: after.failed - before.failed,
+            skipped: after.skipped - before.skipped,
             input_tokens,
             cost_usd: cost(input_tokens),
         }
@@ -393,13 +397,32 @@ fn judge(jev: &Jev, texts: &[&str]) -> Vec<Option<BTreeMap<String, f64>>> {
     jev.ask_all(&states, &q).iter().map(|a| a.as_ref().and_then(values_of)).collect()
 }
 
-/// Judge a sample of the author's passages and save the sidecar.
-pub fn measure_author(jev: &Jev, p: &Profile) -> Result<(Sidecar, Usage), String> {
-    let before = jev.usage();
+/// The author's passages per work, and the (work, passage) pairs to judge.
+fn author_plan(p: &Profile) -> (Vec<(usize, Vec<Passage>, f64)>, Vec<(usize, usize)>) {
     let short = p.register.is_short_form();
     let works: Vec<(usize, Vec<Passage>, f64)> =
         author_works(p).into_iter().map(|(s, t, w)| (s, passages(&t, short), w)).collect();
     let picks = sample(&works.iter().map(|w| w.1.len()).collect::<Vec<_>>());
+    (works, picks)
+}
+
+/// How many of the author's sampled passages JEV would still be asked
+/// about (the rest are in its cache).
+pub fn author_pending(jev: &Jev, p: &Profile) -> usize {
+    let (works, picks) = author_plan(p);
+    let q = jev_questions();
+    picks.iter().filter(|&&(w, i)| !jev.is_cached(&json!({ "text": works[w].1[i].text }), &q)).count()
+}
+
+/// Judge a sample of the author's passages and save the sidecar. When JEV
+/// stops answering or the time budget runs out partway, nothing is saved
+/// and the bands are not used: a partial sample would lean on the first
+/// works. What was answered is cached, so the next run picks up where this
+/// one stopped.
+pub fn measure_author(jev: &Jev, p: &Profile) -> Result<(Sidecar, Usage), String> {
+    let before = jev.usage();
+    let short = p.register.is_short_form();
+    let (works, picks) = author_plan(p);
     if picks.is_empty() {
         return Err("the profile has no passages to judge".into());
     }
@@ -418,6 +441,15 @@ pub fn measure_author(jev: &Jev, p: &Profile) -> Result<(Sidecar, Usage), String
         }
     }
     let usage = Usage::between(judged.len(), before, jev.usage());
+    if usage.skipped > 0 {
+        return Err(format!(
+            "{}: judged {} of the author's {} sampled passages before it stopped. The answers are cached, so the next run continues; `stylometry profile rebuild {}` allows longer",
+            jev.halted().unwrap_or_else(|| "JEV stopped".into()),
+            usage.passages,
+            texts.len(),
+            p.name
+        ));
+    }
     if judged.is_empty() {
         return Err(format!("JEV did not answer for any of the author's {} sampled passages", picks.len()));
     }
@@ -980,23 +1012,54 @@ pub fn assess(p: &Profile, draft: &str) -> Texture {
     }
 }
 
+/// When the draft's own requests show JEV is slow, the reason to skip
+/// measuring the author's passages now: it would overrun the budget.
+fn too_slow_for_author(jev: &Jev, p: &Profile, sent: usize, took: Duration) -> Option<String> {
+    if sent == 0 {
+        return None;
+    }
+    let left = jev.time_left()?.as_secs_f64();
+    let per_round = took.as_secs_f64() / sent.div_ceil(jev.workers()) as f64;
+    let pending = author_pending(jev, p);
+    let need = pending.div_ceil(jev.workers()) as f64 * per_round;
+    (need > left).then(|| {
+        format!(
+            "JEV is slow (about {per_round:.1} s a request): measuring {pending} of the author's passages first would take about {need:.0} s, more than the {left:.0} s left of the budget (jev.budget_ms). Run `stylometry profile rebuild {}` once to measure them with more time, or check again later",
+            p.name
+        )
+    })
+}
+
 pub fn assess_with(jev: &Jev, p: &Profile, draft: &str) -> Texture {
+    jev.start_budget(jev.budget);
+    let started = Instant::now();
     let short = p.register.is_short_form();
     let ps = passages(draft, short);
     if ps.is_empty() {
         return Texture::unavailable("the draft has no prose passages to judge");
     }
     // The draft first: when JEV does not answer, stop before the author.
+    let before = jev.usage();
     let answers = judge(jev, &ps.iter().map(|x| x.text.as_str()).collect::<Vec<_>>());
     if answers.iter().all(Option::is_none) {
         return Texture::unavailable(format!(
-            "JEV did not answer for any of the draft's {} passage(s) (network, timeout or a bad response); the rest of the check is unchanged",
-            ps.len()
+            "JEV did not answer for any of the draft's {} passage(s) ({}); the rest of the check is unchanged",
+            ps.len(),
+            jev.halted().unwrap_or_else(|| "network, timeout or a bad response".into())
         ));
     }
-    let (sc, author_measured) = match author(jev, p) {
-        Ok(x) => x,
-        Err(why) => return Texture::unavailable(why),
+    let sent = jev.usage().requests - before.requests;
+    let (sc, author_measured) = match load_fresh(p, &jev.model) {
+        Some(sc) => (sc, None),
+        None => {
+            if let Some(why) = too_slow_for_author(jev, p, sent, started.elapsed()) {
+                return Texture::unavailable(why);
+            }
+            match measure_author(jev, p) {
+                Ok((sc, u)) => (sc, Some(u)),
+                Err(why) => return Texture::unavailable(why),
+            }
+        }
     };
     let judged: Vec<(&Passage, BTreeMap<String, f64>)> =
         ps.iter().zip(answers).filter_map(|(x, a)| a.map(|a| (x, a))).collect();
@@ -1051,6 +1114,7 @@ pub fn assess_with(jev: &Jev, p: &Profile, draft: &str) -> Texture {
             requests: u.requests,
             cached: u.cached,
             failed: u.failed,
+            skipped: u.skipped,
             input_tokens: u.input_tokens,
             cost_usd: cost(u.input_tokens),
         }),
@@ -1062,6 +1126,7 @@ pub fn assess_with(jev: &Jev, p: &Profile, draft: &str) -> Texture {
 /// when missing or stale. `Err` says why there are none.
 pub fn author_bands(p: &Profile) -> Result<(Bands, usize, Option<Usage>), String> {
     let jev = Jev::load()?;
+    jev.start_budget(jev.budget);
     let (sc, measured) = author(&jev, p)?;
     let b = bands(&sc, 1)
         .ok_or_else(|| format!("the author's {} judged passage(s) are too few for texture bands", sc.passages.len()))?;

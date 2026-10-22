@@ -53,6 +53,8 @@ fn measure_texture(p: &Profile) -> Option<BuiltTexture> {
         return None;
     }
     let jev = crate::engine::jev::Jev::load().ok()?;
+    // A one-off step: more time than a check gets, still bounded.
+    jev.start_budget(jev.budget * 4);
     Some(match texture::author(&jev, p) {
         Ok((_, Some(u))) => BuiltTexture { status: "measured", reason: None, usage: Some(u) },
         Ok((_, None)) => BuiltTexture { status: "up_to_date", reason: None, usage: None },

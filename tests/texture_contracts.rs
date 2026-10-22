@@ -8,7 +8,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
 use serde_json::{Value, json};
@@ -20,7 +20,10 @@ const SMOOTH: &str = "luminous";
 enum Mode {
     Answer,
     BadJson,
-    Slow,
+    /// Answers after this many milliseconds.
+    Slow(u64),
+    /// Accepts and never answers.
+    Hang,
 }
 
 /// A mock JEV endpoint on 127.0.0.1; lives as long as the test process.
@@ -28,7 +31,12 @@ fn mock(mode: Mode) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
+        let mut held = Vec::new();
         for stream in listener.incoming().flatten() {
+            if let Mode::Hang = mode {
+                held.push(stream);
+                continue;
+            }
             std::thread::spawn(move || {
                 let _ = serve(stream, mode);
             });
@@ -57,10 +65,11 @@ fn serve(mut stream: std::net::TcpStream, mode: Mode) -> std::io::Result<()> {
     let out = match mode {
         Mode::Answer => answer(&serde_json::from_slice(&body).unwrap_or(Value::Null)).to_string(),
         Mode::BadJson => "{\"answers\": not json".to_string(),
-        Mode::Slow => {
-            std::thread::sleep(Duration::from_secs(3));
+        Mode::Slow(ms) => {
+            std::thread::sleep(Duration::from_millis(ms));
             answer(&serde_json::from_slice(&body).unwrap_or(Value::Null)).to_string()
         }
+        Mode::Hang => unreachable!("held, never served"),
     };
     write!(
         stream,
@@ -84,7 +93,6 @@ fn answer(req: &Value) -> Value {
         ("rough", true) => 0.05,
         ("polish", true) => 2.8,
         ("button" | "figurative", true) => 0.9,
-        ("oneliner", true) => 0.1,
         (_, true) => 0.05,
         ("rough", false) => 0.55 + 0.2 * j,
         ("polish", false) => 1.2 + 0.4 * j,
@@ -360,7 +368,7 @@ fn every_failure_fails_open_with_the_rest_of_check_unchanged() {
         ("no key", keyless, "no key"),
         ("server down", jev(data.path(), &down), "did not answer"),
         ("bad JSON", jev(data.path(), &mock(Mode::BadJson)), "did not answer"),
-        ("timeout", jev(data.path(), &mock(Mode::Slow)), "did not answer"),
+        ("timeout", jev(data.path(), &mock(Mode::Slow(3000))), "did not answer"),
     ];
     for (name, c, why) in cases {
         let v = check(c, &draft);
@@ -397,4 +405,62 @@ fn guide_has_a_texture_section_from_the_authors_bands() {
     // Second run: bands from the sidecar, nothing measured.
     let again = json_of(jev(data.path(), &endpoint), &["guide", "ann"]);
     assert!(again["data"]["texture"].get("author_measured").is_none());
+}
+
+#[test]
+fn a_hanging_server_costs_one_timeout_not_one_per_passage() {
+    let (data, corpus) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    build(bin(data.path()), corpus.path());
+    let draft = corpus.path().join("draft.md");
+    std::fs::write(&draft, prose(99, 3000, None)).unwrap();
+    let hang = mock(Mode::Hang);
+    let started = Instant::now();
+    let v = check(jev(data.path(), &hang), &draft);
+    let took = started.elapsed();
+    let t = &v["data"]["texture"];
+    assert_eq!(t["status"], "unavailable", "{t}");
+    assert!(t["reason"].as_str().unwrap().contains("in a row"), "{t}");
+    assert!(took < Duration::from_secs(4), "about one 500 ms timeout for 20 passages: {took:?}");
+
+    // guide measures the author's 240 passages lazily: the breaker stops it too.
+    let started = Instant::now();
+    let g = json_of(jev(data.path(), &hang), &["guide", "ann"]);
+    assert!(started.elapsed() < Duration::from_secs(4), "{:?}", started.elapsed());
+    assert_eq!(g["data"]["texture"]["status"], "unavailable");
+    assert!(g["data"]["texture"]["reason"].as_str().unwrap().contains("in a row"), "{}", g["data"]["texture"]);
+    assert!(!data.path().join("profiles/ann.texture.json").exists(), "a partial sample is never saved");
+}
+
+#[test]
+fn a_slow_server_cannot_stall_check_or_build() {
+    let (data, corpus) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    // Answers in 800 ms, well inside the per-request timeout, with a 2 s
+    // budget: the author's 92 passages would take about 10 s.
+    let slow = mock(Mode::Slow(800));
+    let slowly = |c: Command| {
+        let mut c = c;
+        c.env("STYLOMETRY_JEV__TIMEOUT_MS", "5000").env("STYLOMETRY_JEV__BUDGET_MS", "2000");
+        c
+    };
+    // Build: four times the budget, then it stops, saves nothing and says why.
+    let started = Instant::now();
+    let built = build(slowly(jev(data.path(), &slow)), corpus.path());
+    assert!(started.elapsed() < Duration::from_secs(14), "{:?}", started.elapsed());
+    let t = &built["data"]["texture"];
+    assert_eq!(t["status"], "failed", "{t}");
+    let why = t["reason"].as_str().unwrap();
+    assert!(why.contains("too slow") && why.contains("cached"), "{why}");
+    assert!(!data.path().join("profiles/ann.texture.json").exists());
+
+    // Check: the draft's own requests show JEV is slow, so the author's
+    // passages are not measured now; it says so and what to run.
+    let draft = corpus.path().join("draft.md");
+    std::fs::write(&draft, prose(99, 700, None)).unwrap();
+    let started = Instant::now();
+    let v = check(slowly(jev(data.path(), &slow)), &draft);
+    assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+    let t = &v["data"]["texture"];
+    assert_eq!(t["status"], "unavailable", "{t}");
+    let why = t["reason"].as_str().unwrap();
+    assert!(why.contains("JEV is slow") && why.contains("profile rebuild ann"), "{why}");
 }
