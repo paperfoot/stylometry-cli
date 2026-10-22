@@ -57,6 +57,14 @@ const NEIGHBOURS: usize = 2;
 /// rewards abstaining exactly where the verifier has no real signal.
 pub const P_ABSTAIN_LOW: f64 = 0.35;
 pub const P_ABSTAIN_HIGH: f64 = 0.65;
+/// A band verifying below this AUC is directional only.
+pub const WEAK_AUC: f64 = 0.9;
+/// P(same author) a posts voice needs for same_author in a band under
+/// `WEAK_AUC`. Fit against a handful of posters, P is overconfident on
+/// posters it never saw: of 76 batches of 10 posts by an unseen X author,
+/// 35 scored over 0.65 and 9 over 0.9 (the owner's own held-out batches:
+/// 12 and 7 of 17).
+pub const P_SAME_WEAK_SHORT_FORM: f64 = 0.9;
 
 #[inline]
 pub fn sigmoid(x: f64) -> f64 {

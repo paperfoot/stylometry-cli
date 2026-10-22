@@ -17,14 +17,14 @@
 //! A posts voice is told apart from other posters, not from books, and
 //! that is weak at batch length (AUC ~0.8 at 250 words). So same_author
 //! needs a calibration fit against 3+ other posters (the frozen model
-//! records them), still current, with the claimed poster nearest;
-//! otherwise the verdict is inconclusive.
+//! records them), still current, with the claimed poster nearest, and
+//! P > 0.9 in a weak band; otherwise the verdict is inconclusive.
 
 use serde::Serialize;
 
 use crate::engine::calibrate::{
-    self, MIN_IMPOSTERS, MIN_SHORT_FORM_IMPOSTERS, P_ABSTAIN_HIGH, P_ABSTAIN_LOW, bands_for, own_deltas,
-    weighted_centroid,
+    self, MIN_IMPOSTERS, MIN_SHORT_FORM_IMPOSTERS, P_ABSTAIN_HIGH, P_ABSTAIN_LOW, P_SAME_WEAK_SHORT_FORM, WEAK_AUC,
+    bands_for, own_deltas, weighted_centroid,
 };
 use crate::engine::delta::cosine_delta;
 use crate::engine::model::{ReferenceModel, reference_signature};
@@ -286,9 +286,10 @@ pub fn voice_match(target: &Profile, all: &[Profile], text: &str) -> Result<Voic
         }
         // A posts voice earns same_author only when the verifier was fit
         // against other posters and still matches the profile set, the
-        // claimed poster is the nearest one; any reason left here turns
-        // same_author into inconclusive.
+        // claimed poster is the nearest one, and a weak band clears a higher
+        // bar; any reason left here turns same_author into inconclusive.
         let mut withheld: Vec<String> = Vec::new();
+        let weak_auc = band_auc.filter(|a| *a < WEAK_AUC);
         let books_only = short_form && !posts_only;
         if books_only {
             let posters = calibrate::short_form_imposters(target, &refs);
@@ -338,10 +339,16 @@ pub fn voice_match(target: &Profile, all: &[Profile], text: &str) -> Result<Voic
                 c.imposters, target.name
             ));
         }
-        if let Some(auc) = band_auc.filter(|a| *a < 0.9) {
-            warnings.push(format!(
-                "at {band_words} words this profile's verifier has AUC {auc:.2}: treat the verdict as directional; longer text verifies better"
-            ));
+        if let Some(auc) = weak_auc {
+            if short_form && posts_only && p > P_ABSTAIN_HIGH && p <= P_SAME_WEAK_SHORT_FORM {
+                withheld.push(format!(
+                    "at {band_words} words this voice's verifier has AUC {auc:.2}, and posters it never saw often reach P 0.65-0.9: same_author needs P > {P_SAME_WEAK_SHORT_FORM} here; pool more posts (1,000+ words verify better)"
+                ));
+            } else {
+                warnings.push(format!(
+                    "at {band_words} words this profile's verifier has AUC {auc:.2}: treat the verdict as directional; longer text verifies better"
+                ));
+            }
         }
         match verdict_from_p(p) {
             "same_author" if books_only || !withheld.is_empty() => {

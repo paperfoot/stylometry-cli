@@ -447,7 +447,8 @@ fn posts_are_ranked_only_against_posters_in_a_posts_model() {
 #[test]
 fn a_posts_same_author_needs_the_target_nearest() {
     // Two posters share the target's vocabulary: whichever is nearest, a
-    // same_author verdict always names the target as the nearest poster.
+    // same_author verdict always names the target as the nearest poster,
+    // and a weak band needs P > 0.9 for it.
     let data = tempfile::tempdir().unwrap();
     let corpus = tempfile::tempdir().unwrap();
     social_and_imposters(data.path(), corpus.path());
@@ -455,7 +456,7 @@ fn a_posts_same_author_needs_the_target_nearest() {
     build_poster(data.path(), corpus.path(), "pa", &VOCAB_A, 200, 5);
     run_json(data.path(), &["calibrate", "x"], None);
 
-    let mut withheld = 0;
+    let (mut by_nearest, mut by_weak_band) = (0, 0);
     for seed in 20..32 {
         let j = run_json(data.path(), &["compare", "-", "--profile", "x"], Some(posts(&VOCAB_A, 10, seed)));
         let d = &j["data"];
@@ -463,12 +464,16 @@ fn a_posts_same_author_needs_the_target_nearest() {
         let warnings = d["warnings"].to_string();
         if d["verdict"] == "same_author" {
             assert_eq!(d["nearest_profile"], "x", "{d}");
+            assert!(p > 0.9 || !warnings.contains("AUC"), "{d}");
+        } else if p > 0.65 && d["nearest_profile"] != "x" {
+            by_nearest += 1;
+            assert!(warnings.contains("the nearest poster is pa, not x"), "{d}");
         } else if p > 0.65 {
-            withheld += 1;
-            assert!(warnings.contains("withheld"), "{d}");
+            by_weak_band += 1;
+            assert!(warnings.contains("same_author needs P > 0.9"), "{d}");
         }
     }
-    assert!(withheld > 0, "the gate was never exercised");
+    assert!(by_nearest > 0 && by_weak_band > 0, "gates exercised: nearest {by_nearest}, weak band {by_weak_band}");
 }
 
 #[test]
