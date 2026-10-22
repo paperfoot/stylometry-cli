@@ -65,6 +65,9 @@ struct ExamplesOut {
     /// Content words of the task found in the corpus (0 = nothing to match).
     query_terms: usize,
     examples: Vec<Example>,
+    /// One line on the examples' marks: their quotes, ellipses and dashes
+    /// are the author's typography, part of the voice to copy.
+    typography_note: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     notes: Vec<String>,
 }
@@ -137,6 +140,7 @@ pub fn run(
         candidates: r.candidates,
         query_terms: r.query_terms,
         examples: rows(&p, &r),
+        typography_note: crate::commands::guide::typography_note(&crate::engine::metrics::typography_habits(&p)),
         notes: r.notes.clone(),
     };
     let mut next = Vec::new();
@@ -158,6 +162,7 @@ pub fn run(
         for n in &d.notes {
             println!("{} {n}", "note:".yellow());
         }
+        println!("{}", d.typography_note);
         for e in &d.examples {
             let mut tags = vec![format!("similarity {:.2}", e.similarity)];
             if let Some(x) = e.engagement_pct {
