@@ -1,0 +1,47 @@
+# Background authors: Project Gutenberg works, 1850-1930, British and American,
+# fiction, non-fiction, essays and letters; at most two per author.
+# Deliberately absent (used as unseen probes or validation profiles by
+# eval/): Austen, Saki, Jerome, Wodehouse, Chesterton.
+# id	slug	author	title	year
+98	dickens-two-cities	Charles Dickens	A Tale of Two Cities	1859
+550	eliot-silas-marner	George Eliot	Silas Marner	1861
+110	hardy-tess	Thomas Hardy	Tess of the d'Urbervilles	1891
+174	wilde-dorian-gray	Oscar Wilde	The Picture of Dorian Gray	1890
+921	wilde-de-profundis	Oscar Wilde	De Profundis	1905
+2852	doyle-baskervilles	Arthur Conan Doyle	The Hound of the Baskervilles	1902
+35	wells-time-machine	H. G. Wells	The Time Machine	1895
+43	stevenson-jekyll	Robert Louis Stevenson	Strange Case of Dr Jekyll and Mr Hyde	1886
+219	conrad-heart-of-darkness	Joseph Conrad	Heart of Darkness	1899
+2641	forster-room-with-a-view	E. M. Forster	A Room with a View	1908
+217	lawrence-sons-and-lovers	D. H. Lawrence	Sons and Lovers	1913
+144	woolf-voyage-out	Virginia Woolf	The Voyage Out	1915
+2814	joyce-dubliners	James Joyce	Dubliners	1914
+583	collins-woman-in-white	Wilkie Collins	The Woman in White	1859
+394	gaskell-cranford	Elizabeth Gaskell	Cranford	1853
+289	grahame-wind-in-the-willows	Kenneth Grahame	The Wind in the Willows	1908
+2775	ford-good-soldier	Ford Madox Ford	The Good Soldier	1915
+558	buchan-thirty-nine-steps	John Buchan	The Thirty-Nine Steps	1915
+863	christie-styles	Agatha Christie	The Mysterious Affair at Styles	1920
+236	kipling-jungle-book	Rudyard Kipling	The Jungle Book	1894
+345	stoker-dracula	Bram Stoker	Dracula	1897
+16	barrie-peter-pan	J. M. Barrie	Peter Pan	1911
+76	twain-huckleberry-finn	Mark Twain	Adventures of Huckleberry Finn	1884
+209	james-turn-of-the-screw	Henry James	The Turn of the Screw	1898
+541	wharton-age-of-innocence	Edith Wharton	The Age of Innocence	1920
+64317	fitzgerald-gatsby	F. Scott Fitzgerald	The Great Gatsby	1925
+160	chopin-awakening	Kate Chopin	The Awakening	1899
+215	london-call-of-the-wild	Jack London	The Call of the Wild	1903
+242	cather-my-antonia	Willa Cather	My Antonia	1918
+73	crane-red-badge	Stephen Crane	The Red Badge of Courage	1895
+416	anderson-winesburg	Sherwood Anderson	Winesburg, Ohio	1919
+33	hawthorne-scarlet-letter	Nathaniel Hawthorne	The Scarlet Letter	1850
+543	lewis-main-street	Sinclair Lewis	Main Street	1920
+205	thoreau-walden	Henry David Thoreau	Walden	1854
+1228	darwin-origin-of-species	Charles Darwin	On the Origin of Species	1859
+34901	mill-on-liberty	John Stuart Mill	On Liberty	1859
+621	wjames-varieties	William James	The Varieties of Religious Experience	1902
+2376	washington-up-from-slavery	Booker T. Washington	Up from Slavery	1901
+2044	henry-adams-education	Henry Adams	The Education of Henry Adams	1907
+408	dubois-souls-of-black-folk	W. E. B. Du Bois	The Souls of Black Folk	1903
+5827	russell-problems-of-philosophy	Bertrand Russell	The Problems of Philosophy	1912
+755	bird-rocky-mountains	Isabella Bird	A Lady's Life in the Rocky Mountains	1879

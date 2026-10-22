@@ -2,6 +2,7 @@
 //! shared Burrows-Delta reference model, distance measures, calibration,
 //! voice-match scoring, lexicons, and the profile store.
 
+pub mod background;
 pub mod calibrate;
 pub mod checks;
 pub mod delta;
